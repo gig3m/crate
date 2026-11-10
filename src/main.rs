@@ -593,6 +593,7 @@ impl Aulos {
     /// Returns false once playback is over.
     fn poll_engine(&mut self, cx: &mut Context<Self>) -> bool {
         let (Some(engine), Some(now)) = (self.engine.as_ref(), self.now.as_mut()) else { return false };
+        let mut failed = false;
         while let Ok(ev) = engine.events.try_recv() {
             match ev {
                 AudioEvent::TrackStarted { index, source_rate, bits, at_us, .. } => {
@@ -607,7 +608,9 @@ impl Aulos {
                 AudioEvent::Finished => now.finished = true,
                 AudioEvent::Error(e) => {
                     eprintln!("[aulos] audio: {e}");
+                    self.status = format!("Audio error: {e}").into();
                     now.finished = true;
+                    failed = true;
                 }
                 AudioEvent::FirstAudio { ms_since_play } => {
                     eprintln!("[aulos] first audio {ms_since_play:.0} ms");
@@ -647,7 +650,12 @@ impl Aulos {
             let _ = self.mpris.send(MprisUpdate::Status { playing: false, stopped: true });
         }
         cx.notify();
-        !now.finished
+        let keep = !now.finished;
+        if failed {
+            // Stop the pipeline; Drop stops both engine threads.
+            self.engine = None;
+        }
+        keep
     }
 
     /// Grid cells: the real library, or AULOS_ITEMS for the scroll benchmark.

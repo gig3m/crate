@@ -42,11 +42,12 @@ impl Source {
     }
 
     /// Open for decoding. For HTTP, a complete cached copy is used if present.
-    pub fn open(&self) -> anyhow::Result<Box<dyn MediaSource>> {
+    /// `stop` aborts a read that is waiting on the network.
+    pub fn open(&self, stop: Arc<AtomicBool>) -> anyhow::Result<Box<dyn MediaSource>> {
         match self {
             Source::File(p) => Ok(Box::new(File::open(p)?)),
             Source::Http { cache, .. } if cache.exists() => Ok(Box::new(File::open(cache)?)),
-            Source::Http { url, token, cache } => Ok(Box::new(Progressive::start(url, token, cache)?)),
+            Source::Http { url, token, cache } => Ok(Box::new(Progressive::start(url, token, cache, stop)?)),
         }
     }
 }
@@ -64,11 +65,33 @@ pub struct Progressive {
     file: File,
     pos: u64,
     st: Arc<DlState>,
+    /// Engine stop: unblocks reads waiting for bytes.
+    stop: Arc<AtomicBool>,
+    /// Set on drop: the downloader abandons this attempt and deletes its temp file.
+    cancel: Arc<AtomicBool>,
 }
 
+impl Drop for Progressive {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+    }
+}
+
+static ATTEMPT: AtomicU64 = AtomicU64::new(0);
+
 impl Progressive {
-    fn start(url: &str, token: &str, cache: &std::path::Path) -> anyhow::Result<Self> {
-        let part = cache.with_extension("part");
+    fn start(url: &str, token: &str, cache: &std::path::Path, stop: Arc<AtomicBool>) -> anyhow::Result<Self> {
+        // One temp file per attempt: overlapping downloads of the same track
+        // (seek, restart) never share or truncate each other's file.
+        // Request first, so a 404 or auth failure surfaces as itself.
+        let mut resp = reqwest::blocking::Client::new()
+            .get(url)
+            .header("X-Plex-Token", token)
+            .header("X-Plex-Client-Identifier", "aulos-spike")
+            .send()?
+            .error_for_status()?;
+        let n = ATTEMPT.fetch_add(1, Ordering::Relaxed);
+        let part = cache.with_extension(format!("part.{}.{n}", std::process::id()));
         let writer = File::create(&part)?;
         let reader = File::open(&part)?;
         let st = Arc::new(DlState {
@@ -79,21 +102,19 @@ impl Progressive {
             started: Instant::now(),
             first_byte_ms: AtomicU64::new(0),
         });
-        let (url, token, cache, st2) = (url.to_string(), token.to_string(), cache.to_path_buf(), st.clone());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (cache, st2, cancel2) = (cache.to_path_buf(), st.clone(), cancel.clone());
         std::thread::Builder::new().name("download".into()).spawn(move || {
             let res = (|| -> anyhow::Result<()> {
                 let mut w = writer;
-                let mut resp = reqwest::blocking::Client::new()
-                    .get(&url)
-                    .header("X-Plex-Token", &token)
-                    .header("X-Plex-Client-Identifier", "aulos-spike")
-                    .send()?
-                    .error_for_status()?;
                 if let Some(len) = resp.content_length() {
                     st2.total.store(len, Ordering::Release);
                 }
                 let mut buf = vec![0u8; 256 * 1024];
                 loop {
+                    if cancel2.load(Ordering::Acquire) {
+                        anyhow::bail!("cancelled");
+                    }
                     let n = resp.read(&mut buf)?;
                     if n == 0 {
                         break;
@@ -105,7 +126,15 @@ impl Progressive {
                     st2.written.fetch_add(n as u64, Ordering::Release);
                 }
                 w.flush()?;
-                std::fs::rename(&part, &cache)?;
+                let total = st2.total.load(Ordering::Acquire);
+                let got = st2.written.load(Ordering::Acquire);
+                anyhow::ensure!(total == 0 || got == total, "short download: {got} of {total} bytes");
+                if cache.exists() {
+                    // Another attempt already published this track.
+                    let _ = std::fs::remove_file(&part);
+                } else {
+                    std::fs::rename(&part, &cache)?;
+                }
                 eprintln!(
                     "[download] {} complete: {:.1} MB in {:?} (first byte {} ms)",
                     cache.display(),
@@ -116,11 +145,12 @@ impl Progressive {
                 Ok(())
             })();
             if let Err(e) = res {
+                let _ = std::fs::remove_file(&part);
                 *st2.error.lock().unwrap() = Some(format!("{e:#}"));
             }
             st2.done.store(true, Ordering::Release);
         })?;
-        Ok(Self { file: reader, pos: 0, st })
+        Ok(Self { file: reader, pos: 0, st, stop, cancel })
     }
 }
 
@@ -133,6 +163,9 @@ impl Read for Progressive {
                 let got = self.file.read_at(&mut buf[..n], self.pos)?;
                 self.pos += got as u64;
                 return Ok(got);
+            }
+            if self.stop.load(Ordering::Acquire) {
+                return Err(std::io::Error::other("stopped"));
             }
             if self.st.done.load(Ordering::Acquire) {
                 if let Some(e) = self.st.error.lock().unwrap().clone() {

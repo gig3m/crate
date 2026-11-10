@@ -48,9 +48,15 @@ pub struct Stats {
     pub got_data: AtomicBool,
     pub decoder_done: AtomicBool,
     /// Set by Engine::stop / Drop; decoder and PipeWire threads wind down.
-    pub stop: AtomicBool,
+    pub stop: Arc<AtomicBool>,
     /// Ring is being emptied on purpose ahead of a stream rebuild.
     pub rebuilding: AtomicBool,
+    /// The caller asked for pause; activation never overrides it.
+    pub paused: AtomicBool,
+    /// Set by the drained callback when a non-final drain completes.
+    pub drained: AtomicBool,
+    /// The pending drain is the end of the queue (quit after it).
+    pub final_drain: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -66,10 +72,12 @@ pub enum Event {
 enum Cmd {
     /// Rebuild the stream at `rate`, created inactive.
     Configure { rate: u32, ack: mpsc::Sender<()> },
-    /// Start pulling (sent once the ring holds enough audio).
+    /// The ring holds enough audio to start; actually starts unless paused.
     Activate,
+    /// Caller pause (false) / resume (true).
     SetActive(bool),
-    Drain,
+    /// Play out what the stream has queued. `last`: quit afterwards.
+    Drain { last: bool },
     Stop,
 }
 
@@ -129,13 +137,30 @@ impl Engine {
             std::thread::Builder::new()
                 .name("decoder".into())
                 .spawn(move || {
+                    let stop_tx = cmd_tx.clone();
                     if let Err(e) = decoder_thread(queue, start_ms, prod, cmd_tx, stats.clone(), ev_tx.clone()) {
                         let _ = ev_tx.send(Event::Error(format!("decoder: {e:#}")));
+                        // A fatal error ends the pipeline; nothing else would stop PipeWire.
+                        stats.stop.store(true, Ordering::Release);
+                        let _ = stop_tx.send(Cmd::Stop);
                     }
                     stats.decoder_done.store(true, Ordering::Release);
                 })?;
         }
         Ok(Self { stats, events, cmd })
+    }
+}
+
+/// Sleep-poll until `cond` holds. Returns false if the engine was stopped first.
+fn wait_for(stats: &Stats, mut cond: impl FnMut() -> bool) -> bool {
+    loop {
+        if stats.stop.load(Ordering::Acquire) {
+            return false;
+        }
+        if cond() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -148,16 +173,21 @@ fn decoder_thread(
     ev: mpsc::Sender<Event>,
 ) -> anyhow::Result<()> {
     let play_started = Instant::now();
+    let cap = prod.buffer().capacity();
     let mut cur_rate = 0u32;
+    // Whether Activate has been sent for the current stream (persists across
+    // same-rate tracks, so short tracks never leave the stream inactive).
+    let mut activated = false;
     let mut queued_frames = 0u64;
     let mut queued_us = 0u64;
     let mut scratch: Vec<f32> = Vec::new();
     let mut first_audio_reported = false;
+    let mut pending_reconnect: Option<(u32, u32, Instant)> = None;
     // Spike/testing aid: cap each track at N seconds.
     let track_limit: Option<f64> = std::env::var("AULOS_TRACK_LIMIT").ok().and_then(|v| v.parse().ok());
 
     for (index, src) in queue.into_iter().enumerate() {
-        let mss = MediaSourceStream::new(src.open()?, Default::default());
+        let mss = MediaSourceStream::new(src.open(stats.stop.clone())?, Default::default());
         let mut hint = Hint::new();
         if let Some(ext) = src.ext() {
             hint.with_extension(&ext);
@@ -178,41 +208,42 @@ fn decoder_thread(
         let rate = params.sample_rate.unwrap_or(48_000);
         let bits = params.bits_per_sample.unwrap_or(0);
 
-        let rebuilt = rate != cur_rate;
-        if rebuilt {
-            // Let everything queued at the old rate play out, then rebuild.
+        if rate != cur_rate {
             stats.rebuilding.store(true, Ordering::Release);
-            let t_wait = Instant::now();
-            while prod.slots() < prod.buffer().capacity() {
-                if stats.stop.load(Ordering::Acquire) {
+            if cur_rate != 0 {
+                // Start the old stream if a short track never reached prefill,
+                // let the ring empty, then drain PipeWire so the tail plays.
+                if !activated && prod.slots() < cap {
+                    let _ = cmd_tx.send(Cmd::Activate);
+                }
+                if !wait_for(&stats, || prod.slots() >= cap) {
                     return Ok(());
                 }
-                std::thread::sleep(Duration::from_millis(1));
+                stats.drained.store(false, Ordering::Release);
+                let _ = cmd_tx.send(Cmd::Drain { last: false });
+                if !wait_for(&stats, || stats.drained.load(Ordering::Acquire)) {
+                    return Ok(());
+                }
             }
             let t_empty = Instant::now();
             stats.got_data.store(false, Ordering::Release);
             let (ack_tx, ack_rx) = mpsc::channel();
-            cmd_tx
-                .send(Cmd::Configure { rate, ack: ack_tx })
-                .map_err(|_| anyhow::anyhow!("pipewire thread gone"))?;
-            ack_rx.recv()?;
+            if cmd_tx.send(Cmd::Configure { rate, ack: ack_tx }).is_err() {
+                anyhow::bail!("pipewire thread gone");
+            }
+            // Bounded, stop-aware: the pipewire channel accepts sends even
+            // after its receiver is gone, so a plain recv() could hang forever.
+            loop {
+                match ack_rx.recv_timeout(Duration::from_millis(20)) {
+                    Ok(()) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) if !stats.stop.load(Ordering::Acquire) => {}
+                    _ => return Ok(()),
+                }
+            }
             stats.rebuilding.store(false, Ordering::Release);
+            activated = false;
             if cur_rate != 0 {
-                // Silence = ring empty -> first real audio at the new rate.
-                let from = cur_rate;
-                let ev2 = ev.clone();
-                let st = stats.clone();
-                std::thread::spawn(move || {
-                    while !st.got_data.load(Ordering::Acquire) {
-                        std::thread::sleep(Duration::from_micros(200));
-                    }
-                    let _ = ev2.send(Event::Reconnected {
-                        from,
-                        to: rate,
-                        silent_ms: t_empty.elapsed().as_secs_f64() * 1000.0,
-                    });
-                });
-                let _ = t_wait;
+                pending_reconnect = Some((cur_rate, rate, t_empty));
             }
             cur_rate = rate;
         }
@@ -231,7 +262,6 @@ fn decoder_thread(
             fmt.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(track.id) })?;
         }
 
-        let mut needs_activate = rebuilt;
         let prefill = (rate as usize / 10) * CHANNELS; // 100 ms
         let mut dec = symphonia::default::get_codecs()
             .make_audio_decoder(params, &AudioDecoderOptions::default().gapless(true))?;
@@ -256,6 +286,11 @@ fn decoder_thread(
             while off < scratch.len() {
                 let free = prod.slots();
                 if free == 0 {
+                    // A full ring on a stream that hasn't started can't drain: start it.
+                    if !activated {
+                        let _ = cmd_tx.send(Cmd::Activate);
+                        activated = true;
+                    }
                     if stats.stop.load(Ordering::Acquire) {
                         return Ok(());
                     }
@@ -268,32 +303,35 @@ fn decoder_thread(
                     .fill_from_iter(scratch[off..off + take].iter().copied());
                 off += take;
             }
-            if needs_activate && prod.buffer().capacity() - prod.slots() >= prefill {
-                needs_activate = false;
+            if !activated && cap - prod.slots() >= prefill {
+                activated = true;
                 let _ = cmd_tx.send(Cmd::Activate);
             }
             queued_frames += (scratch.len() / CHANNELS) as u64;
             queued_us += (scratch.len() / CHANNELS) as u64 * 1_000_000 / rate as u64;
             track_frames += (scratch.len() / CHANNELS) as u64;
-            if !first_audio_reported && stats.got_data.load(Ordering::Acquire) {
-                first_audio_reported = true;
-                let _ = ev.send(Event::FirstAudio {
-                    ms_since_play: play_started.elapsed().as_secs_f64() * 1000.0,
-                });
+            if stats.got_data.load(Ordering::Acquire) {
+                if !first_audio_reported {
+                    first_audio_reported = true;
+                    let _ = ev.send(Event::FirstAudio {
+                        ms_since_play: play_started.elapsed().as_secs_f64() * 1000.0,
+                    });
+                }
+                if let Some((from, to, t)) = pending_reconnect.take() {
+                    let _ = ev.send(Event::Reconnected { from, to, silent_ms: t.elapsed().as_secs_f64() * 1000.0 });
+                }
             }
         }
     }
-    let _ = cmd_tx.send(Cmd::Activate);
+    if !activated {
+        let _ = cmd_tx.send(Cmd::Activate);
+    }
     // Nothing more is coming: an empty ring from here on is the end, not an underrun.
     stats.decoder_done.store(true, Ordering::Release);
-    // Wait for the ring to empty, then ask PipeWire to drain its buffers.
-    while prod.slots() < prod.buffer().capacity() {
-        if stats.stop.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(2));
+    if !wait_for(&stats, || prod.slots() >= cap) {
+        return Ok(());
     }
-    let _ = cmd_tx.send(Cmd::Drain);
+    let _ = cmd_tx.send(Cmd::Drain { last: true });
     Ok(())
 }
 
@@ -414,9 +452,13 @@ fn pw_thread(
                     rt.stats.callbacks.fetch_add(1, Ordering::Relaxed);
                     rt.stats.max_cb_ns.fetch_max(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 })
-                .drained(move |_, _| {
-                    let _ = ev2.send(Event::Finished);
-                    ml.quit();
+                .drained(move |_, rt| {
+                    if rt.stats.final_drain.load(Ordering::Acquire) {
+                        let _ = ev2.send(Event::Finished);
+                        ml.quit();
+                    } else {
+                        rt.stats.drained.store(true, Ordering::Release);
+                    }
                 })
                 .register()?;
             let values = format_param(rate);
@@ -438,10 +480,22 @@ fn pw_thread(
     let live2 = live.clone();
     let ev2 = ev.clone();
     let ml_stop = mainloop.clone();
+    let stats2 = stats.clone();
+    // The stream runs only when it is buffered (ready) AND the caller hasn't paused.
+    let ready = std::rc::Rc::new(std::cell::Cell::new(false));
+    let apply = {
+        let (live, ready, stats) = (live.clone(), ready.clone(), stats.clone());
+        move || {
+            if let Some((s, _)) = live.borrow().as_ref() {
+                let _ = s.set_active(ready.get() && !stats.paused.load(Ordering::Acquire));
+            }
+        }
+    };
     let _rx = cmd_rx.attach(mainloop.loop_(), move |cmd| match cmd {
         Cmd::Configure { rate, ack } => {
-            // Drop the old stream first so the RT side releases the ring.
+            // The old stream was drained by the decoder before this arrives.
             live2.borrow_mut().take();
+            ready.set(false);
             match build(rate) {
                 Ok(l) => *live2.borrow_mut() = Some(l),
                 Err(e) => {
@@ -451,22 +505,28 @@ fn pw_thread(
             let _ = ack.send(());
         }
         Cmd::Activate => {
-            if let Some((s, _)) = live2.borrow().as_ref() {
-                let _ = s.set_active(true);
-            }
+            ready.set(true);
+            apply();
         }
         Cmd::SetActive(on) => {
-            if let Some((s, _)) = live2.borrow().as_ref() {
-                let _ = s.set_active(on);
-            }
+            stats2.paused.store(!on, Ordering::Release);
+            apply();
         }
         Cmd::Stop => {
             live2.borrow_mut().take();
             ml_stop.quit();
         }
-        Cmd::Drain => {
-            if let Some((s, _)) = live2.borrow().as_ref() {
-                let _ = s.flush(true);
+        Cmd::Drain { last } => {
+            stats2.final_drain.store(last, Ordering::Release);
+            let flushed = live2.borrow().as_ref().map(|(s, _)| s.flush(true).is_ok()).unwrap_or(false);
+            if !flushed {
+                // No stream to drain: complete immediately.
+                if last {
+                    let _ = ev2.send(Event::Finished);
+                    ml_stop.quit();
+                } else {
+                    stats2.drained.store(true, Ordering::Release);
+                }
             }
         }
     });
