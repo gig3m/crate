@@ -30,7 +30,12 @@ use aulos_spike::audio::{Engine, Event as AudioEvent, Source};
 use mpris::{Transport, Update as MprisUpdate};
 use plex::{Album, ArtRequest, ArtResult, Track, TracksRequest};
 
-gpui::actions!(aulos, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack]);
+gpui::actions!(aulos, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back]);
+
+enum View {
+    Library,
+    Album { ix: usize, tracks: Option<Vec<Track>> },
+}
 use theme::Theme;
 
 const CARD_W: f32 = 184.0;
@@ -62,6 +67,8 @@ struct Aulos {
     autoplay: Option<usize>,
     /// Bumped on every engine start so stale poll loops exit.
     play_gen: u64,
+    view: View,
+    album_scroll: gpui::ScrollHandle,
     mpris: tokio::sync::mpsc::UnboundedSender<MprisUpdate>,
     focus: gpui::FocusHandle,
 }
@@ -119,6 +126,7 @@ impl Aulos {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let (theme, theme_gen) = Theme::load();
+        apply_component_theme(&theme, Some(window), cx);
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search, play, or run a command"));
 
         // Albums arrive from the tokio side thread; awaited on GPUI's executor.
@@ -131,6 +139,9 @@ impl Aulos {
                         this.albums = albums;
                         if let Some(ix) = this.autoplay.take() {
                             this.play_album(ix, cx);
+                        } else if let Ok(key) = std::env::var("AULOS_OPEN_KEY")
+                            && let Some(ix) = this.albums.iter().position(|a| a.rating_key == key) {
+                                this.open_album(ix, cx);
                         } else if let Ok(key) = std::env::var("AULOS_AUTOPLAY_KEY")
                             && let Some(ix) = this.albums.iter().position(|a| a.rating_key == key) {
                                 this.play_album(ix, cx);
@@ -179,6 +190,7 @@ impl Aulos {
                         if gen_now != this.theme_gen {
                             let (t, g) = Theme::load();
                             eprintln!("[aulos] theme changed -> accent {:06x}", t.accent);
+                            apply_component_theme(&t, None, cx);
                             this.theme = t;
                             this.theme_gen = g;
                             cx.notify();
@@ -227,52 +239,90 @@ impl Aulos {
             now: None,
             autoplay: std::env::var("AULOS_AUTOPLAY").ok().and_then(|v| v.parse().ok()),
             play_gen: 0,
+            view: View::Library,
+            album_scroll: gpui::ScrollHandle::new(),
             mpris,
             focus,
         }
     }
 
-    fn play_album(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(album) = self.album(ix).cloned() else { return };
-        // Make sure the cover is on its way (MPRIS and the player bar need it).
+    fn request_art(&mut self, album: &Album) {
         if !album.thumb.is_empty() && !self.art.contains_key(&album.thumb) && self.requested.insert(album.thumb.clone()) {
             let _ = self.art_tx.send(ArtRequest { thumb: album.thumb.clone() });
         }
+    }
+
+    /// Fetch an album's tracks, then hand them to `f` on the UI thread.
+    fn with_tracks(
+        &mut self,
+        album: Album,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Self, Album, Vec<Track>, &mut Context<Self>) + 'static,
+    ) {
         let (reply, rx) = tokio::sync::oneshot::channel();
         let _ = self.tracks_tx.send(TracksRequest { album_key: album.rating_key.clone(), reply });
-        self.status = format!("Loading {}…", album.title).into();
-        cx.notify();
         cx.spawn(async move |this, cx| {
-            let tracks = match rx.await {
-                Ok(Ok(t)) if !t.is_empty() => t,
-                Ok(Ok(_)) => return,
-                Ok(Err(e)) => {
-                    eprintln!("[aulos] tracks: {e:#}");
-                    return;
+            match rx.await {
+                Ok(Ok(t)) => {
+                    this.update(cx, |this, cx| f(this, album, t, cx)).ok();
                 }
-                Err(_) => return,
-            };
-            this.update(cx, |this, cx| {
-                this.write_art_for_mpris(&album);
-                this.now = Some(Now {
-                    album,
-                    tracks,
-                    formats: HashMap::new(),
-                    start_idx: 0,
-                    start_ms: 0,
-                    boundaries: Vec::new(),
-                    idx: 0,
-                    elapsed_ms: 0,
-                    graph_rate: 0,
-                    paused: false,
-                    finished: false,
-                    sent_idx: None,
-                });
-                this.play_from(0, 0, cx);
-            })
-            .ok();
+                Ok(Err(e)) => eprintln!("[aulos] tracks: {e:#}"),
+                Err(_) => {}
+            }
         })
         .detach();
+    }
+
+    fn open_album(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(album) = self.album(ix).cloned() else { return };
+        self.request_art(&album);
+        self.view = View::Album { ix, tracks: None };
+        self.album_scroll = gpui::ScrollHandle::new();
+        cx.notify();
+        self.with_tracks(album, cx, move |this, _album, tracks, cx| {
+            if let View::Album { ix: cur, tracks: slot } = &mut this.view {
+                if *cur == ix {
+                    // Test hook: behave as if track N (1-based) was clicked.
+                    let auto = std::env::var("AULOS_PLAY_TRACK").ok().and_then(|v| v.parse::<usize>().ok());
+                    *slot = Some(tracks.clone());
+                    if let (Some(n), Some(album)) = (auto, this.album(ix).cloned()) {
+                        this.play_tracks(album, tracks, n.saturating_sub(1), cx);
+                    }
+                    cx.notify();
+                }
+            }
+        });
+    }
+
+    fn play_album(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(album) = self.album(ix).cloned() else { return };
+        self.request_art(&album);
+        self.status = format!("Loading {}…", album.title).into();
+        cx.notify();
+        self.with_tracks(album, cx, |this, album, tracks, cx| {
+            if !tracks.is_empty() {
+                this.play_tracks(album, tracks, 0, cx);
+            }
+        });
+    }
+
+    fn play_tracks(&mut self, album: Album, tracks: Vec<Track>, start: usize, cx: &mut Context<Self>) {
+        self.write_art_for_mpris(&album);
+        self.now = Some(Now {
+            album,
+            tracks,
+            formats: HashMap::new(),
+            start_idx: 0,
+            start_ms: 0,
+            boundaries: Vec::new(),
+            idx: start,
+            elapsed_ms: 0,
+            graph_rate: 0,
+            paused: false,
+            finished: false,
+            sent_idx: None,
+        });
+        self.play_from(start, 0, cx);
     }
 
     fn art_path(album: &Album) -> std::path::PathBuf {
@@ -552,7 +602,7 @@ impl Aulos {
                             .child(a.year.clone()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.play_album(ix, cx);
+                        this.open_album(ix, cx);
                     })),
             );
         }
@@ -562,6 +612,159 @@ impl Aulos {
             .flex()
             .gap(px(GAP))
             .children(cards)
+    }
+}
+
+/// Map Omarchy colors onto gpui-component's theme so its controls match.
+fn apply_component_theme(t: &Theme, window: Option<&mut Window>, cx: &mut App) {
+    use gpui_component::theme::{Theme as CTheme, ThemeMode};
+    CTheme::change(ThemeMode::Dark, window, cx);
+    let c = |x: u32| -> gpui::Hsla { rgb(x).into() };
+    CTheme::update(cx, |th| {
+        let k = &mut th.colors;
+        k.background = c(t.base);
+        k.foreground = c(t.text);
+        k.input = c(t.border);
+        k.border = c(t.border);
+        k.ring = c(t.accent);
+        k.caret = c(t.accent);
+        k.primary = c(t.accent);
+        k.primary_foreground = c(t.base);
+        k.muted = c(t.raised);
+        k.muted_foreground = c(t.muted);
+        k.accent = c(t.raised);
+        k.accent_foreground = c(t.text_strong);
+        k.popover = c(t.surface);
+        k.popover_foreground = c(t.text);
+        k.secondary = c(t.surface);
+        k.secondary_foreground = c(t.text);
+        k.list = c(t.surface);
+        k.list_hover = c(t.raised);
+        k.list_active = c(t.raised);
+        k.scrollbar_thumb = c(t.border);
+    });
+}
+
+impl Aulos {
+    fn album_view(&self, ix: usize, tracks: Option<&Vec<Track>>, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(album) = self.album(ix).cloned() else { return div().into_any_element() };
+        let cover = match self.art.get(&album.thumb).cloned() {
+            Some(i) => img(i).size(px(232.0)).flex_none().rounded(px(10.0)).object_fit(ObjectFit::Cover).into_any_element(),
+            None => div().size(px(232.0)).flex_none().rounded(px(10.0)).bg(rgb(t.raised)).into_any_element(),
+        };
+        let playing_here = self.now.as_ref().filter(|n| n.album.rating_key == album.rating_key).map(|n| n.idx);
+        let total_ms: u64 = tracks.map(|v| v.iter().map(|t| t.duration_ms).sum()).unwrap_or(0);
+        let meta = match tracks {
+            Some(v) => format!("{} · {} tracks · {} min", album.artist, v.len(), total_ms / 60_000),
+            None => format!("{} · loading tracks…", album.artist),
+        };
+        let play_btn = div()
+            .id("album-play")
+            .h(px(40.0))
+            .px(px(22.0))
+            .flex()
+            .items_center()
+            .rounded(px(20.0))
+            .bg(rgb(t.accent))
+            .text_color(rgb(t.base))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .cursor_pointer()
+            .child("Play")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let View::Album { tracks: Some(tr), .. } = &this.view {
+                    if let Some(a) = this.album(ix).cloned() {
+                        let tr = tr.clone();
+                        this.play_tracks(a, tr, 0, cx);
+                    }
+                }
+            }));
+        let back_btn = div()
+            .id("album-back")
+            .h(px(40.0))
+            .px(px(16.0))
+            .flex()
+            .items_center()
+            .rounded(px(20.0))
+            .border_1()
+            .border_color(rgb(t.border))
+            .text_color(rgb(t.text))
+            .cursor_pointer()
+            .child("Back")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.view = View::Library;
+                cx.notify();
+            }));
+        let header = div()
+            .flex()
+            .gap(px(28.0))
+            .items_end()
+            .child(cover)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .min_w_0()
+                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(format!("ALBUM · {}", album.year)))
+                    .child(
+                        div()
+                            .text_size(px(40.0))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgb(t.text_strong))
+                            .child(album.title.clone()),
+                    )
+                    .child(div().text_size(px(15.0)).text_color(rgb(t.text)).child(meta))
+                    .child(div().flex().gap(px(10.0)).mt(px(8.0)).child(play_btn).child(back_btn)),
+            );
+        let rows: Vec<gpui::AnyElement> = tracks
+            .map(|v| {
+                v.iter()
+                    .enumerate()
+                    .map(|(i, tr)| {
+                        let playing = playing_here == Some(i);
+                        let color = if playing { t.accent } else { t.text };
+                        div()
+                            .id(("track", i))
+                            .h(px(44.0))
+                            .px(px(12.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(16.0))
+                            .rounded(px(8.0))
+                            .cursor_pointer()
+                            .when(playing, |d| d.bg(rgb(t.raised)))
+                            .hover(|d| d.bg(rgb(t.raised)))
+                            .child(div().w(px(28.0)).text_size(px(13.0)).text_color(rgb(if playing { t.accent } else { t.muted })).child(format!("{}", i + 1)))
+                            .child(div().flex_1().min_w_0().truncate().text_color(rgb(color)).child(tr.title.clone()))
+                            .child(div().text_size(px(13.0)).text_color(rgb(t.muted)).child(fmt_ms(tr.duration_ms)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let View::Album { tracks: Some(tr), .. } = &this.view {
+                                    if let Some(a) = this.album(ix).cloned() {
+                                        let tr = tr.clone();
+                                        this.play_tracks(a, tr, i, cx);
+                                    }
+                                }
+                            }))
+                            .into_any_element()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        div()
+            .id("album-view")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.album_scroll)
+            .px(px(PAD_X))
+            .pt(px(28.0))
+            .pb(px(40.0))
+            .flex()
+            .flex_col()
+            .gap(px(24.0))
+            .child(header)
+            .child(div().flex().flex_col().children(rows))
+            .into_any_element()
     }
 }
 
@@ -645,8 +848,8 @@ impl Aulos {
             })
             .collect();
         let cover = match art {
-            Some(i) => img(i).size(px(56.0)).rounded(px(6.0)).into_any_element(),
-            None => div().size(px(56.0)).rounded(px(6.0)).bg(rgb(t.raised)).into_any_element(),
+            Some(i) => img(i).size(px(56.0)).flex_none().rounded(px(6.0)).object_fit(ObjectFit::Cover).into_any_element(),
+            None => div().size(px(56.0)).flex_none().rounded(px(6.0)).bg(rgb(t.raised)).into_any_element(),
         };
         div()
             .h(px(88.0))
@@ -782,7 +985,7 @@ impl Render for Aulos {
             .flex_col()
             .gap(px(16.0))
             .child(div().w(px(520.0)).child(Input::new(&self.search)))
-            .child(
+            .when(matches!(self.view, View::Library), |d| d.child(
                 div()
                     .flex()
                     .items_baseline()
@@ -803,7 +1006,7 @@ impl Render for Aulos {
                                 self.total, self.status, self.cols
                             )),
                     ),
-            );
+            ));
 
         let grid = uniform_list(
             "albums",
@@ -830,6 +1033,10 @@ impl Render for Aulos {
             .on_action(cx.listener(|this, _: &PrevTrack, _, cx| this.transport(Transport::Prev, cx)))
             .on_action(cx.listener(|this, _: &SeekForward, _, cx| this.transport(Transport::Seek(10_000), cx)))
             .on_action(cx.listener(|this, _: &SeekBack, _, cx| this.transport(Transport::Seek(-10_000), cx)))
+            .on_action(cx.listener(|this, _: &Back, _, cx| {
+                this.view = View::Library;
+                cx.notify();
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -850,7 +1057,13 @@ impl Render for Aulos {
                             .flex()
                             .flex_col()
                             .child(header)
-                            .child(grid),
+                            .child(match &self.view {
+                                View::Library => grid.into_any_element(),
+                                View::Album { ix, tracks } => {
+                                    let (ix, tracks) = (*ix, tracks.clone());
+                                    self.album_view(ix, tracks.as_ref(), &t, cx)
+                                }
+                            }),
                     ),
             )
             .child(player);
@@ -894,6 +1107,7 @@ fn main() {
             gpui::KeyBinding::new("p", PrevTrack, Some("Aulos")),
             gpui::KeyBinding::new("right", SeekForward, Some("Aulos")),
             gpui::KeyBinding::new("left", SeekBack, Some("Aulos")),
+            gpui::KeyBinding::new("escape", Back, Some("Aulos")),
         ]);
         let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
         cx.open_window(
