@@ -9,6 +9,9 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Album {
     pub rating_key: String,
+    /// The artist's rating key (Plex parentRatingKey).
+    #[serde(default)]
+    pub artist_key: String,
     pub title: String,
     pub artist: String,
     pub year: String,
@@ -110,6 +113,20 @@ pub struct HubsRequest {
     pub reply: oneshot::Sender<anyhow::Result<Vec<HubRow>>>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ArtistInfo {
+    pub title: String,
+    pub summary: String,
+    pub thumb: String,
+    /// Most-played tracks in this library: (track, album key, album title, plays).
+    pub popular: Vec<(Track, String, String, u64)>,
+}
+
+pub struct ArtistRequest {
+    pub key: String,
+    pub reply: oneshot::Sender<anyhow::Result<ArtistInfo>>,
+}
+
 pub struct ArtResult {
     pub thumb: String,
     pub bytes: Option<Vec<u8>>,
@@ -167,6 +184,12 @@ struct Meta {
     media: Vec<Media>,
     #[serde(rename = "parentTitle", default)]
     parent_title: String,
+    #[serde(rename = "parentRatingKey", default)]
+    parent_rating_key: String,
+    #[serde(rename = "viewCount", default)]
+    view_count: Option<u64>,
+    #[serde(default)]
+    summary: String,
     #[serde(default)]
     year: Option<u32>,
     #[serde(default)]
@@ -208,6 +231,7 @@ impl Client {
             .metadata
             .into_iter()
             .map(|m| Album {
+                artist_key: m.parent_rating_key,
                 rating_key: m.rating_key,
                 title: m.title,
                 artist: m.parent_title,
@@ -315,6 +339,41 @@ impl Client {
             .collect())
     }
 
+    pub async fn artist(&self, key: &str, section: &str) -> anyhow::Result<ArtistInfo> {
+        let meta: Envelope = self.get(&format!("/library/metadata/{key}")).await?.json().await.context("artist")?;
+        let m = meta.mc.metadata.into_iter().next().ok_or_else(|| anyhow::anyhow!("no such artist"))?;
+        let top: Envelope = self
+            .get(&format!(
+                "/library/sections/{section}/all?type=10&artist.id={key}&sort=viewCount:desc&X-Plex-Container-Start=0&X-Plex-Container-Size=10"
+            ))
+            .await?
+            .json()
+            .await
+            .context("artist tracks")?;
+        let popular = top
+            .mc
+            .metadata
+            .into_iter()
+            .filter_map(|t| {
+                let part_key = t.media.first()?.part.first()?.key.clone();
+                let plays = t.view_count.unwrap_or(0);
+                Some((
+                    Track {
+                        rating_key: t.rating_key,
+                        title: t.title,
+                        artist: t.grandparent_title,
+                        duration_ms: t.duration.unwrap_or(0),
+                        part_key,
+                    },
+                    t.parent_rating_key,
+                    t.parent_title,
+                    plays,
+                ))
+            })
+            .collect();
+        Ok(ArtistInfo { title: m.title, summary: m.summary, thumb: m.thumb.unwrap_or_default(), popular })
+    }
+
     pub async fn art(&self, thumb: &str) -> anyhow::Result<Vec<u8>> {
         // Server-side resize to the size we draw at (2x for HiDPI).
         let url = format!(
@@ -371,7 +430,17 @@ pub async fn run(
     mut tracks_rx: mpsc::UnboundedReceiver<TracksRequest>,
     mut search_rx: mpsc::UnboundedReceiver<SearchRequest>,
     mut hubs_rx: mpsc::UnboundedReceiver<HubsRequest>,
+    mut artist_rx: mpsc::UnboundedReceiver<ArtistRequest>,
 ) {
+    {
+        let client = client.clone();
+        let section = section.clone();
+        tokio::spawn(async move {
+            while let Some(req) = artist_rx.recv().await {
+                let _ = req.reply.send(client.artist(&req.key, &section).await);
+            }
+        });
+    }
     {
         let client = client.clone();
         let section = section.clone();

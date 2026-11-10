@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 
 use aulos_spike::audio::{Engine, Event as AudioEvent, Source};
 use mpris::{Transport, Update as MprisUpdate};
-use plex::{Album, ArtRequest, ArtResult, HubRow, HubsRequest, SearchHit, SearchRequest, Track, TracksRequest};
+use plex::{Album, ArtRequest, ArtResult, ArtistInfo, ArtistRequest, HubRow, HubsRequest, SearchHit, SearchRequest, Track, TracksRequest};
 
 gpui::actions!(aulos, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch]);
 
@@ -36,6 +36,7 @@ enum View {
     Home,
     Library,
     Album { ix: usize, tracks: Option<Vec<Track>> },
+    Artist { key: String, name: String, info: Option<ArtistInfo> },
 }
 use theme::Theme;
 
@@ -77,6 +78,7 @@ struct Aulos {
     /// Set after a hit is activated: next render clears the box and refocuses the app.
     reset_search: bool,
     home: Option<Vec<HubRow>>,
+    artist_tx: mpsc::UnboundedSender<ArtistRequest>,
     mpris: tokio::sync::mpsc::UnboundedSender<MprisUpdate>,
     focus: gpui::FocusHandle,
 }
@@ -123,6 +125,7 @@ impl Aulos {
         mpris: mpsc::UnboundedSender<MprisUpdate>,
         search_tx: mpsc::UnboundedSender<SearchRequest>,
         hubs_tx: mpsc::UnboundedSender<HubsRequest>,
+        artist_tx: mpsc::UnboundedSender<ArtistRequest>,
     ) -> Self {
         {
             let (reply, rx) = tokio::sync::oneshot::channel();
@@ -209,6 +212,8 @@ impl Aulos {
                         }
                         if let Some(ix) = this.autoplay.take() {
                             this.play_album(ix, cx);
+                        } else if let Ok(key) = std::env::var("AULOS_ARTIST_KEY") {
+                                this.open_artist(key, std::env::var("AULOS_ARTIST_NAME").unwrap_or_default(), cx);
                         } else if let Ok(key) = std::env::var("AULOS_OPEN_KEY")
                             && let Some(ix) = this.albums.iter().position(|a| a.rating_key == key) {
                                 this.open_album(ix, cx);
@@ -319,6 +324,7 @@ impl Aulos {
             hits: Vec::new(),
             reset_search: false,
             home: None,
+            artist_tx,
             mpris,
             focus,
         }
@@ -372,9 +378,7 @@ impl Aulos {
                 }
             }
             "artist" => {
-                if let Some(ix) = self.albums.iter().position(|a| a.artist == h.title) {
-                    self.open_album(ix, cx);
-                }
+                self.open_artist(h.rating_key.clone(), h.title.clone(), cx);
             }
             "track" => {
                 if let Some(album) = self.albums.iter().find(|a| a.rating_key == h.parent_key).cloned() {
@@ -419,6 +423,50 @@ impl Aulos {
             }
         })
         .detach();
+    }
+
+    fn open_artist(&mut self, key: String, name: String, cx: &mut Context<Self>) {
+        if key.is_empty() {
+            return;
+        }
+        let mine: Vec<Album> = self.albums.iter().filter(|a| a.artist_key == key).cloned().collect();
+        for a in &mine {
+            self.request_art(a);
+        }
+        self.view = View::Artist { key: key.clone(), name, info: None };
+        self.album_scroll = gpui::ScrollHandle::new();
+        cx.notify();
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        let _ = self.artist_tx.send(ArtistRequest { key: key.clone(), reply });
+        cx.spawn(async move |this, cx| match rx.await {
+            Ok(Ok(info)) => {
+                this.update(cx, |this, cx| {
+                    if !info.thumb.is_empty() && this.requested.insert(info.thumb.clone()) {
+                        let _ = this.art_tx.send(ArtRequest { thumb: info.thumb.clone() });
+                    }
+                    if let View::Artist { key: k, info: slot, .. } = &mut this.view
+                        && *k == key
+                    {
+                        *slot = Some(info);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+            Ok(Err(e)) => eprintln!("[aulos] artist: {e:#}"),
+            Err(_) => {}
+        })
+        .detach();
+    }
+
+    /// Play `track_key` in the context of its album.
+    fn play_track_in_album(&mut self, album_key: &str, track_key: String, cx: &mut Context<Self>) {
+        let Some(album) = self.albums.iter().find(|a| a.rating_key == album_key).cloned() else { return };
+        self.request_art(&album);
+        self.with_tracks(album, cx, move |this, album, tracks, cx| {
+            let start = tracks.iter().position(|t| t.rating_key == track_key).unwrap_or(0);
+            this.play_tracks(album, tracks, start, cx);
+        });
     }
 
     fn open_album(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -807,6 +855,138 @@ fn apply_component_theme(t: &Theme, window: Option<&mut Window>, cx: &mut App) {
 }
 
 impl Aulos {
+    fn artist_view(&self, key: &str, name: &str, info: Option<&ArtistInfo>, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut albums: Vec<(usize, Album)> = self
+            .albums
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.artist_key == key)
+            .map(|(i, a)| (i, a.clone()))
+            .collect();
+        albums.sort_by(|a, b| b.1.year.cmp(&a.1.year));
+        let photo = match info.and_then(|i| self.art.get(&i.thumb).cloned()) {
+            Some(i) => img(i).size(px(200.0)).flex_none().rounded(px(100.0)).object_fit(ObjectFit::Cover).into_any_element(),
+            None => div().size(px(200.0)).flex_none().rounded(px(100.0)).bg(rgb(t.raised)).into_any_element(),
+        };
+        let header = div()
+            .flex()
+            .gap(px(28.0))
+            .items_end()
+            .child(photo)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .min_w_0()
+                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child("ARTIST"))
+                    .child(div().text_size(px(44.0)).font_weight(gpui::FontWeight::BOLD).text_color(rgb(t.text_strong)).child(
+                        if name.is_empty() { info.map(|i| i.title.clone()).unwrap_or_default() } else { name.to_string() },
+                    ))
+                    .child(div().text_size(px(15.0)).text_color(rgb(t.text)).child(format!("{} albums in your library", albums.len())))
+                    .child(
+                        div()
+                            .id("artist-back")
+                            .mt(px(8.0))
+                            .h(px(40.0))
+                            .px(px(16.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(20.0))
+                            .border_1()
+                            .border_color(rgb(t.border))
+                            .text_color(rgb(t.text))
+                            .cursor_pointer()
+                            .child("Back")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.view = View::Library;
+                                cx.notify();
+                            })),
+                    ),
+            );
+        let popular: Vec<gpui::AnyElement> = info
+            .map(|i| {
+                i.popular
+                    .iter()
+                    .take(8)
+                    .enumerate()
+                    .map(|(n, (tr, album_key, album_title, plays))| {
+                        let (ak, tk) = (album_key.clone(), tr.rating_key.clone());
+                        div()
+                            .id(("pop", n))
+                            .h(px(44.0))
+                            .px(px(12.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(16.0))
+                            .rounded(px(8.0))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgb(t.raised)))
+                            .child(div().w(px(24.0)).text_size(px(13.0)).text_color(rgb(t.muted)).child(format!("{}", n + 1)))
+                            .child(div().flex_1().min_w_0().truncate().text_color(rgb(t.text)).child(tr.title.clone()))
+                            .child(div().w(px(260.0)).truncate().text_size(px(13.0)).text_color(rgb(t.muted)).child(album_title.clone()))
+                            .child(div().w(px(70.0)).text_size(px(12.0)).text_color(rgb(t.muted)).child(format!("{plays} plays")))
+                            .child(div().w(px(44.0)).text_size(px(13.0)).text_color(rgb(t.muted)).child(fmt_ms(tr.duration_ms)))
+                            .on_click(cx.listener(move |this, _, _, cx| this.play_track_in_album(&ak, tk.clone(), cx)))
+                            .into_any_element()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cards: Vec<gpui::AnyElement> = albums
+            .iter()
+            .map(|(ix, a)| {
+                let ix = *ix;
+                let cover = match self.art.get(&a.thumb).cloned() {
+                    Some(i) => img(i).size(px(ART)).rounded(px(8.0)).object_fit(ObjectFit::Cover).into_any_element(),
+                    None => div().size(px(ART)).rounded(px(8.0)).bg(rgb(t.raised)).into_any_element(),
+                };
+                div()
+                    .id(("aa", ix))
+                    .w(px(CARD_W))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .cursor_pointer()
+                    .child(cover)
+                    .child(div().text_size(px(14.0)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).truncate().child(a.title.clone()))
+                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(a.year.clone()))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_album(ix, cx)))
+                    .into_any_element()
+            })
+            .collect();
+        let section = |title: &str| div().text_size(px(20.0)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child(title.to_string());
+        let mut col = div()
+            .id("artist-view")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.album_scroll)
+            .px(px(PAD_X))
+            .pt(px(28.0))
+            .pb(px(40.0))
+            .flex()
+            .flex_col()
+            .gap(px(28.0))
+            .child(header);
+        if !popular.is_empty() {
+            col = col.child(div().flex().flex_col().gap(px(6.0)).child(section("Popular in your library")).children(popular));
+        }
+        col = col.child(div().flex().flex_col().gap(px(14.0)).child(section("Albums")).child(div().flex().flex_wrap().gap(px(GAP)).children(cards)));
+        if let Some(i) = info.filter(|i| !i.summary.is_empty()) {
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .max_w(px(820.0))
+                    .child(section("About"))
+                    .child(div().text_size(px(14.0)).line_height(px(22.0)).text_color(rgb(t.text)).child(i.summary.clone())),
+            );
+        }
+        col.into_any_element()
+    }
+
     fn home_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let mut col = div()
             .id("home")
@@ -901,11 +1081,7 @@ impl Aulos {
                     self.open_album(ix, cx);
                 }
             }
-            "artist" => {
-                if let Some(ix) = self.albums.iter().position(|a| a.artist == title) {
-                    self.open_album(ix, cx);
-                }
-            }
+            "artist" => self.open_artist(key.to_string(), title.to_string(), cx),
             _ => eprintln!("[aulos] station {title:?} not implemented yet"),
         }
     }
@@ -1031,7 +1207,17 @@ impl Aulos {
                             .text_color(rgb(t.text_strong))
                             .child(album.title.clone()),
                     )
-                    .child(div().text_size(px(15.0)).text_color(rgb(t.text)).child(meta))
+                    .child({
+                        let (ak, an) = (album.artist_key.clone(), album.artist.clone());
+                        div()
+                            .id("album-artist")
+                            .text_size(px(15.0))
+                            .text_color(rgb(t.text))
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(rgb(t.accent)))
+                            .child(meta)
+                            .on_click(cx.listener(move |this, _, _, cx| this.open_artist(ak.clone(), an.clone(), cx)))
+                    })
                     .child(div().flex().gap(px(10.0)).mt(px(8.0)).child(play_btn).child(back_btn)),
             );
         let rows: Vec<gpui::AnyElement> = tracks
@@ -1288,7 +1474,7 @@ impl Render for Aulos {
             .children(nav.iter().enumerate().map(|(i, n)| {
                 let active = match self.view {
                     View::Home => i == 0,
-                    View::Library | View::Album { .. } => i == 1,
+                    View::Library | View::Album { .. } | View::Artist { .. } => i == 1,
                 };
                 div()
                     .id(("nav", i))
@@ -1400,6 +1586,10 @@ impl Render for Aulos {
                             .child(match &self.view {
                                 _ if !self.search_query.is_empty() => self.search_view(&t, cx),
                                 View::Home => self.home_view(&t, cx),
+                                View::Artist { key, name, info } => {
+                                    let (key, name, info) = (key.clone(), name.clone(), info.clone());
+                                    self.artist_view(&key, &name, info.as_ref(), &t, cx)
+                                }
                                 View::Library => grid.into_any_element(),
                                 View::Album { ix, tracks } => {
                                     let (ix, tracks) = (*ix, tracks.clone());
@@ -1429,6 +1619,7 @@ fn main() {
     let (transport_tx, transport_rx) = mpsc::unbounded_channel::<Transport>();
     let (search_tx, search_rx) = mpsc::unbounded_channel::<SearchRequest>();
     let (hubs_tx, hubs_rx) = mpsc::unbounded_channel::<HubsRequest>();
+    let (artist_tx, artist_rx) = mpsc::unbounded_channel::<ArtistRequest>();
     let mpris_tx = mpris::start(transport_tx);
     let client = plex::Client::new(base, token);
     std::thread::Builder::new()
@@ -1439,7 +1630,7 @@ fn main() {
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(plex::run(client, section, albums_tx, art_rx_req, art_res_tx, tracks_rx, search_rx, hubs_rx));
+            rt.block_on(plex::run(client, section, albums_tx, art_rx_req, art_res_tx, tracks_rx, search_rx, hubs_rx, artist_rx));
         })
         .unwrap();
 
@@ -1462,7 +1653,7 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                let view = cx.new(|cx| Aulos::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds, transport_rx, mpris_tx, search_tx, hubs_tx));
+                let view = cx.new(|cx| Aulos::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds, transport_rx, mpris_tx, search_tx, hubs_tx, artist_tx));
                 cx.new(|cx| gpui_component::Root::new(view, window, cx))
             },
         )
