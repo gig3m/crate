@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Album {
     pub rating_key: String,
     pub title: String,
@@ -337,10 +337,35 @@ fn urlencode(s: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// ~/.cache/aulos (or $XDG_CACHE_HOME/aulos).
+pub fn cache_dir() -> std::path::PathBuf {
+    let base = std::env::var("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache"));
+    base.join("aulos")
+}
+
+fn art_cache_path(thumb: &str) -> std::path::PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    thumb.hash(&mut h);
+    cache_dir().join("art").join(format!("{:016x}.jpg", h.finish()))
+}
+
+/// Write via a temp file + rename so a crash never leaves a torn file.
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(tmp, path)
+}
+
 pub async fn run(
     client: Client,
     section: String,
-    albums_tx: oneshot::Sender<anyhow::Result<Vec<Album>>>,
+    albums_tx: mpsc::UnboundedSender<(&'static str, anyhow::Result<Vec<Album>>)>,
     mut art_rx: mpsc::UnboundedReceiver<ArtRequest>,
     art_tx: mpsc::UnboundedSender<ArtResult>,
     mut tracks_rx: mpsc::UnboundedReceiver<TracksRequest>,
@@ -373,12 +398,24 @@ pub async fn run(
             }
         });
     }
+    // Cache first: paint from disk, then refresh from the server.
+    let lib_cache = cache_dir().join(format!("albums-{section}.json"));
+    let t = std::time::Instant::now();
+    if let Ok(bytes) = std::fs::read(&lib_cache)
+        && let Ok(cached) = serde_json::from_slice::<Vec<Album>>(&bytes)
+    {
+        eprintln!("[aulos] cached library: {} albums in {:?}", cached.len(), t.elapsed());
+        let _ = albums_tx.send(("cache", Ok(cached)));
+    }
     let t = std::time::Instant::now();
     let albums = client.albums(&section).await;
     if let Ok(a) = &albums {
         eprintln!("[aulos] fetched {} albums in {:?}", a.len(), t.elapsed());
+        if let Ok(json) = serde_json::to_vec(a) {
+            let _ = write_atomic(&lib_cache, &json);
+        }
     }
-    let _ = albums_tx.send(albums);
+    let _ = albums_tx.send(("plex", albums));
 
     let limit = Arc::new(Semaphore::new(8));
     while let Some(req) = art_rx.recv().await {
@@ -386,7 +423,17 @@ pub async fn run(
         let tx = art_tx.clone();
         let permit = limit.clone().acquire_owned().await.unwrap();
         tokio::spawn(async move {
-            let bytes = client.art(&req.thumb).await;
+            let path = art_cache_path(&req.thumb);
+            let bytes = match tokio::fs::read(&path).await {
+                Ok(b) if !b.is_empty() => Ok(b),
+                _ => {
+                    let r = client.art(&req.thumb).await;
+                    if let Ok(b) = &r {
+                        let _ = write_atomic(&path, b);
+                    }
+                    r
+                }
+            };
             if let Err(e) = &bytes {
                 eprintln!("[aulos] art {}: {e:#}", req.thumb);
             }

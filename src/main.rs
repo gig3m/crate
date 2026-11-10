@@ -116,7 +116,7 @@ impl Aulos {
         cx: &mut Context<Self>,
         art_tx: mpsc::UnboundedSender<ArtRequest>,
         mut art_rx: mpsc::UnboundedReceiver<ArtResult>,
-        albums_rx: tokio::sync::oneshot::Receiver<anyhow::Result<Vec<Album>>>,
+        mut albums_rx: mpsc::UnboundedReceiver<(&'static str, anyhow::Result<Vec<Album>>)>,
         tracks_tx: mpsc::UnboundedSender<TracksRequest>,
         plex: (String, String),
         mut transport_rx: mpsc::UnboundedReceiver<Transport>,
@@ -179,13 +179,36 @@ impl Aulos {
         .detach();
 
         // Albums arrive from the tokio side thread; awaited on GPUI's executor.
+        // First from the disk cache (if any), then fresh from Plex.
         cx.spawn(async move |this, cx| {
-            let res = albums_rx.await;
-            this.update(cx, |this, cx| {
+            let mut first = true;
+            while let Some((from, res)) = albums_rx.recv().await {
+            let ok = this.update(cx, |this, cx| {
                 match res {
-                    Ok(Ok(albums)) => {
-                        this.status = format!("{} albums from Plex", albums.len()).into();
+                    Ok(albums) => {
+                        if !first && albums == this.albums {
+                            this.status = format!("{} albums · up to date", albums.len()).into();
+                            cx.notify();
+                            return;
+                        }
+                        this.status = format!("{} albums ({from})", albums.len()).into();
+                        // Keep an open album page pointing at the same album.
+                        let open_key = match &this.view {
+                            View::Album { ix, .. } => this.albums.get(*ix).map(|a| a.rating_key.clone()),
+                            _ => None,
+                        };
                         this.albums = albums;
+                        if let Some(key) = open_key
+                            && let View::Album { ix, .. } = &mut this.view
+                        {
+                            if let Some(n) = this.albums.iter().position(|a| a.rating_key == key) {
+                                *ix = n;
+                            }
+                        }
+                        if !std::mem::replace(&mut first, false) {
+                            cx.notify();
+                            return;
+                        }
                         if let Some(ix) = this.autoplay.take() {
                             this.play_album(ix, cx);
                         } else if let Ok(key) = std::env::var("AULOS_OPEN_KEY")
@@ -196,12 +219,14 @@ impl Aulos {
                                 this.play_album(ix, cx);
                             }
                     }
-                    Ok(Err(e)) => this.status = format!("Plex error: {e:#}").into(),
-                    Err(_) => this.status = "Plex task dropped".into(),
+                    Err(e) => this.status = format!("Plex error: {e:#}").into(),
                 }
                 cx.notify();
-            })
-            .ok();
+            });
+            if ok.is_err() {
+                break;
+            }
+            }
         })
         .detach();
 
@@ -1392,7 +1417,7 @@ fn main() {
     // tokio lives on its own threads; GPUI never sees it except via channels.
     let (art_tx, art_rx_req) = mpsc::unbounded_channel::<ArtRequest>();
     let (art_res_tx, art_rx) = mpsc::unbounded_channel::<ArtResult>();
-    let (albums_tx, albums_rx) = tokio::sync::oneshot::channel();
+    let (albums_tx, albums_rx) = mpsc::unbounded_channel();
     let (tracks_tx, tracks_rx) = mpsc::unbounded_channel::<TracksRequest>();
     let plex_creds = (base.clone(), token.clone());
     let (transport_tx, transport_rx) = mpsc::unbounded_channel::<Transport>();
