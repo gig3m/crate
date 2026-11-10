@@ -78,6 +78,8 @@ enum Cmd {
     SetActive(bool),
     /// Play out what the stream has queued. `last`: quit afterwards.
     Drain { last: bool },
+    /// End without draining (the stream never received audio).
+    Finish,
     Stop,
 }
 
@@ -183,6 +185,9 @@ fn decoder_thread(
     let mut scratch: Vec<f32> = Vec::new();
     let mut first_audio_reported = false;
     let mut pending_reconnect: Option<(u32, u32, Instant)> = None;
+    // Frames pushed since the current stream was built: a stream that never
+    // got audio has nothing to drain (and an inactive one never would).
+    let mut stream_frames = 0u64;
     // Spike/testing aid: cap each track at N seconds.
     let track_limit: Option<f64> = std::env::var("AULOS_TRACK_LIMIT").ok().and_then(|v| v.parse().ok());
 
@@ -219,10 +224,12 @@ fn decoder_thread(
                 if !wait_for(&stats, || prod.slots() >= cap) {
                     return Ok(());
                 }
-                stats.drained.store(false, Ordering::Release);
-                let _ = cmd_tx.send(Cmd::Drain { last: false });
-                if !wait_for(&stats, || stats.drained.load(Ordering::Acquire)) {
-                    return Ok(());
+                if stream_frames > 0 {
+                    stats.drained.store(false, Ordering::Release);
+                    let _ = cmd_tx.send(Cmd::Drain { last: false });
+                    if !wait_for(&stats, || stats.drained.load(Ordering::Acquire)) {
+                        return Ok(());
+                    }
                 }
             }
             let t_empty = Instant::now();
@@ -242,6 +249,7 @@ fn decoder_thread(
             }
             stats.rebuilding.store(false, Ordering::Release);
             activated = false;
+            stream_frames = 0;
             if cur_rate != 0 {
                 pending_reconnect = Some((cur_rate, rate, t_empty));
             }
@@ -308,6 +316,7 @@ fn decoder_thread(
                 let _ = cmd_tx.send(Cmd::Activate);
             }
             queued_frames += (scratch.len() / CHANNELS) as u64;
+            stream_frames += (scratch.len() / CHANNELS) as u64;
             queued_us += (scratch.len() / CHANNELS) as u64 * 1_000_000 / rate as u64;
             track_frames += (scratch.len() / CHANNELS) as u64;
             if stats.got_data.load(Ordering::Acquire) {
@@ -331,7 +340,7 @@ fn decoder_thread(
     if !wait_for(&stats, || prod.slots() >= cap) {
         return Ok(());
     }
-    let _ = cmd_tx.send(Cmd::Drain { last: true });
+    let _ = cmd_tx.send(if stream_frames > 0 { Cmd::Drain { last: true } } else { Cmd::Finish });
     Ok(())
 }
 
@@ -377,10 +386,13 @@ fn pw_thread(
     let core = context.connect_rc(None)?;
 
     let live: std::rc::Rc<std::cell::RefCell<Option<Live>>> = Default::default();
+    // True between flush(drain) and the drained callback. PipeWire's
+    // set_active cancels a pending drain, so it must be re-armed after one.
+    let draining = std::rc::Rc::new(std::cell::Cell::new(false));
 
     let build = {
-        let (core, cons, stats, target, mainloop, ev) =
-            (core.clone(), cons.clone(), stats.clone(), target.clone(), mainloop.clone(), ev.clone());
+        let (core, cons, stats, target, mainloop, ev, draining) =
+            (core.clone(), cons.clone(), stats.clone(), target.clone(), mainloop.clone(), ev.clone(), draining.clone());
         move |rate: u32| -> anyhow::Result<Live> {
             let mut props = properties! {
                 *pw::keys::MEDIA_TYPE => "Audio",
@@ -401,6 +413,7 @@ fn pw_thread(
             let stream: pw::stream::StreamBox<'static> = unsafe { std::mem::transmute(stream) };
             let ml = mainloop.clone();
             let ev2 = ev.clone();
+            let draining = draining.clone();
             let listener = stream
                 .add_local_listener_with_user_data(Rt { cons: cons.clone(), stats: stats.clone() })
                 .process(|stream, rt| {
@@ -453,6 +466,7 @@ fn pw_thread(
                     rt.stats.max_cb_ns.fetch_max(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 })
                 .drained(move |_, rt| {
+                    draining.set(false);
                     if rt.stats.final_drain.load(Ordering::Acquire) {
                         let _ = ev2.send(Event::Finished);
                         ml.quit();
@@ -481,13 +495,19 @@ fn pw_thread(
     let ev2 = ev.clone();
     let ml_stop = mainloop.clone();
     let stats2 = stats.clone();
+    let draining2 = draining.clone();
     // The stream runs only when it is buffered (ready) AND the caller hasn't paused.
     let ready = std::rc::Rc::new(std::cell::Cell::new(false));
     let apply = {
-        let (live, ready, stats) = (live.clone(), ready.clone(), stats.clone());
+        let (live, ready, stats, draining) = (live.clone(), ready.clone(), stats.clone(), draining.clone());
         move || {
             if let Some((s, _)) = live.borrow().as_ref() {
                 let _ = s.set_active(ready.get() && !stats.paused.load(Ordering::Acquire));
+                if draining.get() {
+                    // set_active cancelled the drain; re-arm it. If now paused,
+                    // it completes once playback resumes.
+                    let _ = s.flush(true);
+                }
             }
         }
     };
@@ -496,6 +516,7 @@ fn pw_thread(
             // The old stream was drained by the decoder before this arrives.
             live2.borrow_mut().take();
             ready.set(false);
+            draining2.set(false);
             match build(rate) {
                 Ok(l) => *live2.borrow_mut() = Some(l),
                 Err(e) => {
@@ -516,9 +537,14 @@ fn pw_thread(
             live2.borrow_mut().take();
             ml_stop.quit();
         }
+        Cmd::Finish => {
+            let _ = ev2.send(Event::Finished);
+            ml_stop.quit();
+        }
         Cmd::Drain { last } => {
             stats2.final_drain.store(last, Ordering::Release);
             let flushed = live2.borrow().as_ref().map(|(s, _)| s.flush(true).is_ok()).unwrap_or(false);
+            draining2.set(flushed);
             if !flushed {
                 // No stream to drain: complete immediately.
                 if last {

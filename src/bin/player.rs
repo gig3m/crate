@@ -34,8 +34,25 @@ fn main() -> anyhow::Result<()> {
     let st = engine.stats.clone();
     let mut tracks: Vec<(u64, u32, String)> = Vec::new();
     let mut reported = 0usize;
+    // Stress aid: pause/resume every N ms (exercises set_active during drains).
+    let toggle_ms: Option<u64> = std::env::var("AULOS_TOGGLE_MS").ok().and_then(|v| v.parse().ok());
+    let mut toggled_off = false;
+    let mut toggles = 0u64;
+    let toggle_for = std::env::var("AULOS_TOGGLE_FOR_S").ok().and_then(|v| v.parse::<f64>().ok());
+    let started = std::time::Instant::now();
     loop {
-        match engine.events.recv_timeout(Duration::from_millis(250)) {
+        let toggling = toggle_ms.is_some() && toggle_for.is_none_or(|f| started.elapsed().as_secs_f64() < f);
+        if !toggling && toggled_off {
+            toggled_off = false;
+            engine.set_active(true);
+            eprintln!("[stress] toggling stopped after {toggles} toggles, resumed");
+        }
+        if toggling {
+            toggled_off = !toggled_off;
+            engine.set_active(!toggled_off);
+            toggles += 1;
+        }
+        match engine.events.recv_timeout(Duration::from_millis(toggle_ms.unwrap_or(250))) {
             Ok(Event::TrackStarted { index, label, source_rate, bits, at_frame, .. }) => {
                 eprintln!("[queue] #{index} {label}: {source_rate} Hz / {bits}-bit, starts at frame {at_frame}");
                 tracks.push((at_frame, source_rate, label));
@@ -48,7 +65,12 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("ERROR {e}");
                 break;
             }
-            Ok(Event::Finished) => break,
+            Ok(Event::Finished) => {
+                if toggle_ms.is_some() {
+                    println!("TOGGLES {toggles}");
+                }
+                break;
+            }
             Err(_) => {}
         }
         // Signal-path readback once each track has been playing ~2 s.
