@@ -336,7 +336,6 @@ fn urlencode(s: &str) -> String {
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
 /// ~/.cache/aulos (or $XDG_CACHE_HOME/aulos).
 pub fn cache_dir() -> std::path::PathBuf {
     let base = std::env::var("XDG_CACHE_HOME")
@@ -362,6 +361,7 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(tmp, path)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     client: Client,
     section: String,

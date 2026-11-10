@@ -200,11 +200,9 @@ impl Aulos {
                         this.albums = albums;
                         if let Some(key) = open_key
                             && let View::Album { ix, .. } = &mut this.view
-                        {
-                            if let Some(n) = this.albums.iter().position(|a| a.rating_key == key) {
+                            && let Some(n) = this.albums.iter().position(|a| a.rating_key == key) {
                                 *ix = n;
                             }
-                        }
                         if !std::mem::replace(&mut first, false) {
                             cx.notify();
                             return;
