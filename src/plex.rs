@@ -8,6 +8,7 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 
 #[derive(Clone, Debug)]
 pub struct Album {
+    pub rating_key: String,
     pub title: String,
     pub artist: String,
     pub year: String,
@@ -18,6 +19,11 @@ pub struct ArtRequest {
     pub thumb: String,
 }
 
+pub struct TracksRequest {
+    pub album_key: String,
+    pub reply: oneshot::Sender<anyhow::Result<Vec<Track>>>,
+}
+
 pub struct ArtResult {
     pub thumb: String,
     pub bytes: Option<Vec<u8>>,
@@ -25,8 +31,8 @@ pub struct ArtResult {
 
 #[derive(Clone)]
 pub struct Client {
-    base: String,
-    token: String,
+    pub base: String,
+    pub token: String,
     http: reqwest::Client,
 }
 
@@ -43,8 +49,35 @@ struct Container {
 }
 
 #[derive(Deserialize)]
+struct Media {
+    #[serde(rename = "Part", default)]
+    part: Vec<Part>,
+}
+
+#[derive(Deserialize)]
+struct Part {
+    key: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct Track {
+    pub title: String,
+    pub artist: String,
+    pub duration_ms: u64,
+    pub part_key: String,
+}
+
+#[derive(Deserialize)]
 struct Meta {
+    #[serde(rename = "ratingKey", default)]
+    rating_key: String,
     title: String,
+    #[serde(default)]
+    duration: Option<u64>,
+    #[serde(rename = "grandparentTitle", default)]
+    grandparent_title: String,
+    #[serde(rename = "Media", default)]
+    media: Vec<Media>,
     #[serde(rename = "parentTitle", default)]
     parent_title: String,
     #[serde(default)]
@@ -88,10 +121,34 @@ impl Client {
             .metadata
             .into_iter()
             .map(|m| Album {
+                rating_key: m.rating_key,
                 title: m.title,
                 artist: m.parent_title,
                 year: m.year.map(|y| y.to_string()).unwrap_or_default(),
                 thumb: m.thumb.unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    pub async fn tracks(&self, album_key: &str) -> anyhow::Result<Vec<Track>> {
+        let env: Envelope = self
+            .get(&format!("/library/metadata/{album_key}/children"))
+            .await?
+            .json()
+            .await
+            .context("decoding tracks")?;
+        Ok(env
+            .mc
+            .metadata
+            .into_iter()
+            .filter_map(|m| {
+                let part_key = m.media.first()?.part.first()?.key.clone();
+                Some(Track {
+                    title: m.title,
+                    artist: m.grandparent_title,
+                    duration_ms: m.duration.unwrap_or(0),
+                    part_key,
+                })
             })
             .collect())
     }
@@ -123,7 +180,16 @@ pub async fn run(
     albums_tx: oneshot::Sender<anyhow::Result<Vec<Album>>>,
     mut art_rx: mpsc::UnboundedReceiver<ArtRequest>,
     art_tx: mpsc::UnboundedSender<ArtResult>,
+    mut tracks_rx: mpsc::UnboundedReceiver<TracksRequest>,
 ) {
+    {
+        let client = client.clone();
+        tokio::spawn(async move {
+            while let Some(req) = tracks_rx.recv().await {
+                let _ = req.reply.send(client.tracks(&req.album_key).await);
+            }
+        });
+    }
     let t = std::time::Instant::now();
     let albums = client.albums(&section).await;
     if let Ok(a) = &albums {

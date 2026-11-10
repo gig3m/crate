@@ -25,7 +25,8 @@ use gpui::{
 use gpui_component::input::{Input, InputState};
 use tokio::sync::mpsc;
 
-use plex::{Album, ArtRequest, ArtResult};
+use aulos_spike::audio::{Engine, Event as AudioEvent, Source};
+use plex::{Album, ArtRequest, ArtResult, Track, TracksRequest};
 use theme::Theme;
 
 const CARD_W: f32 = 184.0;
@@ -49,6 +50,23 @@ struct Aulos {
     cols: usize,
     bench: Option<Bench>,
     last_render_us: u128,
+    tracks_tx: mpsc::UnboundedSender<TracksRequest>,
+    plex: (String, String),
+    target: Option<String>,
+    engine: Option<Engine>,
+    now: Option<Now>,
+    autoplay: Option<usize>,
+}
+
+struct Now {
+    album: Album,
+    tracks: Vec<Track>,
+    /// index -> (source rate, bits), from engine TrackStarted events.
+    formats: HashMap<usize, (u32, u32)>,
+    idx: usize,
+    elapsed_ms: u64,
+    graph_rate: u32,
+    finished: bool,
 }
 
 struct Bench {
@@ -68,6 +86,8 @@ impl Aulos {
         art_tx: mpsc::UnboundedSender<ArtRequest>,
         mut art_rx: mpsc::UnboundedReceiver<ArtResult>,
         albums_rx: tokio::sync::oneshot::Receiver<anyhow::Result<Vec<Album>>>,
+        tracks_tx: mpsc::UnboundedSender<TracksRequest>,
+        plex: (String, String),
     ) -> Self {
         let (theme, theme_gen) = Theme::load();
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search, play, or run a command"));
@@ -80,6 +100,9 @@ impl Aulos {
                     Ok(Ok(albums)) => {
                         this.status = format!("{} albums from Plex", albums.len()).into();
                         this.albums = albums;
+                        if let Some(ix) = this.autoplay.take() {
+                            this.play_album(ix, cx);
+                        }
                     }
                     Ok(Err(e)) => this.status = format!("Plex error: {e:#}").into(),
                     Err(_) => this.status = "Plex task dropped".into(),
@@ -165,7 +188,121 @@ impl Aulos {
             cols: 6,
             bench,
             last_render_us: 0,
+            tracks_tx,
+            plex,
+            target: std::env::var("AULOS_TARGET").ok(),
+            engine: None,
+            now: None,
+            autoplay: std::env::var("AULOS_AUTOPLAY").ok().and_then(|v| v.parse().ok()),
         }
+    }
+
+    fn play_album(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(album) = self.album(ix).cloned() else { return };
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        let _ = self.tracks_tx.send(TracksRequest { album_key: album.rating_key.clone(), reply });
+        self.status = format!("Loading {}…", album.title).into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let tracks = match rx.await {
+                Ok(Ok(t)) if !t.is_empty() => t,
+                Ok(Ok(_)) => return,
+                Ok(Err(e)) => {
+                    eprintln!("[aulos] tracks: {e:#}");
+                    return;
+                }
+                Err(_) => return,
+            };
+            let ok = this
+                .update(cx, |this, cx| this.start_engine(album, tracks, cx))
+                .is_ok();
+            if !ok {
+                return;
+            }
+            // Poll the engine only while something is playing (idle stays ~0%).
+            loop {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                let keep = this.update(cx, |this, cx| this.poll_engine(cx)).unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn start_engine(&mut self, album: Album, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        // Dropping the old engine stops it.
+        self.engine = None;
+        let (base, token) = self.plex.clone();
+        let queue = tracks
+            .iter()
+            .map(|t| {
+                let id = t.part_key.split('/').nth(3).unwrap_or("x").to_string();
+                let ext = t.part_key.rsplit('.').next().unwrap_or("bin").to_string();
+                Source::Http {
+                    url: format!("{base}{}", t.part_key),
+                    token: token.clone(),
+                    cache: std::path::PathBuf::from(format!("/scratch/aulos-cache/part-{id}.{ext}")),
+                }
+            })
+            .collect();
+        match Engine::play(queue, self.target.clone()) {
+            Ok(e) => {
+                eprintln!("[aulos] playing {} ({} tracks) -> {:?}", album.title, tracks.len(), self.target);
+                self.engine = Some(e);
+                self.status = format!("Playing {}", album.title).into();
+                self.now = Some(Now {
+                    album,
+                    tracks,
+                    formats: HashMap::new(),
+                    idx: 0,
+                    elapsed_ms: 0,
+                    graph_rate: 0,
+                    finished: false,
+                });
+            }
+            Err(e) => self.status = format!("Audio error: {e:#}").into(),
+        }
+        cx.notify();
+    }
+
+    /// Returns false once playback is over.
+    fn poll_engine(&mut self, cx: &mut Context<Self>) -> bool {
+        let (Some(engine), Some(now)) = (self.engine.as_ref(), self.now.as_mut()) else { return false };
+        while let Ok(ev) = engine.events.try_recv() {
+            match ev {
+                AudioEvent::TrackStarted { index, source_rate, bits, .. } => {
+                    now.formats.insert(index, (source_rate, bits));
+                }
+                AudioEvent::Reconnected { from, to, silent_ms } => {
+                    eprintln!("[aulos] rate change {from} -> {to}: {silent_ms:.1} ms");
+                }
+                AudioEvent::Finished => now.finished = true,
+                AudioEvent::Error(e) => {
+                    eprintln!("[aulos] audio: {e}");
+                    now.finished = true;
+                }
+                AudioEvent::FirstAudio { ms_since_play } => {
+                    eprintln!("[aulos] first audio {ms_since_play:.0} ms");
+                }
+            }
+        }
+        let played_ms = engine.stats.played_us.load(std::sync::atomic::Ordering::Relaxed) / 1000;
+        now.graph_rate = engine.stats.graph_rate.load(std::sync::atomic::Ordering::Relaxed);
+        // Current track from cumulative Plex durations.
+        let mut acc = 0;
+        now.idx = now.tracks.len().saturating_sub(1);
+        for (i, t) in now.tracks.iter().enumerate() {
+            if played_ms < acc + t.duration_ms {
+                now.idx = i;
+                break;
+            }
+            acc += t.duration_ms;
+        }
+        now.elapsed_ms = played_ms.saturating_sub(acc);
+        cx.notify();
+        !now.finished
     }
 
     fn album(&self, ix: usize) -> Option<&Album> {
@@ -266,8 +403,8 @@ impl Aulos {
                             .child(div().truncate().child(a.artist.clone()))
                             .child(a.year.clone()),
                     )
-                    .on_click(cx.listener(move |_, _, _, _| {
-                        eprintln!("[aulos] clicked album #{ix}");
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.play_album(ix, cx);
                     })),
             );
         }
@@ -277,6 +414,104 @@ impl Aulos {
             .flex()
             .gap(px(GAP))
             .children(cards)
+    }
+}
+
+fn fmt_ms(ms: u64) -> String {
+    format!("{}:{:02}", ms / 60_000, (ms / 1000) % 60)
+}
+
+impl Aulos {
+    fn player_bar(&self, t: &Theme) -> gpui::AnyElement {
+        let (title, sub, art, frac, times, badge) = match &self.now {
+            Some(n) => {
+                let tr = &n.tracks[n.idx];
+                let frac = if tr.duration_ms > 0 {
+                    (n.elapsed_ms as f32 / tr.duration_ms as f32).min(1.0)
+                } else {
+                    0.0
+                };
+                let badge = n.formats.get(&n.idx).map(|&(rate, bits)| {
+                    let khz = |r: u32| {
+                        if r % 1000 == 0 { format!("{}", r / 1000) } else { format!("{:.1}", r as f32 / 1000.0) }
+                    };
+                    if n.graph_rate == 0 {
+                        (format!("{bits}/{}", khz(rate)), t.muted)
+                    } else if n.graph_rate == rate {
+                        (format!("{bits}/{} · native rate", khz(rate)), t.accent)
+                    } else {
+                        (format!("{bits}/{} → {} kHz · resampled by PipeWire", khz(rate), khz(n.graph_rate)), t.muted)
+                    }
+                });
+                (
+                    SharedString::from(tr.title.clone()),
+                    SharedString::from(format!("{} · {} · track {} of {}", tr.artist, n.album.title, n.idx + 1, n.tracks.len())),
+                    self.art.get(&n.album.thumb).cloned(),
+                    frac,
+                    Some((fmt_ms(n.elapsed_ms), fmt_ms(tr.duration_ms))),
+                    badge,
+                )
+            }
+            None => ("Nothing playing".into(), "Click an album to play it".into(), None, 0.0, None, None),
+        };
+        let cover = match art {
+            Some(i) => img(i).size(px(56.0)).rounded(px(6.0)).into_any_element(),
+            None => div().size(px(56.0)).rounded(px(6.0)).bg(rgb(t.raised)).into_any_element(),
+        };
+        div()
+            .h(px(88.0))
+            .flex_none()
+            .bg(rgb(t.surface))
+            .border_t_1()
+            .border_color(rgb(t.border))
+            .px(px(24.0))
+            .flex()
+            .items_center()
+            .gap(px(16.0))
+            .child(cover)
+            .child(
+                div()
+                    .w(px(360.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(div().text_color(rgb(t.text_strong)).truncate().child(title))
+                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(sub)),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(t.muted))
+                    .children(times.as_ref().map(|(a, _)| a.clone()))
+                    .child(
+                        div()
+                            .w(px(480.0))
+                            .h(px(4.0))
+                            .rounded(px(2.0))
+                            .bg(rgb(t.border))
+                            .child(div().w(px(480.0 * frac)).h_full().rounded(px(2.0)).bg(rgb(t.accent))),
+                    )
+                    .children(times.map(|(_, b)| b)),
+            )
+            .child(div().flex_1())
+            .children(badge.map(|(text, color)| {
+                div()
+                    .px(px(10.0))
+                    .h(px(28.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(14.0))
+                    .border_1()
+                    .border_color(rgb(color))
+                    .text_size(px(12.0))
+                    .text_color(rgb(color))
+                    .child(text)
+            }))
+            .into_any_element()
     }
 }
 
@@ -396,39 +631,7 @@ impl Render for Aulos {
         .track_scroll(&self.scroll)
         .flex_1();
 
-        let player = div()
-            .h(px(88.0))
-            .flex_none()
-            .bg(rgb(t.surface))
-            .border_t_1()
-            .border_color(rgb(t.border))
-            .px(px(24.0))
-            .flex()
-            .items_center()
-            .gap(px(16.0))
-            .child(div().size(px(56.0)).rounded(px(6.0)).bg(rgb(t.raised)))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(div().text_color(rgb(t.text_strong)).child("Nothing playing"))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(t.muted))
-                            .child("GPUI spike · no audio engine yet"),
-                    ),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .w(px(480.0))
-                    .h(px(4.0))
-                    .rounded(px(2.0))
-                    .bg(rgb(t.border))
-                    .child(div().w(px(200.0)).h_full().rounded(px(2.0)).bg(rgb(t.accent))),
-            )
-            .child(div().flex_1());
+        let player = self.player_bar(&t);
 
         let el = div()
             .size_full()
@@ -470,6 +673,8 @@ fn main() {
     let (art_tx, art_rx_req) = mpsc::unbounded_channel::<ArtRequest>();
     let (art_res_tx, art_rx) = mpsc::unbounded_channel::<ArtResult>();
     let (albums_tx, albums_rx) = tokio::sync::oneshot::channel();
+    let (tracks_tx, tracks_rx) = mpsc::unbounded_channel::<TracksRequest>();
+    let plex_creds = (base.clone(), token.clone());
     let client = plex::Client::new(base, token);
     std::thread::Builder::new()
         .name("tokio".into())
@@ -479,7 +684,7 @@ fn main() {
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(plex::run(client, section, albums_tx, art_rx_req, art_res_tx));
+            rt.block_on(plex::run(client, section, albums_tx, art_rx_req, art_res_tx, tracks_rx));
         })
         .unwrap();
 
@@ -493,7 +698,7 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                let view = cx.new(|cx| Aulos::new(window, cx, art_tx, art_rx, albums_rx));
+                let view = cx.new(|cx| Aulos::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds));
                 cx.new(|cx| gpui_component::Root::new(view, window, cx))
             },
         )

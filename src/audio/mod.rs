@@ -47,6 +47,8 @@ pub struct Stats {
     /// Set by the RT thread when it writes real audio after a (re)connect.
     pub got_data: AtomicBool,
     pub decoder_done: AtomicBool,
+    /// Set by Engine::stop / Drop; decoder and PipeWire threads wind down.
+    pub stop: AtomicBool,
     /// Ring is being emptied on purpose ahead of a stream rebuild.
     pub rebuilding: AtomicBool,
 }
@@ -66,11 +68,26 @@ enum Cmd {
     /// Start pulling (sent once the ring holds enough audio).
     Activate,
     Drain,
+    Stop,
 }
 
 pub struct Engine {
     pub stats: Arc<Stats>,
     pub events: mpsc::Receiver<Event>,
+    cmd: pw::channel::Sender<Cmd>,
+}
+
+impl Engine {
+    pub fn stop(&self) {
+        self.stats.stop.store(true, Ordering::Release);
+        let _ = self.cmd.send(Cmd::Stop);
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 impl Engine {
@@ -94,6 +111,7 @@ impl Engine {
                     }
                 })?;
         }
+        let cmd = cmd_tx.clone();
         {
             let (stats, ev_tx) = (stats.clone(), ev_tx.clone());
             std::thread::Builder::new()
@@ -105,7 +123,7 @@ impl Engine {
                     stats.decoder_done.store(true, Ordering::Release);
                 })?;
         }
-        Ok(Self { stats, events })
+        Ok(Self { stats, events, cmd })
     }
 }
 
@@ -152,6 +170,9 @@ fn decoder_thread(
             stats.rebuilding.store(true, Ordering::Release);
             let t_wait = Instant::now();
             while prod.slots() < prod.buffer().capacity() {
+                if stats.stop.load(Ordering::Acquire) {
+                    return Ok(());
+                }
                 std::thread::sleep(Duration::from_millis(1));
             }
             let t_empty = Instant::now();
@@ -196,6 +217,9 @@ fn decoder_thread(
         let limit_frames = track_limit.map(|s| (s * rate as f64) as u64);
         let mut track_frames = 0u64;
         while let Some(packet) = fmt.next_packet()? {
+            if stats.stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
             if limit_frames.is_some_and(|l| track_frames >= l) {
                 break;
             }
@@ -211,6 +235,9 @@ fn decoder_thread(
             while off < scratch.len() {
                 let free = prod.slots();
                 if free == 0 {
+                    if stats.stop.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
                     std::thread::sleep(Duration::from_millis(5));
                     continue;
                 }
@@ -239,6 +266,9 @@ fn decoder_thread(
     stats.decoder_done.store(true, Ordering::Release);
     // Wait for the ring to empty, then ask PipeWire to drain its buffers.
     while prod.slots() < prod.buffer().capacity() {
+        if stats.stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
         std::thread::sleep(Duration::from_millis(2));
     }
     let _ = cmd_tx.send(Cmd::Drain);
@@ -385,6 +415,7 @@ fn pw_thread(
 
     let live2 = live.clone();
     let ev2 = ev.clone();
+    let ml_stop = mainloop.clone();
     let _rx = cmd_rx.attach(mainloop.loop_(), move |cmd| match cmd {
         Cmd::Configure { rate, ack } => {
             // Drop the old stream first so the RT side releases the ring.
@@ -401,6 +432,10 @@ fn pw_thread(
             if let Some((s, _)) = live2.borrow().as_ref() {
                 let _ = s.set_active(true);
             }
+        }
+        Cmd::Stop => {
+            live2.borrow_mut().take();
+            ml_stop.quit();
         }
         Cmd::Drain => {
             if let Some((s, _)) = live2.borrow().as_ref() {
