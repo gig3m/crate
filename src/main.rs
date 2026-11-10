@@ -433,7 +433,7 @@ impl Aulos {
                 };
                 let badge = n.formats.get(&n.idx).map(|&(rate, bits)| {
                     let khz = |r: u32| {
-                        if r % 1000 == 0 { format!("{}", r / 1000) } else { format!("{:.1}", r as f32 / 1000.0) }
+                        if r.is_multiple_of(1000) { format!("{}", r / 1000) } else { format!("{:.1}", r as f32 / 1000.0) }
                     };
                     if n.graph_rate == 0 {
                         (format!("{bits}/{}", khz(rate)), t.muted)
