@@ -28,9 +28,9 @@ use tokio::sync::mpsc;
 
 use aulos_spike::audio::{Engine, Event as AudioEvent, Source};
 use mpris::{Transport, Update as MprisUpdate};
-use plex::{Album, ArtRequest, ArtResult, Track, TracksRequest};
+use plex::{Album, ArtRequest, ArtResult, SearchHit, SearchRequest, Track, TracksRequest};
 
-gpui::actions!(aulos, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back]);
+gpui::actions!(aulos, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch]);
 
 enum View {
     Library,
@@ -69,6 +69,12 @@ struct Aulos {
     play_gen: u64,
     view: View,
     album_scroll: gpui::ScrollHandle,
+    search_tx: mpsc::UnboundedSender<SearchRequest>,
+    search_gen: u64,
+    search_query: String,
+    hits: Vec<SearchHit>,
+    /// Set after a hit is activated: next render clears the box and refocuses the app.
+    reset_search: bool,
     mpris: tokio::sync::mpsc::UnboundedSender<MprisUpdate>,
     focus: gpui::FocusHandle,
 }
@@ -113,6 +119,7 @@ impl Aulos {
         plex: (String, String),
         mut transport_rx: mpsc::UnboundedReceiver<Transport>,
         mpris: mpsc::UnboundedSender<MprisUpdate>,
+        search_tx: mpsc::UnboundedSender<SearchRequest>,
     ) -> Self {
         // MPRIS commands arrive from the mpris thread.
         cx.spawn(async move |this, cx| {
@@ -127,7 +134,23 @@ impl Aulos {
         window.focus(&focus, cx);
         let (theme, theme_gen) = Theme::load();
         apply_component_theme(&theme, Some(window), cx);
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search, play, or run a command"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search, play, or run a command  (Ctrl K)"));
+        cx.subscribe(&search, |this, input, ev: &gpui_component::input::InputEvent, cx| {
+            use gpui_component::input::InputEvent;
+            match ev {
+                InputEvent::Change => {
+                    let q = input.read(cx).value().to_string();
+                    this.on_search_change(q, cx);
+                }
+                InputEvent::PressEnter { .. } => {
+                    if let Some(h) = this.hits.first().cloned() {
+                        this.activate_hit(h, cx);
+                    }
+                }
+                _ => {}
+            }
+        })
+        .detach();
 
         // Albums arrive from the tokio side thread; awaited on GPUI's executor.
         cx.spawn(async move |this, cx| {
@@ -241,9 +264,84 @@ impl Aulos {
             play_gen: 0,
             view: View::Library,
             album_scroll: gpui::ScrollHandle::new(),
+            search_tx,
+            search_gen: 0,
+            search_query: String::new(),
+            hits: Vec::new(),
+            reset_search: false,
             mpris,
             focus,
         }
+    }
+
+    fn on_search_change(&mut self, q: String, cx: &mut Context<Self>) {
+        self.search_query = q.trim().to_string();
+        self.search_gen += 1;
+        let gen_id = self.search_gen;
+        if self.search_query.is_empty() {
+            self.hits.clear();
+            cx.notify();
+            return;
+        }
+        let query = self.search_query.clone();
+        let tx = self.search_tx.clone();
+        cx.spawn(async move |this, cx| {
+            // Debounce: only the latest keystroke after 120 ms queries Plex.
+            cx.background_executor().timer(Duration::from_millis(120)).await;
+            if this.update(cx, |this, _| this.search_gen != gen_id).unwrap_or(true) {
+                return;
+            }
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            let t0 = Instant::now();
+            let _ = tx.send(SearchRequest { query: query.clone(), reply });
+            if let Ok(Ok(hits)) = rx.await {
+                eprintln!("[aulos] search {query:?}: {} hits in {:?}", hits.len(), t0.elapsed());
+                this.update(cx, |this, cx| {
+                    if this.search_gen == gen_id {
+                        for h in &hits {
+                            if !h.thumb.is_empty() && !this.art.contains_key(&h.thumb) && this.requested.insert(h.thumb.clone()) {
+                                let _ = this.art_tx.send(ArtRequest { thumb: h.thumb.clone() });
+                            }
+                        }
+                        this.hits = hits;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn activate_hit(&mut self, h: SearchHit, cx: &mut Context<Self>) {
+        eprintln!("[aulos] activate {} {:?}", h.kind, h.title);
+        match h.kind.as_str() {
+            "album" => {
+                if let Some(ix) = self.albums.iter().position(|a| a.rating_key == h.rating_key) {
+                    self.open_album(ix, cx);
+                }
+            }
+            "artist" => {
+                if let Some(ix) = self.albums.iter().position(|a| a.artist == h.title) {
+                    self.open_album(ix, cx);
+                }
+            }
+            "track" => {
+                if let Some(album) = self.albums.iter().find(|a| a.rating_key == h.parent_key).cloned() {
+                    let key = h.rating_key.clone();
+                    self.request_art(&album);
+                    self.with_tracks(album, cx, move |this, album, tracks, cx| {
+                        let start = tracks.iter().position(|t| t.rating_key == key).unwrap_or(0);
+                        this.play_tracks(album, tracks, start, cx);
+                    });
+                }
+            }
+            _ => {}
+        }
+        self.search_query.clear();
+        self.hits.clear();
+        self.reset_search = true;
+        cx.notify();
     }
 
     fn request_art(&mut self, album: &Album) {
@@ -280,8 +378,8 @@ impl Aulos {
         self.album_scroll = gpui::ScrollHandle::new();
         cx.notify();
         self.with_tracks(album, cx, move |this, _album, tracks, cx| {
-            if let View::Album { ix: cur, tracks: slot } = &mut this.view {
-                if *cur == ix {
+            if let View::Album { ix: cur, tracks: slot } = &mut this.view
+                && *cur == ix {
                     // Test hook: behave as if track N (1-based) was clicked.
                     let auto = std::env::var("AULOS_PLAY_TRACK").ok().and_then(|v| v.parse::<usize>().ok());
                     *slot = Some(tracks.clone());
@@ -290,7 +388,6 @@ impl Aulos {
                     }
                     cx.notify();
                 }
-            }
         });
     }
 
@@ -646,6 +743,61 @@ fn apply_component_theme(t: &Theme, window: Option<&mut Window>, cx: &mut App) {
 }
 
 impl Aulos {
+    fn search_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut col = div()
+            .id("search-results")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px(px(PAD_X))
+            .pb(px(32.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0));
+        if self.hits.is_empty() {
+            col = col.child(div().text_color(rgb(t.muted)).child(format!("Searching for {:?}…", self.search_query)));
+        }
+        let mut last_kind = String::new();
+        for (i, h) in self.hits.iter().enumerate() {
+            if h.kind != last_kind {
+                last_kind = h.kind.clone();
+                let label = match h.kind.as_str() { "artist" => "Artists", "album" => "Albums", _ => "Tracks" };
+                col = col.child(div().mt(px(14.0)).mb(px(4.0)).text_size(px(12.0)).text_color(rgb(t.muted)).child(label));
+            }
+            let thumb = match self.art.get(&h.thumb).cloned() {
+                Some(i) => img(i).size(px(40.0)).flex_none().rounded(px(if h.kind == "artist" { 20.0 } else { 4.0 })).object_fit(ObjectFit::Cover).into_any_element(),
+                None => div().size(px(40.0)).flex_none().rounded(px(4.0)).bg(rgb(t.raised)).into_any_element(),
+            };
+            let hit = h.clone();
+            col = col.child(
+                div()
+                    .id(("hit", i))
+                    .h(px(52.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(14.0))
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .when(i == 0, |d| d.bg(rgb(t.raised)))
+                    .hover(|d| d.bg(rgb(t.raised)))
+                    .child(thumb)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .child(div().text_color(rgb(t.text_strong)).truncate().child(h.title.clone()))
+                            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(h.subtitle.clone())),
+                    )
+                    .child(div().flex_1())
+                    .when(i == 0, |d| d.child(div().text_size(px(11.0)).text_color(rgb(t.muted)).child("Enter")))
+                    .on_click(cx.listener(move |this, _, _, cx| this.activate_hit(hit.clone(), cx))),
+            );
+        }
+        col.into_any_element()
+    }
+
     fn album_view(&self, ix: usize, tracks: Option<&Vec<Track>>, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(album) = self.album(ix).cloned() else { return div().into_any_element() };
         let cover = match self.art.get(&album.thumb).cloned() {
@@ -671,12 +823,11 @@ impl Aulos {
             .cursor_pointer()
             .child("Play")
             .on_click(cx.listener(move |this, _, _, cx| {
-                if let View::Album { tracks: Some(tr), .. } = &this.view {
-                    if let Some(a) = this.album(ix).cloned() {
+                if let View::Album { tracks: Some(tr), .. } = &this.view
+                    && let Some(a) = this.album(ix).cloned() {
                         let tr = tr.clone();
                         this.play_tracks(a, tr, 0, cx);
                     }
-                }
             }));
         let back_btn = div()
             .id("album-back")
@@ -738,12 +889,11 @@ impl Aulos {
                             .child(div().flex_1().min_w_0().truncate().text_color(rgb(color)).child(tr.title.clone()))
                             .child(div().text_size(px(13.0)).text_color(rgb(t.muted)).child(fmt_ms(tr.duration_ms)))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if let View::Album { tracks: Some(tr), .. } = &this.view {
-                                    if let Some(a) = this.album(ix).cloned() {
+                                if let View::Album { tracks: Some(tr), .. } = &this.view
+                                    && let Some(a) = this.album(ix).cloned() {
                                         let tr = tr.clone();
                                         this.play_tracks(a, tr, i, cx);
                                     }
-                                }
                             }))
                             .into_any_element()
                     })
@@ -934,6 +1084,11 @@ impl Render for Aulos {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t0 = Instant::now();
         let t = self.theme.clone();
+        if std::mem::take(&mut self.reset_search) {
+            self.search.update(cx, |s, cx| s.set_value("", window, cx));
+            self.search_query.clear();
+            window.focus(&self.focus, cx);
+        }
         let vw: f32 = window.viewport_size().width.into();
         let usable = (vw - SIDEBAR_W - PAD_X * 2.0).max(CARD_W);
         self.cols = (((usable + GAP) / (CARD_W + GAP)).floor() as usize).max(1);
@@ -985,7 +1140,7 @@ impl Render for Aulos {
             .flex_col()
             .gap(px(16.0))
             .child(div().w(px(520.0)).child(Input::new(&self.search)))
-            .when(matches!(self.view, View::Library), |d| d.child(
+            .when(matches!(self.view, View::Library) && self.search_query.is_empty(), |d| d.child(
                 div()
                     .flex()
                     .items_baseline()
@@ -1033,6 +1188,11 @@ impl Render for Aulos {
             .on_action(cx.listener(|this, _: &PrevTrack, _, cx| this.transport(Transport::Prev, cx)))
             .on_action(cx.listener(|this, _: &SeekForward, _, cx| this.transport(Transport::Seek(10_000), cx)))
             .on_action(cx.listener(|this, _: &SeekBack, _, cx| this.transport(Transport::Seek(-10_000), cx)))
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                use gpui::Focusable;
+                let h = this.search.focus_handle(cx);
+                window.focus(&h, cx);
+            }))
             .on_action(cx.listener(|this, _: &Back, _, cx| {
                 this.view = View::Library;
                 cx.notify();
@@ -1058,6 +1218,7 @@ impl Render for Aulos {
                             .flex_col()
                             .child(header)
                             .child(match &self.view {
+                                _ if !self.search_query.is_empty() => self.search_view(&t, cx),
                                 View::Library => grid.into_any_element(),
                                 View::Album { ix, tracks } => {
                                     let (ix, tracks) = (*ix, tracks.clone());
@@ -1085,6 +1246,7 @@ fn main() {
     let (tracks_tx, tracks_rx) = mpsc::unbounded_channel::<TracksRequest>();
     let plex_creds = (base.clone(), token.clone());
     let (transport_tx, transport_rx) = mpsc::unbounded_channel::<Transport>();
+    let (search_tx, search_rx) = mpsc::unbounded_channel::<SearchRequest>();
     let mpris_tx = mpris::start(transport_tx);
     let client = plex::Client::new(base, token);
     std::thread::Builder::new()
@@ -1095,19 +1257,20 @@ fn main() {
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(plex::run(client, section, albums_tx, art_rx_req, art_res_tx, tracks_rx));
+            rt.block_on(plex::run(client, section, albums_tx, art_rx_req, art_res_tx, tracks_rx, search_rx));
         })
         .unwrap();
 
     gpui_platform::application().run(move |cx: &mut App| {
         gpui_component::init(cx);
         cx.bind_keys([
-            gpui::KeyBinding::new("space", PlayPause, Some("Aulos")),
-            gpui::KeyBinding::new("n", NextTrack, Some("Aulos")),
-            gpui::KeyBinding::new("p", PrevTrack, Some("Aulos")),
-            gpui::KeyBinding::new("right", SeekForward, Some("Aulos")),
-            gpui::KeyBinding::new("left", SeekBack, Some("Aulos")),
-            gpui::KeyBinding::new("escape", Back, Some("Aulos")),
+            gpui::KeyBinding::new("space", PlayPause, Some("Aulos && !Input")),
+            gpui::KeyBinding::new("n", NextTrack, Some("Aulos && !Input")),
+            gpui::KeyBinding::new("p", PrevTrack, Some("Aulos && !Input")),
+            gpui::KeyBinding::new("right", SeekForward, Some("Aulos && !Input")),
+            gpui::KeyBinding::new("left", SeekBack, Some("Aulos && !Input")),
+            gpui::KeyBinding::new("escape", Back, Some("Aulos && !Input")),
+            gpui::KeyBinding::new("ctrl-k", FocusSearch, Some("Aulos")),
         ]);
         let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
         cx.open_window(
@@ -1117,7 +1280,7 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                let view = cx.new(|cx| Aulos::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds, transport_rx, mpris_tx));
+                let view = cx.new(|cx| Aulos::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds, transport_rx, mpris_tx, search_tx));
                 cx.new(|cx| gpui_component::Root::new(view, window, cx))
             },
         )
