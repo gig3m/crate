@@ -57,6 +57,10 @@ struct HubContainer {
 struct Hub {
     #[serde(rename = "type", default)]
     kind: String,
+    #[serde(default)]
+    title: String,
+    #[serde(rename = "hubIdentifier", default)]
+    id: String,
     #[serde(rename = "Metadata", default)]
     metadata: Vec<HubMeta>,
 }
@@ -77,6 +81,33 @@ struct HubMeta {
     section: Option<serde_json::Value>,
     #[serde(default)]
     thumb: Option<String>,
+    #[serde(default)]
+    key: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct HubItem {
+    pub rating_key: String,
+    pub title: String,
+    pub subtitle: String,
+    pub thumb: String,
+    /// Plex key (a station's play URL, an album's children); used once stations play.
+    #[allow(dead_code)]
+    pub key: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct HubRow {
+    #[allow(dead_code)]
+    pub id: String,
+    pub title: String,
+    /// "album" | "artist" | "station"
+    pub kind: String,
+    pub items: Vec<HubItem>,
+}
+
+pub struct HubsRequest {
+    pub reply: oneshot::Sender<anyhow::Result<Vec<HubRow>>>,
 }
 
 pub struct ArtResult {
@@ -252,6 +283,38 @@ impl Client {
         Ok(out)
     }
 
+    /// The music section's home hubs (recently played/added, stations, ...).
+    pub async fn home_hubs(&self, section: &str) -> anyhow::Result<Vec<HubRow>> {
+        let env: HubEnvelope = self
+            .get(&format!("/hubs/sections/{section}?count=12&includeStations=1"))
+            .await?
+            .json()
+            .await
+            .context("decoding hubs")?;
+        Ok(env
+            .mc
+            .hubs
+            .into_iter()
+            .filter(|h| matches!(h.kind.as_str(), "album" | "artist" | "station") && !h.metadata.is_empty())
+            .map(|h| HubRow {
+                id: h.id,
+                title: h.title,
+                kind: h.kind.clone(),
+                items: h
+                    .metadata
+                    .into_iter()
+                    .map(|m| HubItem {
+                        subtitle: if h.kind == "album" { m.parent_title.clone() } else { String::new() },
+                        rating_key: m.rating_key,
+                        title: m.title,
+                        thumb: m.thumb.unwrap_or_default(),
+                        key: m.key,
+                    })
+                    .collect(),
+            })
+            .collect())
+    }
+
     pub async fn art(&self, thumb: &str) -> anyhow::Result<Vec<u8>> {
         // Server-side resize to the size we draw at (2x for HiDPI).
         let url = format!(
@@ -273,6 +336,7 @@ fn urlencode(s: &str) -> String {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     client: Client,
     section: String,
@@ -281,7 +345,17 @@ pub async fn run(
     art_tx: mpsc::UnboundedSender<ArtResult>,
     mut tracks_rx: mpsc::UnboundedReceiver<TracksRequest>,
     mut search_rx: mpsc::UnboundedReceiver<SearchRequest>,
+    mut hubs_rx: mpsc::UnboundedReceiver<HubsRequest>,
 ) {
+    {
+        let client = client.clone();
+        let section = section.clone();
+        tokio::spawn(async move {
+            while let Some(req) = hubs_rx.recv().await {
+                let _ = req.reply.send(client.home_hubs(&section).await);
+            }
+        });
+    }
     {
         let client = client.clone();
         let section = section.clone();

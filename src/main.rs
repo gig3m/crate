@@ -28,11 +28,12 @@ use tokio::sync::mpsc;
 
 use aulos_spike::audio::{Engine, Event as AudioEvent, Source};
 use mpris::{Transport, Update as MprisUpdate};
-use plex::{Album, ArtRequest, ArtResult, SearchHit, SearchRequest, Track, TracksRequest};
+use plex::{Album, ArtRequest, ArtResult, HubRow, HubsRequest, SearchHit, SearchRequest, Track, TracksRequest};
 
 gpui::actions!(aulos, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch]);
 
 enum View {
+    Home,
     Library,
     Album { ix: usize, tracks: Option<Vec<Track>> },
 }
@@ -75,6 +76,7 @@ struct Aulos {
     hits: Vec<SearchHit>,
     /// Set after a hit is activated: next render clears the box and refocuses the app.
     reset_search: bool,
+    home: Option<Vec<HubRow>>,
     mpris: tokio::sync::mpsc::UnboundedSender<MprisUpdate>,
     focus: gpui::FocusHandle,
 }
@@ -120,7 +122,31 @@ impl Aulos {
         mut transport_rx: mpsc::UnboundedReceiver<Transport>,
         mpris: mpsc::UnboundedSender<MprisUpdate>,
         search_tx: mpsc::UnboundedSender<SearchRequest>,
+        hubs_tx: mpsc::UnboundedSender<HubsRequest>,
     ) -> Self {
+        {
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            let _ = hubs_tx.send(HubsRequest { reply });
+            cx.spawn(async move |this, cx| match rx.await {
+                Ok(Ok(rows)) => {
+                    this.update(cx, |this, cx| {
+                        for r in &rows {
+                            for it in &r.items {
+                                if !it.thumb.is_empty() && this.requested.insert(it.thumb.clone()) {
+                                    let _ = this.art_tx.send(ArtRequest { thumb: it.thumb.clone() });
+                                }
+                            }
+                        }
+                        this.home = Some(rows);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Ok(Err(e)) => eprintln!("[aulos] hubs: {e:#}"),
+                Err(_) => {}
+            })
+            .detach();
+        }
         // MPRIS commands arrive from the mpris thread.
         cx.spawn(async move |this, cx| {
             while let Some(t) = transport_rx.recv().await {
@@ -230,7 +256,7 @@ impl Aulos {
         let total = std::env::var("AULOS_ITEMS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(50_000);
+            .unwrap_or(0); // 0 = the real library size
         let bench = std::env::var("AULOS_BENCH").ok().map(|_| Bench {
             started: None,
             last: None,
@@ -262,13 +288,14 @@ impl Aulos {
             now: None,
             autoplay: std::env::var("AULOS_AUTOPLAY").ok().and_then(|v| v.parse().ok()),
             play_gen: 0,
-            view: View::Library,
+            view: View::Home,
             album_scroll: gpui::ScrollHandle::new(),
             search_tx,
             search_gen: 0,
             search_query: String::new(),
             hits: Vec::new(),
             reset_search: false,
+            home: None,
             mpris,
             focus,
         }
@@ -600,6 +627,11 @@ impl Aulos {
         !now.finished
     }
 
+    /// Grid cells: the real library, or AULOS_ITEMS for the scroll benchmark.
+    fn cells(&self) -> usize {
+        if self.total == 0 { self.albums.len() } else { self.total }
+    }
+
     fn album(&self, ix: usize) -> Option<&Album> {
         if self.albums.is_empty() {
             None
@@ -610,6 +642,7 @@ impl Aulos {
 
     fn bench_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let render_us = self.last_render_us;
+        let cells = self.cells();
         let Some(b) = self.bench.as_mut() else { return };
         // Wait for the library and the first screen of art before measuring.
         if self.albums.is_empty() || self.art.len() < 12 {
@@ -628,7 +661,7 @@ impl Aulos {
             b.y += b.speed * dt.as_secs_f32();
         }
         b.last = Some(now);
-        let max_y = (self.total.div_ceil(self.cols.max(1)) as f32) * ROW_H;
+        let max_y = (cells.div_ceil(self.cols.max(1)) as f32) * ROW_H;
         if b.y > max_y {
             b.y = 0.0;
         }
@@ -652,7 +685,7 @@ impl Aulos {
         let mut cards = Vec::with_capacity(self.cols);
         for c in 0..self.cols {
             let ix = row * self.cols + c;
-            if ix >= self.total {
+            if ix >= self.cells() {
                 break;
             }
             let Some(a) = self.album(ix).cloned() else { break };
@@ -743,6 +776,109 @@ fn apply_component_theme(t: &Theme, window: Option<&mut Window>, cx: &mut App) {
 }
 
 impl Aulos {
+    fn home_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut col = div()
+            .id("home")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px(px(PAD_X))
+            .pt(px(8.0))
+            .pb(px(40.0))
+            .flex()
+            .flex_col()
+            .gap(px(32.0))
+            .child(div().text_size(px(34.0)).font_weight(gpui::FontWeight::BOLD).text_color(rgb(t.text_strong)).child("Home"));
+        let Some(rows) = &self.home else {
+            return col.child(div().text_color(rgb(t.muted)).child("Loading…")).into_any_element();
+        };
+        // Wider than the window clips; show as many as fit.
+        let fit = self.cols.max(1);
+        for (ri, row) in rows.iter().enumerate() {
+            let station = row.kind == "station";
+            let cards: Vec<gpui::AnyElement> = row
+                .items
+                .iter()
+                .take(if station { 8 } else { fit })
+                .enumerate()
+                .map(|(ci, it)| {
+                    let art = self.art.get(&it.thumb).cloned();
+                    let round = if row.kind == "artist" { ART / 2.0 } else { 8.0 };
+                    let size = if station { 72.0 } else { ART };
+                    let cover = match art {
+                        Some(i) => img(i).size(px(size)).flex_none().rounded(px(round)).object_fit(ObjectFit::Cover).into_any_element(),
+                        None => div()
+                            .size(px(size))
+                            .flex_none()
+                            .rounded(px(if station { 36.0 } else { round }))
+                            .bg(rgb(if station { t.accent } else { t.raised }))
+                            .into_any_element(),
+                    };
+                    let (kind, key, title) = (row.kind.clone(), it.rating_key.clone(), it.title.clone());
+                    let card = div()
+                        .id(("hub", ri * 100 + ci))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_hub_item(&kind, &key, &title, cx)));
+                    if station {
+                        card.h(px(84.0))
+                            .px(px(12.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .rounded(px(12.0))
+                            .border_1()
+                            .border_color(rgb(t.border))
+                            .bg(rgb(t.surface))
+                            .hover(|d| d.bg(rgb(t.raised)))
+                            .child(div().size(px(44.0)).flex_none().rounded(px(22.0)).bg(rgb(t.accent)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().text_color(rgb(t.text_strong)).font_weight(gpui::FontWeight::SEMIBOLD).child(it.title.clone()))
+                                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child("Station · coming soon")),
+                            )
+                            .into_any_element()
+                    } else {
+                        card.w(px(CARD_W))
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .child(cover)
+                            .child(div().text_size(px(14.0)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).truncate().child(it.title.clone()))
+                            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(it.subtitle.clone()))
+                            .into_any_element()
+                    }
+                })
+                .collect();
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(14.0))
+                    .child(div().text_size(px(20.0)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child(row.title.clone()))
+                    .child(div().flex().flex_wrap().gap(px(GAP)).children(cards)),
+            );
+        }
+        col.into_any_element()
+    }
+
+    fn open_hub_item(&mut self, kind: &str, key: &str, title: &str, cx: &mut Context<Self>) {
+        match kind {
+            "album" => {
+                if let Some(ix) = self.albums.iter().position(|a| a.rating_key == key) {
+                    self.open_album(ix, cx);
+                }
+            }
+            "artist" => {
+                if let Some(ix) = self.albums.iter().position(|a| a.artist == title) {
+                    self.open_album(ix, cx);
+                }
+            }
+            _ => eprintln!("[aulos] station {title:?} not implemented yet"),
+        }
+    }
+
     fn search_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let mut col = div()
             .id("search-results")
@@ -1092,7 +1228,7 @@ impl Render for Aulos {
         let vw: f32 = window.viewport_size().width.into();
         let usable = (vw - SIDEBAR_W - PAD_X * 2.0).max(CARD_W);
         self.cols = (((usable + GAP) / (CARD_W + GAP)).floor() as usize).max(1);
-        let rows = self.total.div_ceil(self.cols);
+        let rows = self.cells().div_ceil(self.cols);
 
         if self.bench.is_some() {
             self.bench_tick(window, cx);
@@ -1119,8 +1255,21 @@ impl Render for Aulos {
                     .child("Aulos"),
             )
             .children(nav.iter().enumerate().map(|(i, n)| {
-                let active = i == 1;
+                let active = match self.view {
+                    View::Home => i == 0,
+                    View::Library | View::Album { .. } => i == 1,
+                };
                 div()
+                    .id(("nav", i))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        match i {
+                            0 => this.view = View::Home,
+                            1 => this.view = View::Library,
+                            _ => return,
+                        }
+                        cx.notify();
+                    }))
                     .h(px(36.0))
                     .px(px(12.0))
                     .rounded(px(8.0))
@@ -1157,8 +1306,8 @@ impl Render for Aulos {
                             .text_size(px(13.0))
                             .text_color(rgb(t.muted))
                             .child(format!(
-                                "{} cells · {} · {} cols",
-                                self.total, self.status, self.cols
+                                "{} albums · {}",
+                                self.cells(), self.status
                             )),
                     ),
             ));
@@ -1219,6 +1368,7 @@ impl Render for Aulos {
                             .child(header)
                             .child(match &self.view {
                                 _ if !self.search_query.is_empty() => self.search_view(&t, cx),
+                                View::Home => self.home_view(&t, cx),
                                 View::Library => grid.into_any_element(),
                                 View::Album { ix, tracks } => {
                                     let (ix, tracks) = (*ix, tracks.clone());
@@ -1247,6 +1397,7 @@ fn main() {
     let plex_creds = (base.clone(), token.clone());
     let (transport_tx, transport_rx) = mpsc::unbounded_channel::<Transport>();
     let (search_tx, search_rx) = mpsc::unbounded_channel::<SearchRequest>();
+    let (hubs_tx, hubs_rx) = mpsc::unbounded_channel::<HubsRequest>();
     let mpris_tx = mpris::start(transport_tx);
     let client = plex::Client::new(base, token);
     std::thread::Builder::new()
@@ -1257,7 +1408,7 @@ fn main() {
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(plex::run(client, section, albums_tx, art_rx_req, art_res_tx, tracks_rx, search_rx));
+            rt.block_on(plex::run(client, section, albums_tx, art_rx_req, art_res_tx, tracks_rx, search_rx, hubs_rx));
         })
         .unwrap();
 
@@ -1280,7 +1431,7 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                let view = cx.new(|cx| Aulos::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds, transport_rx, mpris_tx, search_tx));
+                let view = cx.new(|cx| Aulos::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds, transport_rx, mpris_tx, search_tx, hubs_tx));
                 cx.new(|cx| gpui_component::Root::new(view, window, cx))
             },
         )
