@@ -8,6 +8,7 @@
 //!   AULOS_ITEMS   (default 50000; real albums are cycled to fill)
 //!   AULOS_BENCH   (set: auto-scroll, print frame stats, quit)
 
+mod mpris;
 mod plex;
 mod theme;
 
@@ -26,7 +27,10 @@ use gpui_component::input::{Input, InputState};
 use tokio::sync::mpsc;
 
 use aulos_spike::audio::{Engine, Event as AudioEvent, Source};
+use mpris::{Transport, Update as MprisUpdate};
 use plex::{Album, ArtRequest, ArtResult, Track, TracksRequest};
+
+gpui::actions!(aulos, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack]);
 use theme::Theme;
 
 const CARD_W: f32 = 184.0;
@@ -56,6 +60,10 @@ struct Aulos {
     engine: Option<Engine>,
     now: Option<Now>,
     autoplay: Option<usize>,
+    /// Bumped on every engine start so stale poll loops exit.
+    play_gen: u64,
+    mpris: tokio::sync::mpsc::UnboundedSender<MprisUpdate>,
+    focus: gpui::FocusHandle,
 }
 
 struct Now {
@@ -63,10 +71,17 @@ struct Now {
     tracks: Vec<Track>,
     /// index -> (source rate, bits), from engine TrackStarted events.
     formats: HashMap<usize, (u32, u32)>,
+    /// Album track index the current engine started at, and the offset into it.
+    start_idx: usize,
+    start_ms: u64,
+    /// Engine-relative track index -> start on the played-time clock (us).
+    boundaries: Vec<u64>,
     idx: usize,
     elapsed_ms: u64,
     graph_rate: u32,
+    paused: bool,
     finished: bool,
+    sent_idx: Option<usize>,
 }
 
 struct Bench {
@@ -80,6 +95,7 @@ struct Bench {
 }
 
 impl Aulos {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -88,7 +104,20 @@ impl Aulos {
         albums_rx: tokio::sync::oneshot::Receiver<anyhow::Result<Vec<Album>>>,
         tracks_tx: mpsc::UnboundedSender<TracksRequest>,
         plex: (String, String),
+        mut transport_rx: mpsc::UnboundedReceiver<Transport>,
+        mpris: mpsc::UnboundedSender<MprisUpdate>,
     ) -> Self {
+        // MPRIS commands arrive from the mpris thread.
+        cx.spawn(async move |this, cx| {
+            while let Some(t) = transport_rx.recv().await {
+                if this.update(cx, |this, cx| this.transport(t, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
         let (theme, theme_gen) = Theme::load();
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search, play, or run a command"));
 
@@ -102,7 +131,10 @@ impl Aulos {
                         this.albums = albums;
                         if let Some(ix) = this.autoplay.take() {
                             this.play_album(ix, cx);
-                        }
+                        } else if let Ok(key) = std::env::var("AULOS_AUTOPLAY_KEY")
+                            && let Some(ix) = this.albums.iter().position(|a| a.rating_key == key) {
+                                this.play_album(ix, cx);
+                            }
                     }
                     Ok(Err(e)) => this.status = format!("Plex error: {e:#}").into(),
                     Err(_) => this.status = "Plex task dropped".into(),
@@ -194,11 +226,18 @@ impl Aulos {
             engine: None,
             now: None,
             autoplay: std::env::var("AULOS_AUTOPLAY").ok().and_then(|v| v.parse().ok()),
+            play_gen: 0,
+            mpris,
+            focus,
         }
     }
 
     fn play_album(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(album) = self.album(ix).cloned() else { return };
+        // Make sure the cover is on its way (MPRIS and the player bar need it).
+        if !album.thumb.is_empty() && !self.art.contains_key(&album.thumb) && self.requested.insert(album.thumb.clone()) {
+            let _ = self.art_tx.send(ArtRequest { thumb: album.thumb.clone() });
+        }
         let (reply, rx) = tokio::sync::oneshot::channel();
         let _ = self.tracks_tx.send(TracksRequest { album_key: album.rating_key.clone(), reply });
         self.status = format!("Loading {}…", album.title).into();
@@ -213,29 +252,48 @@ impl Aulos {
                 }
                 Err(_) => return,
             };
-            let ok = this
-                .update(cx, |this, cx| this.start_engine(album, tracks, cx))
-                .is_ok();
-            if !ok {
-                return;
-            }
-            // Poll the engine only while something is playing (idle stays ~0%).
-            loop {
-                cx.background_executor().timer(Duration::from_millis(250)).await;
-                let keep = this.update(cx, |this, cx| this.poll_engine(cx)).unwrap_or(false);
-                if !keep {
-                    break;
-                }
-            }
+            this.update(cx, |this, cx| {
+                this.write_art_for_mpris(&album);
+                this.now = Some(Now {
+                    album,
+                    tracks,
+                    formats: HashMap::new(),
+                    start_idx: 0,
+                    start_ms: 0,
+                    boundaries: Vec::new(),
+                    idx: 0,
+                    elapsed_ms: 0,
+                    graph_rate: 0,
+                    paused: false,
+                    finished: false,
+                    sent_idx: None,
+                });
+                this.play_from(0, 0, cx);
+            })
+            .ok();
         })
         .detach();
     }
 
-    fn start_engine(&mut self, album: Album, tracks: Vec<Track>, cx: &mut Context<Self>) {
-        // Dropping the old engine stops it.
-        self.engine = None;
+    fn art_path(album: &Album) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!("/scratch/aulos-cache/art-{}.jpg", album.rating_key))
+    }
+
+    fn write_art_for_mpris(&self, album: &Album) {
+        if let Some(img) = self.art.get(&album.thumb) {
+            let _ = std::fs::write(Self::art_path(album), img.bytes());
+        }
+    }
+
+    /// (Re)start the engine at album track `idx`, `ms` into it.
+    fn play_from(&mut self, idx: usize, ms: u64, cx: &mut Context<Self>) {
+        let Some(now) = self.now.as_mut() else { return };
+        if idx >= now.tracks.len() {
+            return;
+        }
+        self.engine = None; // dropping stops the old one
         let (base, token) = self.plex.clone();
-        let queue = tracks
+        let queue = now.tracks[idx..]
             .iter()
             .map(|t| {
                 let id = t.part_key.split('/').nth(3).unwrap_or("x").to_string();
@@ -247,24 +305,92 @@ impl Aulos {
                 }
             })
             .collect();
-        match Engine::play(queue, self.target.clone()) {
+        match Engine::play_from(queue, ms, self.target.clone()) {
             Ok(e) => {
-                eprintln!("[aulos] playing {} ({} tracks) -> {:?}", album.title, tracks.len(), self.target);
                 self.engine = Some(e);
-                self.status = format!("Playing {}", album.title).into();
-                self.now = Some(Now {
-                    album,
-                    tracks,
-                    formats: HashMap::new(),
-                    idx: 0,
-                    elapsed_ms: 0,
-                    graph_rate: 0,
-                    finished: false,
-                });
+                now.start_idx = idx;
+                now.start_ms = ms;
+                now.boundaries.clear();
+                now.idx = idx;
+                now.elapsed_ms = ms;
+                now.paused = false;
+                now.finished = false;
+                self.status = format!("Playing {}", now.album.title).into();
+                let _ = self.mpris.send(MprisUpdate::Status { playing: true, stopped: false });
+                if ms > 0 {
+                    let _ = self.mpris.send(MprisUpdate::Seeked(ms));
+                }
             }
             Err(e) => self.status = format!("Audio error: {e:#}").into(),
         }
+        self.play_gen += 1;
+        let gen_id = self.play_gen;
+        // Poll only while this engine is current (idle stays ~0%).
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                let keep = this
+                    .update(cx, |this, cx| this.play_gen == gen_id && this.poll_engine(cx))
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.notify();
+    }
+
+    fn transport(&mut self, t: Transport, cx: &mut Context<Self>) {
+        let Some(now) = self.now.as_mut() else { return };
+        let (idx, elapsed, n) = (now.idx, now.elapsed_ms, now.tracks.len());
+        eprintln!("[aulos] transport {t:?}");
+        match t {
+            Transport::PlayPause | Transport::Play | Transport::Pause => {
+                let want_pause = match t {
+                    Transport::Play => false,
+                    Transport::Pause => true,
+                    _ => !now.paused,
+                };
+                if now.finished {
+                    if !want_pause {
+                        self.play_from(0, 0, cx);
+                    }
+                    return;
+                }
+                now.paused = want_pause;
+                if let Some(e) = &self.engine {
+                    e.set_active(!want_pause);
+                }
+                let _ = self.mpris.send(MprisUpdate::Status { playing: !want_pause, stopped: false });
+                cx.notify();
+            }
+            Transport::Next => {
+                if idx + 1 < n {
+                    self.play_from(idx + 1, 0, cx);
+                }
+            }
+            Transport::Prev => {
+                if elapsed > 3000 || idx == 0 {
+                    self.play_from(idx, 0, cx);
+                } else {
+                    self.play_from(idx - 1, 0, cx);
+                }
+            }
+            Transport::Seek(off) => {
+                let len = now.tracks[idx].duration_ms;
+                let to = (elapsed as i64 + off).clamp(0, len.saturating_sub(1000) as i64) as u64;
+                self.play_from(idx, to, cx);
+            }
+            Transport::SetPosition(ms) => self.play_from(idx, ms, cx),
+            Transport::Stop => {
+                self.engine = None;
+                now.finished = true;
+                now.paused = true;
+                let _ = self.mpris.send(MprisUpdate::Status { playing: false, stopped: true });
+                cx.notify();
+            }
+        }
     }
 
     /// Returns false once playback is over.
@@ -272,8 +398,11 @@ impl Aulos {
         let (Some(engine), Some(now)) = (self.engine.as_ref(), self.now.as_mut()) else { return false };
         while let Ok(ev) = engine.events.try_recv() {
             match ev {
-                AudioEvent::TrackStarted { index, source_rate, bits, .. } => {
-                    now.formats.insert(index, (source_rate, bits));
+                AudioEvent::TrackStarted { index, source_rate, bits, at_us, .. } => {
+                    now.formats.insert(now.start_idx + index, (source_rate, bits));
+                    if now.boundaries.len() == index {
+                        now.boundaries.push(at_us);
+                    }
                 }
                 AudioEvent::Reconnected { from, to, silent_ms } => {
                     eprintln!("[aulos] rate change {from} -> {to}: {silent_ms:.1} ms");
@@ -288,19 +417,38 @@ impl Aulos {
                 }
             }
         }
-        let played_ms = engine.stats.played_us.load(std::sync::atomic::Ordering::Relaxed) / 1000;
+        let played_us = engine.stats.played_us.load(std::sync::atomic::Ordering::Relaxed);
         now.graph_rate = engine.stats.graph_rate.load(std::sync::atomic::Ordering::Relaxed);
-        // Current track from cumulative Plex durations.
-        let mut acc = 0;
-        now.idx = now.tracks.len().saturating_sub(1);
-        for (i, t) in now.tracks.iter().enumerate() {
-            if played_ms < acc + t.duration_ms {
-                now.idx = i;
-                break;
-            }
-            acc += t.duration_ms;
+        // Current track: the last engine boundary at or before the played clock.
+        let rel = now.boundaries.iter().rposition(|&b| b <= played_us).unwrap_or(0);
+        let base = now.boundaries.get(rel).copied().unwrap_or(0);
+        now.idx = (now.start_idx + rel).min(now.tracks.len() - 1);
+        now.elapsed_ms = (played_us - base.min(played_us)) / 1000 + if rel == 0 { now.start_ms } else { 0 };
+
+        // Cover arrived after the track was announced: write it and re-announce.
+        let art = Self::art_path(&now.album);
+        if !art.exists()
+            && let Some(img) = self.art.get(&now.album.thumb)
+                && std::fs::write(&art, img.bytes()).is_ok() {
+                    now.sent_idx = None;
+                }
+        if now.sent_idx != Some(now.idx) {
+            now.sent_idx = Some(now.idx);
+            let tr = &now.tracks[now.idx];
+            let art = Self::art_path(&now.album);
+            let _ = self.mpris.send(MprisUpdate::Track {
+                id: tr.part_key.split('/').nth(3).unwrap_or("0").to_string(),
+                title: tr.title.clone(),
+                artist: tr.artist.clone(),
+                album: now.album.title.clone(),
+                length_ms: tr.duration_ms,
+                art_url: art.exists().then(|| format!("file://{}", art.display())),
+            });
         }
-        now.elapsed_ms = played_ms.saturating_sub(acc);
+        let _ = self.mpris.send(MprisUpdate::Position(now.elapsed_ms));
+        if now.finished {
+            let _ = self.mpris.send(MprisUpdate::Status { playing: false, stopped: true });
+        }
         cx.notify();
         !now.finished
     }
@@ -422,7 +570,7 @@ fn fmt_ms(ms: u64) -> String {
 }
 
 impl Aulos {
-    fn player_bar(&self, t: &Theme) -> gpui::AnyElement {
+    fn player_bar(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let (title, sub, art, frac, times, badge) = match &self.now {
             Some(n) => {
                 let tr = &n.tracks[n.idx];
@@ -454,6 +602,48 @@ impl Aulos {
             }
             None => ("Nothing playing".into(), "Click an album to play it".into(), None, 0.0, None, None),
         };
+        let paused = self.now.as_ref().is_none_or(|n| n.paused || n.finished);
+        let len_ms = self.now.as_ref().map(|n| n.tracks[n.idx].duration_ms).unwrap_or(0);
+        let btn = |id: &'static str, label: &'static str, tr: Transport, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .px(px(12.0))
+                .h(px(32.0))
+                .flex()
+                .items_center()
+                .rounded(px(16.0))
+                .border_1()
+                .border_color(rgb(t.border))
+                .text_size(px(12.0))
+                .text_color(rgb(t.text))
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(t.raised)))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.transport(tr, cx)))
+        };
+        let controls = div()
+            .flex()
+            .gap(px(8.0))
+            .child(btn("prev", "Prev", Transport::Prev, cx))
+            .child(btn("pp", if paused { "Play" } else { "Pause" }, Transport::PlayPause, cx))
+            .child(btn("next", "Next", Transport::Next, cx));
+        // Seek bar: 120 click targets, each jumping to its share of the track.
+        const SEG: usize = 120;
+        let segs: Vec<_> = (0..SEG)
+            .map(|i| {
+                let ms = len_ms * i as u64 / SEG as u64;
+                let filled = (i as f32 + 0.5) / SEG as f32 <= frac;
+                div()
+                    .id(("seek", i))
+                    .flex_1()
+                    .h(px(16.0))
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .child(div().w_full().h(px(4.0)).bg(rgb(if filled { t.accent } else { t.border })))
+                    .on_click(cx.listener(move |this, _, _, cx| this.transport(Transport::SetPosition(ms), cx)))
+            })
+            .collect();
         let cover = match art {
             Some(i) => img(i).size(px(56.0)).rounded(px(6.0)).into_any_element(),
             None => div().size(px(56.0)).rounded(px(6.0)).bg(rgb(t.raised)).into_any_element(),
@@ -487,16 +677,10 @@ impl Aulos {
                     .text_size(px(12.0))
                     .text_color(rgb(t.muted))
                     .children(times.as_ref().map(|(a, _)| a.clone()))
-                    .child(
-                        div()
-                            .w(px(480.0))
-                            .h(px(4.0))
-                            .rounded(px(2.0))
-                            .bg(rgb(t.border))
-                            .child(div().w(px(480.0 * frac)).h_full().rounded(px(2.0)).bg(rgb(t.accent))),
-                    )
+                    .child(div().w(px(480.0)).flex().children(segs))
                     .children(times.map(|(_, b)| b)),
             )
+            .child(controls)
             .child(div().flex_1())
             .children(badge.map(|(text, color)| {
                 div()
@@ -631,9 +815,21 @@ impl Render for Aulos {
         .track_scroll(&self.scroll)
         .flex_1();
 
-        let player = self.player_bar(&t);
+        let player = self.player_bar(&t, cx);
 
         let el = div()
+            .key_context("Aulos")
+            .track_focus(&self.focus)
+            .capture_key_down(|ev: &gpui::KeyDownEvent, window, cx| {
+                if std::env::var_os("AULOS_KEYLOG").is_some() {
+                    eprintln!("[keys] {:?} has_focus={}", ev.keystroke, window.focused(cx).is_some());
+                }
+            })
+            .on_action(cx.listener(|this, _: &PlayPause, _, cx| this.transport(Transport::PlayPause, cx)))
+            .on_action(cx.listener(|this, _: &NextTrack, _, cx| this.transport(Transport::Next, cx)))
+            .on_action(cx.listener(|this, _: &PrevTrack, _, cx| this.transport(Transport::Prev, cx)))
+            .on_action(cx.listener(|this, _: &SeekForward, _, cx| this.transport(Transport::Seek(10_000), cx)))
+            .on_action(cx.listener(|this, _: &SeekBack, _, cx| this.transport(Transport::Seek(-10_000), cx)))
             .size_full()
             .flex()
             .flex_col()
@@ -675,6 +871,8 @@ fn main() {
     let (albums_tx, albums_rx) = tokio::sync::oneshot::channel();
     let (tracks_tx, tracks_rx) = mpsc::unbounded_channel::<TracksRequest>();
     let plex_creds = (base.clone(), token.clone());
+    let (transport_tx, transport_rx) = mpsc::unbounded_channel::<Transport>();
+    let mpris_tx = mpris::start(transport_tx);
     let client = plex::Client::new(base, token);
     std::thread::Builder::new()
         .name("tokio".into())
@@ -690,6 +888,13 @@ fn main() {
 
     gpui_platform::application().run(move |cx: &mut App| {
         gpui_component::init(cx);
+        cx.bind_keys([
+            gpui::KeyBinding::new("space", PlayPause, Some("Aulos")),
+            gpui::KeyBinding::new("n", NextTrack, Some("Aulos")),
+            gpui::KeyBinding::new("p", PrevTrack, Some("Aulos")),
+            gpui::KeyBinding::new("right", SeekForward, Some("Aulos")),
+            gpui::KeyBinding::new("left", SeekBack, Some("Aulos")),
+        ]);
         let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
         cx.open_window(
             WindowOptions {
@@ -698,7 +903,7 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                let view = cx.new(|cx| Aulos::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds));
+                let view = cx.new(|cx| Aulos::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds, transport_rx, mpris_tx));
                 cx.new(|cx| gpui_component::Root::new(view, window, cx))
             },
         )

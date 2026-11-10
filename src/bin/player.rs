@@ -36,7 +36,7 @@ fn main() -> anyhow::Result<()> {
     let mut reported = 0usize;
     loop {
         match engine.events.recv_timeout(Duration::from_millis(250)) {
-            Ok(Event::TrackStarted { index, label, source_rate, bits, at_frame }) => {
+            Ok(Event::TrackStarted { index, label, source_rate, bits, at_frame, .. }) => {
                 eprintln!("[queue] #{index} {label}: {source_rate} Hz / {bits}-bit, starts at frame {at_frame}");
                 tracks.push((at_frame, source_rate, label));
             }

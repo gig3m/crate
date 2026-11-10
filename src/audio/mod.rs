@@ -55,7 +55,8 @@ pub struct Stats {
 
 #[derive(Debug)]
 pub enum Event {
-    TrackStarted { index: usize, label: String, source_rate: u32, bits: u32, at_frame: u64 },
+    /// `at_us`: where this track begins on the played-time clock (`Stats::played_us`).
+    TrackStarted { index: usize, label: String, source_rate: u32, bits: u32, at_frame: u64, at_us: u64 },
     Reconnected { from: u32, to: u32, silent_ms: f64 },
     FirstAudio { ms_since_play: f64 },
     Finished,
@@ -67,6 +68,7 @@ enum Cmd {
     Configure { rate: u32, ack: mpsc::Sender<()> },
     /// Start pulling (sent once the ring holds enough audio).
     Activate,
+    SetActive(bool),
     Drain,
     Stop,
 }
@@ -78,6 +80,11 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Pause (false) or resume (true) without losing position.
+    pub fn set_active(&self, active: bool) {
+        let _ = self.cmd.send(Cmd::SetActive(active));
+    }
+
     pub fn stop(&self) {
         self.stats.stop.store(true, Ordering::Release);
         let _ = self.cmd.send(Cmd::Stop);
@@ -93,6 +100,11 @@ impl Drop for Engine {
 impl Engine {
     /// Start playing `queue` on `target` (a sink node.name; None = default).
     pub fn play(queue: Vec<Source>, target: Option<String>) -> anyhow::Result<Self> {
+        Self::play_from(queue, 0, target)
+    }
+
+    /// Like `play`, starting `start_ms` into the first track.
+    pub fn play_from(queue: Vec<Source>, start_ms: u64, target: Option<String>) -> anyhow::Result<Self> {
         let stats = Arc::new(Stats::default());
         let (ev_tx, events) = mpsc::channel();
         let (cmd_tx, cmd_rx) = pw::channel::channel::<Cmd>();
@@ -117,7 +129,7 @@ impl Engine {
             std::thread::Builder::new()
                 .name("decoder".into())
                 .spawn(move || {
-                    if let Err(e) = decoder_thread(queue, prod, cmd_tx, stats.clone(), ev_tx.clone()) {
+                    if let Err(e) = decoder_thread(queue, start_ms, prod, cmd_tx, stats.clone(), ev_tx.clone()) {
                         let _ = ev_tx.send(Event::Error(format!("decoder: {e:#}")));
                     }
                     stats.decoder_done.store(true, Ordering::Release);
@@ -129,6 +141,7 @@ impl Engine {
 
 fn decoder_thread(
     queue: Vec<Source>,
+    start_ms: u64,
     mut prod: rtrb::Producer<f32>,
     cmd_tx: pw::channel::Sender<Cmd>,
     stats: Arc<Stats>,
@@ -137,6 +150,7 @@ fn decoder_thread(
     let play_started = Instant::now();
     let mut cur_rate = 0u32;
     let mut queued_frames = 0u64;
+    let mut queued_us = 0u64;
     let mut scratch: Vec<f32> = Vec::new();
     let mut first_audio_reported = false;
     // Spike/testing aid: cap each track at N seconds.
@@ -208,7 +222,14 @@ fn decoder_thread(
             source_rate: rate,
             bits,
             at_frame: queued_frames,
+            at_us: queued_us,
         });
+        if index == 0 && start_ms > 0 {
+            use symphonia::core::formats::{SeekMode, SeekTo};
+            use symphonia::core::units::Time;
+            let time = Time::try_from_secs_f64(start_ms as f64 / 1000.0).unwrap_or_default();
+            fmt.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(track.id) })?;
+        }
 
         let mut needs_activate = rebuilt;
         let prefill = (rate as usize / 10) * CHANNELS; // 100 ms
@@ -252,6 +273,7 @@ fn decoder_thread(
                 let _ = cmd_tx.send(Cmd::Activate);
             }
             queued_frames += (scratch.len() / CHANNELS) as u64;
+            queued_us += (scratch.len() / CHANNELS) as u64 * 1_000_000 / rate as u64;
             track_frames += (scratch.len() / CHANNELS) as u64;
             if !first_audio_reported && stats.got_data.load(Ordering::Acquire) {
                 first_audio_reported = true;
@@ -431,6 +453,11 @@ fn pw_thread(
         Cmd::Activate => {
             if let Some((s, _)) = live2.borrow().as_ref() {
                 let _ = s.set_active(true);
+            }
+        }
+        Cmd::SetActive(on) => {
+            if let Some((s, _)) = live2.borrow().as_ref() {
+                let _ = s.set_active(on);
             }
         }
         Cmd::Stop => {
