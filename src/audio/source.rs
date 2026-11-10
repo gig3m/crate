@@ -1,0 +1,180 @@
+//! Track sources. `Progressive` downloads a Plex file to the local cache on a
+//! background thread while the decoder reads from it, blocking only when it
+//! gets ahead of the download.
+
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom, Write},
+    os::unix::fs::FileExt,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+use symphonia::core::io::MediaSource;
+
+#[derive(Clone, Debug)]
+pub enum Source {
+    File(PathBuf),
+    /// A Plex part URL (absolute) fetched with the token, cached at `cache`.
+    Http { url: String, token: String, cache: PathBuf },
+}
+
+impl Source {
+    pub fn label(&self) -> String {
+        match self {
+            Source::File(p) => p.file_name().unwrap_or_default().to_string_lossy().into(),
+            Source::Http { cache, .. } => {
+                format!("plex:{}", cache.file_name().unwrap_or_default().to_string_lossy())
+            }
+        }
+    }
+
+    pub fn ext(&self) -> Option<String> {
+        let p = match self {
+            Source::File(p) => p.clone(),
+            Source::Http { cache, .. } => cache.clone(),
+        };
+        p.extension().map(|e| e.to_string_lossy().into_owned())
+    }
+
+    /// Open for decoding. For HTTP, a complete cached copy is used if present.
+    pub fn open(&self) -> anyhow::Result<Box<dyn MediaSource>> {
+        match self {
+            Source::File(p) => Ok(Box::new(File::open(p)?)),
+            Source::Http { cache, .. } if cache.exists() => Ok(Box::new(File::open(cache)?)),
+            Source::Http { url, token, cache } => Ok(Box::new(Progressive::start(url, token, cache)?)),
+        }
+    }
+}
+
+struct DlState {
+    written: AtomicU64,
+    total: AtomicU64,
+    done: AtomicBool,
+    error: Mutex<Option<String>>,
+    started: Instant,
+    first_byte_ms: AtomicU64,
+}
+
+pub struct Progressive {
+    file: File,
+    pos: u64,
+    st: Arc<DlState>,
+}
+
+impl Progressive {
+    fn start(url: &str, token: &str, cache: &std::path::Path) -> anyhow::Result<Self> {
+        let part = cache.with_extension("part");
+        let writer = File::create(&part)?;
+        let reader = File::open(&part)?;
+        let st = Arc::new(DlState {
+            written: AtomicU64::new(0),
+            total: AtomicU64::new(0),
+            done: AtomicBool::new(false),
+            error: Mutex::new(None),
+            started: Instant::now(),
+            first_byte_ms: AtomicU64::new(0),
+        });
+        let (url, token, cache, st2) = (url.to_string(), token.to_string(), cache.to_path_buf(), st.clone());
+        std::thread::Builder::new().name("download".into()).spawn(move || {
+            let res = (|| -> anyhow::Result<()> {
+                let mut w = writer;
+                let mut resp = reqwest::blocking::Client::new()
+                    .get(&url)
+                    .header("X-Plex-Token", &token)
+                    .header("X-Plex-Client-Identifier", "aulos-spike")
+                    .send()?
+                    .error_for_status()?;
+                if let Some(len) = resp.content_length() {
+                    st2.total.store(len, Ordering::Release);
+                }
+                let mut buf = vec![0u8; 256 * 1024];
+                loop {
+                    let n = resp.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    w.write_all(&buf[..n])?;
+                    if st2.written.load(Ordering::Relaxed) == 0 {
+                        st2.first_byte_ms.store(st2.started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                    }
+                    st2.written.fetch_add(n as u64, Ordering::Release);
+                }
+                w.flush()?;
+                std::fs::rename(&part, &cache)?;
+                eprintln!(
+                    "[download] {} complete: {:.1} MB in {:?} (first byte {} ms)",
+                    cache.display(),
+                    st2.written.load(Ordering::Relaxed) as f64 / 1e6,
+                    st2.started.elapsed(),
+                    st2.first_byte_ms.load(Ordering::Relaxed)
+                );
+                Ok(())
+            })();
+            if let Err(e) = res {
+                *st2.error.lock().unwrap() = Some(format!("{e:#}"));
+            }
+            st2.done.store(true, Ordering::Release);
+        })?;
+        Ok(Self { file: reader, pos: 0, st })
+    }
+}
+
+impl Read for Progressive {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let written = self.st.written.load(Ordering::Acquire);
+            if self.pos < written {
+                let n = (written - self.pos).min(buf.len() as u64) as usize;
+                let got = self.file.read_at(&mut buf[..n], self.pos)?;
+                self.pos += got as u64;
+                return Ok(got);
+            }
+            if self.st.done.load(Ordering::Acquire) {
+                if let Some(e) = self.st.error.lock().unwrap().clone() {
+                    return Err(std::io::Error::other(e));
+                }
+                return Ok(0);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
+impl Seek for Progressive {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        let total = self.st.total.load(Ordering::Acquire);
+        let new = match to {
+            SeekFrom::Start(n) => n as i64,
+            SeekFrom::Current(d) => self.pos as i64 + d,
+            SeekFrom::End(d) => {
+                if total == 0 {
+                    return Err(std::io::Error::other("length unknown"));
+                }
+                total as i64 + d
+            }
+        };
+        if new < 0 {
+            return Err(std::io::Error::other("seek before start"));
+        }
+        // Seeking past the downloaded part just waits in read() for the bytes.
+        self.pos = new as u64;
+        Ok(self.pos)
+    }
+}
+
+impl MediaSource for Progressive {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+    fn byte_len(&self) -> Option<u64> {
+        match self.st.total.load(Ordering::Acquire) {
+            0 => None,
+            n => Some(n),
+        }
+    }
+}
