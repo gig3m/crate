@@ -2234,6 +2234,8 @@ impl Render for Crate {
                                     this.play_album(ix, cx);
                                 }
                             }
+                            "pause" => this.transport(Transport::Pause, cx),
+                            "stop" => this.transport(Transport::Stop, cx),
                             _ => eprintln!("[crate] CRATE_KEYS: unknown {k}"),
                         }
                         eprintln!("[crate] key {k}: cursor {:?} selection {}", this.cursor, this.selection.len());

@@ -108,12 +108,20 @@ pub(crate) struct Viz {
     sampled: Option<(std::time::Instant, u64)>,
     /// When the tap's head last moved (new audio played).
     head_moved: Option<std::time::Instant>,
+    /// Typical time between the tap's updates (one audio callback), smoothed:
+    /// a gap longer than this is silence, shorter is just between callbacks.
+    cb_gap: Option<std::time::Duration>,
 }
 
 impl Viz {
     pub fn load() -> Self {
         let (style, palette) = crate::theme::saved_viz();
         Self { style: Style::ALL.into_iter().find(|s| s.key() == style).unwrap_or_default(), palette, ..Default::default() }
+    }
+
+    /// Nothing left to fall: the live view shows silence.
+    fn at_rest(&self) -> bool {
+        self.buf.is_empty() && self.spectrum.iter().all(|&x| x < 0.005) && self.level.iter().chain(&self.peak).all(|&x| x < 0.005)
     }
 
     fn frac_at(&self, x: Pixels) -> Option<f32> {
@@ -124,30 +132,43 @@ impl Viz {
     }
 
     /// Refresh the live view from the engine's output tap.
-    fn sample(&mut self, scope: &crate_audio::audio::Scope) {
+    /// With no engine (stopped), only falls to rest.
+    fn sample(&mut self, scope: Option<&crate_audio::audio::Scope>) {
         // Smoothing is tuned per ~30 fps step: extra repaints (a drag,
         // hover) reuse the last frame instead of speeding it up.
         let now = std::time::Instant::now();
-        let head = scope.head();
+        let head = scope.map(|s| s.head()).unwrap_or(0);
         if self.sampled.is_some_and(|(t, _)| now.duration_since(t) < std::time::Duration::from_millis(30)) {
             return;
         }
-        let fresh = self.sampled.is_none_or(|(_, h)| h != head);
+        let fresh = scope.is_some() && self.sampled.is_none_or(|(_, h)| h != head);
         self.sampled = Some((now, head));
+        // Hold the last frame through a normal gap between callbacks (they
+        // can be long when another app forces a big buffer on the device).
+        let hold = self.cb_gap.map(|g| g.mul_f32(1.6)).unwrap_or_default().clamp(std::time::Duration::from_millis(120), std::time::Duration::from_millis(700));
         if fresh {
+            if let Some(prev) = self.head_moved {
+                let gap = now.duration_since(prev);
+                // Only gaps that look like callback spacing, not a pause.
+                if gap < std::time::Duration::from_millis(1000) {
+                    self.cb_gap = Some(match self.cb_gap {
+                        Some(g) => g.mul_f32(0.8) + gap.mul_f32(0.2),
+                        None => gap,
+                    });
+                }
+            }
             self.head_moved = Some(now);
-        } else if self.head_moved.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(120)) {
-            // A long graph cycle, not silence: keep the last frame.
+        } else if scope.is_some() && self.head_moved.is_some_and(|t| now.duration_since(t) < hold) {
             return;
         }
         // Nothing new played for a while (pause, stop, underrun): fall to rest.
-        let have = fresh && scope.latest(FFT, &mut self.buf);
+        let have = fresh && scope.is_some_and(|s| s.latest(FFT, &mut self.buf));
         if !have {
             self.buf.clear();
         }
         match self.style {
             Style::Spectrum => {
-                let rate = scope.rate.load(std::sync::atomic::Ordering::Relaxed).max(8000) as f32;
+                let rate = scope.map(|s| s.rate.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(44_100).max(8000) as f32;
                 let bands = if have && self.buf.len() >= FFT * 2 { spectrum(&self.buf, rate) } else { vec![0.0; BARS] };
                 if self.spectrum.len() != BARS {
                     self.spectrum = vec![0.0; BARS];
@@ -303,13 +324,12 @@ impl Crate {
         }
     }
 
-    /// A live style is showing over audio that is playing: worth animating.
+    /// A live style is showing over audio that is playing, or still settling
+    /// to rest after a pause or stop: worth animating.
     pub(crate) fn viz_animating(&self) -> bool {
         let v = self.viz.borrow();
-        v.style.live()
-            && v.drawn.get().is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(250))
-            && self.engine.is_some()
-            && self.now.as_ref().is_some_and(|n| !n.paused && !n.finished)
+        let playing = self.engine.is_some() && self.now.as_ref().is_some_and(|n| !n.paused && !n.finished);
+        v.style.live() && v.drawn.get().is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(250)) && (playing || !v.at_rest())
     }
 
     /// Repaint ~30 times a second while a live style animates.
@@ -339,10 +359,8 @@ impl Crate {
         let t = &theme;
         let mut v = self.viz.borrow_mut();
         v.drawn.set(Some(std::time::Instant::now()));
-        if v.style.live()
-            && let Some(e) = self.engine.as_ref()
-        {
-            v.sample(&e.stats.scope);
+        if v.style.live() {
+            v.sample(self.engine.as_ref().map(|e| &e.stats.scope));
         }
         // A drag shows on the bar it started on.
         let shown = v.drag.filter(|_| v.press.is_some_and(|(p, _)| p == id)).unwrap_or(frac);
@@ -458,7 +476,10 @@ impl Crate {
                                 if phase != gpui::DispatchPhase::Bubble {
                                     return;
                                 }
-                                let held = ev.pressed_button == Some(MouseButton::Left);
+                                // Any button: Wayland reports only the last one
+                                // pressed, so a right press mid-drag reads as
+                                // Right while the left is still held.
+                                let held = ev.pressed_button.is_some();
                                 let none = ev.pressed_button.is_none();
                                 weak.update(cx, |this, cx| {
                                     let mut v = this.viz.borrow_mut();
@@ -540,7 +561,15 @@ impl Crate {
                     cx.notify();
                 }),
             )
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, _: &MouseDownEvent, _, cx| this.cycle_viz_palette(cx)))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    // Not in the middle of a drag-to-seek.
+                    if this.viz.borrow().press.is_none() {
+                        this.cycle_viz_palette(cx);
+                    }
+                }),
+            )
             .into_any_element()
     }
 }

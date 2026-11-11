@@ -2,7 +2,8 @@
 //!
 //! usage: player [--target NODE] ITEM...
 //!   ITEM = a local file, or plex:/library/parts/<id>/<ts>/file.<ext>
-//!   (plex items stream progressively into /scratch/crate-cache; needs PLEX_TOKEN)
+//!   (plex items stream progressively into $CRATE_AUDIO_CACHE, else
+//!   /scratch/crate-cache if present, else ~/.cache/crate/audio; needs PLEX_TOKEN)
 
 use std::{path::PathBuf, sync::atomic::Ordering, time::Duration};
 
@@ -12,9 +13,12 @@ fn main() -> anyhow::Result<()> {
     let mut target = None;
     let mut queue = Vec::new();
     let base = std::env::var("PLEX_URL").unwrap_or_else(|_| "http://plex-server:32400".into());
-    let cache_dir = PathBuf::from(
-        std::env::var("CRATE_CACHE").unwrap_or_else(|_| "/scratch/crate-cache".into()),
-    );
+    // Same choice as the app (plex::audio_cache_dir).
+    let cache_dir = match std::env::var_os("CRATE_AUDIO_CACHE").filter(|v| !v.is_empty()) {
+        Some(d) => PathBuf::from(d),
+        None if std::path::Path::new("/scratch/crate-cache").is_dir() => PathBuf::from("/scratch/crate-cache"),
+        None => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/crate/audio"),
+    };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         if a == "--target" {
