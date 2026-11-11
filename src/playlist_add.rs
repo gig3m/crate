@@ -40,6 +40,7 @@ impl Crate {
 
     pub(crate) fn cancel_naming(&mut self, cx: &mut Context<Self>) {
         self.naming = None;
+        self.refocus = true;
         cx.notify();
     }
 
@@ -51,10 +52,10 @@ impl Crate {
             return;
         }
         let Some(n) = self.naming.take() else { return };
-        let section = crate::SECTION.get().cloned().unwrap_or_default();
+        self.refocus = true;
+        let section = crate::section();
         let (rx, smart) = match n.what {
             NameFor::Albums(keys) => {
-                self.selection.clear();
                 let t = title.clone();
                 (crate::plex_call(move |c| async move { c.create_playlist(&t, &keys).await }), false)
             }
@@ -69,6 +70,10 @@ impl Crate {
             this.update(cx, |this, cx| {
                 match res {
                     Ok(Ok((_, n))) => {
+                        // Done with the selection (kept on failure, to retry).
+                        if !smart {
+                            this.selection.clear();
+                        }
                         let kind = if smart { "Smart playlist" } else { "Playlist" };
                         this.say(format!("{kind} \u{201c}{title}\u{201d} created · {n} tracks"));
                         this.reload_playlists(cx);
@@ -178,6 +183,12 @@ impl Crate {
                     div()
                         .id("naming-bar")
                         .block_mouse_except_scroll()
+                        .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                            if ev.keystroke.key == "escape" {
+                                this.cancel_naming(cx);
+                                cx.stop_propagation();
+                            }
+                        }))
                         .flex()
                         .flex_col()
                         .gap(px(8.0))

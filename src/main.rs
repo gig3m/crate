@@ -130,6 +130,8 @@ struct Crate {
     hits: Vec<SearchHit>,
     /// Set after a hit is activated: next render clears the box and refocuses the app.
     reset_search: bool,
+    /// Give keyboard focus back to the app (after the naming bar closes).
+    refocus: bool,
     home: Option<plex::Home>,
     /// Back/forward history.
     back: Vec<View>,
@@ -790,6 +792,7 @@ impl Crate {
             search_query: String::new(),
             hits: Vec::new(),
             reset_search: false,
+            refocus: false,
             home: None,
             artist_tx,
             mpris,
@@ -991,6 +994,8 @@ impl Crate {
         // A selection belongs to the Albums page it was made on.
         if !matches!(self.view, View::Library) {
             self.selection.clear();
+            // So is a playlist being named from it.
+            self.naming = None;
         }
         self.back.push(old);
         if self.back.len() > 50 {
@@ -2118,6 +2123,9 @@ impl Render for Crate {
         }
         if std::mem::take(&mut self.raise_requested) {
             window.activate_window();
+        }
+        if std::mem::take(&mut self.refocus) {
+            window.focus(&self.focus, cx);
         }
         if std::mem::take(&mut self.reset_search) {
             self.search.update(cx, |s, cx| s.set_value("", window, cx));

@@ -69,6 +69,11 @@ impl Crate {
     /// Re-query the album order for the current sort and filters. The default
     /// (date added, no filters) is the cached list as-is.
     pub(crate) fn refresh_library(&mut self, cx: &mut Context<Self>) {
+        // A smart playlist being named was for the filters as they were.
+        if matches!(self.naming, Some(crate::playlist_add::Naming { what: crate::playlist_add::NameFor::Smart(_), .. })) {
+            self.naming = None;
+            self.refocus = true;
+        }
         self.lib_gen += 1;
         self.scroll = gpui::UniformListScrollHandle::new();
         self.cursor = None;

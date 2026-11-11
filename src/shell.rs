@@ -43,6 +43,7 @@ impl Crate {
                 if !self.lib_filters.is_empty() {
                     self.lib_filters.clear();
                     self.selection.clear();
+                    self.naming = None;
                     self.refresh_library(cx);
                 }
                 View::Library
