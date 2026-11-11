@@ -773,6 +773,10 @@ impl Crate {
 
     fn activate_hit(&mut self, h: SearchHit, cx: &mut Context<Self>) {
         eprintln!("[crate] activate {} {:?}", h.kind, h.title);
+        // Opening a page shows it: close Now Playing (a track just plays).
+        if h.kind != "track" {
+            self.now_playing = false;
+        }
         match h.kind.as_str() {
             "album" => {
                 if let Some(ix) = self.albums.iter().position(|a| a.rating_key == h.rating_key) {
@@ -2121,6 +2125,12 @@ impl Render for Crate {
 }
 
 impl Crate {
+    /// Show `msg` as a toast even if it's the same text as last time.
+    pub(crate) fn say(&mut self, msg: impl Into<SharedString>) {
+        self.status = msg.into();
+        self.status_seen = SharedString::default();
+    }
+
     /// Status messages (errors, "Starting radio…", skipped albums) as a
     /// toast above the player bar for a few seconds after each change.
     fn status_toast(&mut self, t: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {

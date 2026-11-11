@@ -74,7 +74,7 @@ impl PalCmd {
 pub(crate) fn split_prefix(q: &str) -> (Option<char>, &str) {
     match q.chars().next() {
         Some(c @ ('@' | '#' | '>')) => (Some(c), q[1..].trim_start()),
-        Some('\\') => (None, &q[1..]),
+        Some('\\') => (None, q[1..].trim_start()),
         _ => (None, q),
     }
 }
@@ -201,11 +201,15 @@ impl Crate {
             PalCmd::Queue => self.open_now_playing(Some(0), cx),
             PalCmd::Shuffle => {
                 self.toggle_shuffle(cx);
-                self.status = if self.shuffle { "Shuffle on" } else { "Shuffle off" }.into();
+                self.say(if self.shuffle { "Shuffle on" } else { "Shuffle off" });
             }
             PalCmd::Repeat => {
                 self.cycle_repeat(cx);
-                self.status = format!("Repeat: {:?}", self.repeat).into();
+                self.say(match self.repeat {
+                    crate::queue::Repeat::Off => "Repeat off",
+                    crate::queue::Repeat::All => "Repeat all",
+                    crate::queue::Repeat::One => "Repeat one",
+                });
             }
             PalCmd::Settings => self.open_audio_settings(cx),
             PalCmd::SonicAdventure => self.open_sonic(cx),
@@ -213,7 +217,7 @@ impl Crate {
             PalCmd::ThemeOmarchy => self.set_theme_mode(crate::theme::Mode::Omarchy, cx),
         }
         if self.now.is_none() && matches!(c, PalCmd::NowPlaying | PalCmd::Queue) {
-            self.status = "Nothing is playing".into();
+            self.say("Nothing is playing");
         }
         cx.notify();
     }
@@ -350,7 +354,12 @@ impl Crate {
         let mut body = div().id("pal-body").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().px(px(8.0)).pt(px(10.0)).pb(px(6.0));
         let mut last = "";
         if items.is_empty() {
-            let msg = if self.search_query.is_empty() { "Type to search artists, albums, tracks and playlists" } else { "Searching…" };
+            let msg = match split_prefix(&self.search_query) {
+                (_, "") => "Type to search artists, albums, tracks and playlists (@ artists, # genres, > commands)",
+                (Some('#'), _) => "No genre, mood or decade matches",
+                (Some('>'), _) => "No command matches",
+                _ => "Searching…",
+            };
             body = body.child(div().px(px(12.0)).py(px(16.0)).text_size(px(14.0)).text_color(rgb(t.muted)).child(msg));
         }
         for (i, (section, item)) in items.into_iter().enumerate() {
