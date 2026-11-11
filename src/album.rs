@@ -322,6 +322,7 @@ impl Crate {
                     .child("Sonically similar")
                     .on_click(cx.listener(move |this, _, _, cx| this.play_album_sonic_radio(a4.clone(), cx)))
             })
+            .child(self.playlist_menu("album-add-playlist", vec![album.rating_key.clone()], album.title.clone(), cx))
             .child({
                 // Keep offline: green when kept, progress while downloading.
                 let kept = self.offline.index.get(&album.rating_key).cloned();

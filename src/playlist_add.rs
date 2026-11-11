@@ -106,6 +106,15 @@ impl Crate {
             return;
         }
         let keys = std::mem::take(&mut self.selection);
+        self.add_items_to_playlist(keys, playlist, title, cx);
+    }
+
+    /// Append albums or tracks (rating keys) to an existing playlist.
+    pub(crate) fn add_items_to_playlist(&mut self, keys: Vec<String>, playlist: String, title: String, cx: &mut Context<Self>) {
+        if self.playlist_busy {
+            self.say("Still saving the last playlist…");
+            return;
+        }
         if keys.is_empty() {
             return;
         }
@@ -130,6 +139,36 @@ impl Crate {
         })
         .detach();
         cx.notify();
+    }
+
+    /// An "+ Playlist" pill: a new playlist of `keys` (named `name` by
+    /// default), or add them to one of your playlists.
+    pub(crate) fn playlist_menu(&self, id: &'static str, keys: Vec<String>, name: String, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use gpui_component::{button::{Button, ButtonVariants}, menu::{DropdownMenu, PopupMenuItem}};
+        let this = cx.entity().downgrade();
+        let lists: Vec<(String, String)> =
+            self.home.as_ref().map(|h| h.playlists.iter().filter(|p| !p.smart).map(|p| (p.rating_key.clone(), p.title.clone())).collect()).unwrap_or_default();
+        Button::new(id)
+            .ghost()
+            .label("+ Playlist")
+            .dropdown_menu(move |mut menu, _, _| {
+                let (t2, k2, n2) = (this.clone(), keys.clone(), name.clone());
+                menu = menu.item(PopupMenuItem::new("New playlist…").on_click(move |_, window, cx| {
+                    let (k, n) = (k2.clone(), n2.clone());
+                    t2.update(cx, |this, cx| this.start_naming(NameFor::Albums(k), n, window, cx)).ok();
+                }));
+                if !lists.is_empty() {
+                    menu = menu.separator();
+                }
+                for (key, title) in &lists {
+                    let (key, title, this, keys) = (key.clone(), title.clone(), this.clone(), keys.clone());
+                    menu = menu.item(PopupMenuItem::new(title.clone()).on_click(move |_, _, cx| {
+                        this.update(cx, |this, cx| this.add_items_to_playlist(keys.clone(), key.clone(), title.clone(), cx)).ok();
+                    }));
+                }
+                menu
+            })
+            .into_any_element()
     }
 
     /// Refresh the playlist list (sidebar, Playlists page, menus).
@@ -169,7 +208,8 @@ impl Crate {
     pub(crate) fn naming_bar(&self, t: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let n = self.naming.as_ref()?;
         let what = match n.what {
-            NameFor::Albums(ref k) => format!("New playlist · {} album{}", k.len(), if k.len() == 1 { "" } else { "s" }),
+            NameFor::Albums(ref k) if k.len() == 1 => "New playlist".to_string(),
+            NameFor::Albums(ref k) => format!("New playlist · {} albums", k.len()),
             NameFor::Smart(_) => "New smart playlist · updates as the library changes".to_string(),
         };
         let btn = |id: &'static str, label: &'static str, primary: bool| {

@@ -1020,9 +1020,9 @@ impl Crate {
         // A selection belongs to the Albums page it was made on.
         if !matches!(self.view, View::Library) {
             self.selection.clear();
-            // So is a playlist being named from it.
-            self.naming = None;
         }
+        // A playlist being named belongs to the page it was started on.
+        self.naming = None;
         self.back.push(old);
         if self.back.len() > 50 {
             self.back.remove(0);
@@ -1040,9 +1040,9 @@ impl Crate {
         self.cursor = None;
             if !matches!(self.view, View::Library) {
                 self.selection.clear();
-                if self.naming.take().is_some() {
-                    self.refocus = true;
-                }
+            }
+            if self.naming.take().is_some() {
+                self.refocus = true;
             }
             self.reload_view(cx);
             cx.notify();
@@ -1095,9 +1095,9 @@ impl Crate {
         self.cursor = None;
             if !matches!(self.view, View::Library) {
                 self.selection.clear();
-                if self.naming.take().is_some() {
-                    self.refocus = true;
-                }
+            }
+            if self.naming.take().is_some() {
+                self.refocus = true;
             }
             self.reload_view(cx);
             cx.notify();
@@ -2241,6 +2241,7 @@ impl Render for Crate {
                 self.playlist_view(&key, &title, detail.as_deref(), &t, cx)
             }
         };
+        let naming = self.naming_bar(&t, cx);
         let main_area = if compact && self.compact_playing && self.now.is_some() {
             self.tile_view(&t, cx)
         } else {
@@ -2256,10 +2257,13 @@ impl Render for Crate {
                         .h_full()
                         .flex()
                         .flex_col()
+                        .relative()
                         .when(!compact, |d| d.child(self.top_bar(&t, cx)))
                         .when(compact, |d| d.pt(px(16.0)))
                         .children(header)
-                        .child(page),
+                        .child(page)
+                        // The Albums grid places its own; other pages get it here.
+                        .children(if matches!(self.view, View::Library) { None } else { naming }),
                 )
                 .into_any_element()
         };
