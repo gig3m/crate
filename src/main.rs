@@ -2822,7 +2822,7 @@ impl Render for Crate {
             .children(toast)
             .children(palette);
         // Now Playing covers the player bar (still built underneath it).
-        if self.now_playing && !self.compact {
+        if self.now_playing && self.now.is_some() && !self.compact {
             self.viz.borrow_mut().keep_live_bars(&["np-bar"]);
         }
         self.last_render_us = t0.elapsed().as_micros();

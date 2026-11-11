@@ -391,7 +391,9 @@ impl Crate {
         v.drawn.set(Some(std::time::Instant::now()));
         // (Not under the palette or another overlay: the layer would sit
         // above its dimmed backdrop. The bar stays in place, still.)
-        let layered = v.style.live() && self.viz_layer.is_some() && !self.palette && self.autoeq_picker.is_none();
+        // Not under the palette (the layer would sit above its dimmed
+        // backdrop) or in the compact tile (which can clip the bar).
+        let layered = v.style.live() && self.viz_layer.is_some() && !self.palette && !self.compact;
         if layered {
             // The layer above draws the moving bars here, at this bar's
             // bounds; this element keeps the progress line and the input.
@@ -400,7 +402,8 @@ impl Crate {
             if !v.live_bars.iter().any(|(b, _)| *b == id) {
                 v.live_bars.push((id, height));
             }
-        } else if v.style.live() {
+        } else if v.style.live() && !self.palette {
+            // (Under the palette the bar holds still, dimmed with the rest.)
             v.sample(self.engine.as_ref().map(|e| &e.stats.scope));
         }
         // A drag shows on the bar it started on.
@@ -635,44 +638,6 @@ impl Viz {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn bass_bars_are_not_steps() {
-        // A 70 Hz tone at 44.1 kHz: bars around it rise then fall with no run
-        // of identical neighbours (one bin repeated).
-        let rate = 44_100.0;
-        let stereo: Vec<f32> = (0..super::FFT).flat_map(|i| {
-            let v = 0.5 * (std::f32::consts::TAU * 70.0 * i as f32 / rate).sin();
-            [v, v]
-        }).collect();
-        let bands = super::spectrum(&stereo, rate);
-        let low = &bands[..20];
-        let repeats = low.windows(2).filter(|w| (w[0] - w[1]).abs() < 1e-6 && w[0] > 0.0).count();
-        assert_eq!(repeats, 0, "{low:?}");
-        let peak = low.iter().cloned().fold(0.0f32, f32::max);
-        assert!(peak > 0.8, "{low:?}");
-    }
-
-    #[test]
-    fn fft_finds_a_tone() {
-        // 1 kHz at 48 kHz: the spectrum's loudest band contains 1 kHz.
-        let n = super::FFT;
-        let stereo: Vec<f32> = (0..n).flat_map(|i| {
-            let s = (std::f32::consts::TAU * 1000.0 * i as f32 / 48_000.0).sin() * 0.5;
-            [s, s]
-        }).collect();
-        let bands = super::spectrum(&stereo, 48_000.0);
-        let top = bands.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
-        let lo = super::LO_HZ;
-        let f0 = lo * (18_000.0f32 / lo).powf(top as f32 / super::BARS as f32);
-        let f1 = lo * (18_000.0f32 / lo).powf((top + 1) as f32 / super::BARS as f32);
-        assert!(f0 <= 1050.0 && f1 >= 950.0, "loudest band {f0}..{f1} Hz");
-        assert!(bands[top] > 0.8);
-        assert_eq!(super::gradient(&[0x000000, 0xffffff], 0.0), 0x000000);
-        assert_eq!(super::gradient(&[0x000000, 0xffffff], 1.0), 0xffffff);
-    }
-}
 
 
 /// The moving bars of a live style, at `height`.
@@ -739,21 +704,119 @@ pub(crate) struct VizLayer {
 
 impl gpui::Render for VizLayer {
     fn render(&mut self, _window: &mut gpui::Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let mut v = self.viz.borrow_mut();
-        let root = div().absolute().inset_0();
-        let Some(theme) = v.theme.clone().filter(|_| v.style.live() && !v.live_bars.is_empty()) else {
-            return root;
-        };
-        let stats = v.stats.clone();
-        v.sample(stats.as_ref().map(|s| &s.scope));
-        v.drawn.set(Some(std::time::Instant::now()));
-        let bounds = v.bounds.borrow().clone();
-        let bars: Vec<_> = v
-            .live_bars
-            .iter()
-            .filter_map(|(id, h)| bounds.get(id).map(|b| (*b, *h)))
-            .map(|(b, h)| div().absolute().left(b.origin.x).top(b.origin.y).w(b.size.width).h(b.size.height).child(live_body(&v, &theme, h)))
-            .collect();
-        root.children(bars)
+        // Sample now; what to draw and where is read at paint time, after the
+        // app (painted first, beneath) has rendered and laid out this frame.
+        {
+            let mut v = self.viz.borrow_mut();
+            if v.style.live() && !v.live_bars.is_empty() && v.theme.is_some() {
+                let stats = v.stats.clone();
+                v.sample(stats.as_ref().map(|s| &s.scope));
+                v.drawn.set(Some(std::time::Instant::now()));
+            }
+        }
+        let viz = self.viz.clone();
+        gpui::canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let v = viz.borrow();
+                let Some(t) = v.theme.as_ref().filter(|_| v.style.live()) else { return };
+                let bounds = v.bounds.borrow();
+                for (id, _) in &v.live_bars {
+                    if let Some(b) = bounds.get(id) {
+                        paint_live(window, *b, &v, t);
+                    }
+                }
+            },
+        )
+        .absolute()
+        .inset_0()
+    }
+}
+
+/// Paint a live style's moving bars into `b` (window coordinates, the same
+/// space the app's bar recorded), matching `live_body`'s layout.
+fn paint_live(window: &mut gpui::Window, b: Bounds<Pixels>, v: &Viz, t: &Theme) {
+    use gpui::{fill, point, size};
+    let st = stops(v.palette, t);
+    let (x0, y0) = (f32::from(b.origin.x), f32::from(b.origin.y));
+    let (w, height) = (f32::from(b.size.width), f32::from(b.size.height));
+    let gap = 1.5f32;
+    let bw = ((w - gap * (BARS as f32 - 1.0)) / BARS as f32).max(0.5);
+    let quad = |window: &mut gpui::Window, x: f32, y: f32, qw: f32, qh: f32, color: u32, r: f32| {
+        window.paint_quad(fill(Bounds::new(point(px(x), px(y)), size(px(qw), px(qh.max(1.0)))), rgb(color)).corner_radii(px(r)));
+    };
+    match v.style {
+        Style::Spectrum => {
+            for i in 0..BARS {
+                let lv = v.spectrum.get(i).copied().unwrap_or(0.0);
+                let h = (2.0 + (height - 4.0) * lv).max(1.0);
+                quad(window, x0 + i as f32 * (bw + gap), y0 + height - h, bw, h, gradient(&st, lv), 1.0);
+            }
+        }
+        Style::Wave => {
+            let skip = v.buf.len().saturating_sub(2048 * 2) / 2;
+            let frames = v.buf.len() / 2 - skip;
+            let wave = &v.buf[skip * 2..];
+            let per = (frames / BARS).max(1);
+            let top = (0..frames).map(|f| 0.5 * (wave[2 * f] + wave[2 * f + 1]).abs()).fold(0.0f32, f32::max).max(0.08);
+            for i in 0..BARS {
+                let a = (i * per..((i + 1) * per).min(frames)).map(|f| 0.5 * (wave[2 * f] + wave[2 * f + 1]).abs()).fold(0.0f32, f32::max);
+                let h = (2.0 + (height - 2.0) * (a / top).min(1.0)).max(1.0);
+                quad(window, x0 + i as f32 * (bw + gap), y0 + (height - h) / 2.0, bw, h, gradient(&st, i as f32 / BARS as f32), 1.0);
+            }
+        }
+        Style::Meter => {
+            let rh = (height - 4.0) / 2.0;
+            let top = y0 + (height - (2.0 * rh + 4.0)) / 2.0;
+            for ch in 0..2 {
+                let (lv, pk) = (v.level[ch].clamp(0.0, 1.0), v.peak[ch].clamp(0.0, 1.0));
+                let y = top + ch as f32 * (rh + 4.0);
+                quad(window, x0, y, w, rh, t.line, 2.0);
+                if lv > 0.0 {
+                    quad(window, x0, y, w * lv, rh, gradient(&st, lv), 2.0);
+                }
+                quad(window, x0 + w * pk, y, 2.0, rh, gradient(&st, pk), 0.0);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bass_bars_are_not_steps() {
+        // A 70 Hz tone at 44.1 kHz: bars around it rise then fall with no run
+        // of identical neighbours (one bin repeated).
+        let rate = 44_100.0;
+        let stereo: Vec<f32> = (0..super::FFT).flat_map(|i| {
+            let v = 0.5 * (std::f32::consts::TAU * 70.0 * i as f32 / rate).sin();
+            [v, v]
+        }).collect();
+        let bands = super::spectrum(&stereo, rate);
+        let low = &bands[..20];
+        let repeats = low.windows(2).filter(|w| (w[0] - w[1]).abs() < 1e-6 && w[0] > 0.0).count();
+        assert_eq!(repeats, 0, "{low:?}");
+        let peak = low.iter().cloned().fold(0.0f32, f32::max);
+        assert!(peak > 0.8, "{low:?}");
+    }
+
+    #[test]
+    fn fft_finds_a_tone() {
+        // 1 kHz at 48 kHz: the spectrum's loudest band contains 1 kHz.
+        let n = super::FFT;
+        let stereo: Vec<f32> = (0..n).flat_map(|i| {
+            let s = (std::f32::consts::TAU * 1000.0 * i as f32 / 48_000.0).sin() * 0.5;
+            [s, s]
+        }).collect();
+        let bands = super::spectrum(&stereo, 48_000.0);
+        let top = bands.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let lo = super::LO_HZ;
+        let f0 = lo * (18_000.0f32 / lo).powf(top as f32 / super::BARS as f32);
+        let f1 = lo * (18_000.0f32 / lo).powf((top + 1) as f32 / super::BARS as f32);
+        assert!(f0 <= 1050.0 && f1 >= 950.0, "loudest band {f0}..{f1} Hz");
+        assert!(bands[top] > 0.8);
+        assert_eq!(super::gradient(&[0x000000, 0xffffff], 0.0), 0x000000);
+        assert_eq!(super::gradient(&[0x000000, 0xffffff], 1.0), 0xffffff);
     }
 }
