@@ -15,6 +15,7 @@ mod art;
 mod artist;
 mod home;
 mod icons;
+mod instance;
 mod library;
 mod pages;
 mod palette;
@@ -144,6 +145,8 @@ struct Crate {
     sonic_progress: Option<u32>,
     audio_info: Option<settings::AudioInfo>,
     prompt_copied: bool,
+    /// Another launch (or MPRIS Raise) asked for the window.
+    raise_requested: bool,
     history: Option<Vec<plex::HistoryItem>>,
     top_tracks: Option<Vec<(Track, u64)>>,
     /// Artists derived from the album list: (key, name, album count).
@@ -276,6 +279,7 @@ impl Crate {
         // close out the report here, while it still exists.
         let weak = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
+            instance::cleanup();
             weak.update(cx, |this, _| this.report_stop()).ok();
             flush_writes(Duration::from_millis(1500));
             true
@@ -531,6 +535,7 @@ impl Crate {
             compact_playing: true,
             audio_info: None,
             prompt_copied: false,
+            raise_requested: false,
             history: None,
             top_tracks: None,
             artist_cache: Vec::new(),
@@ -904,6 +909,18 @@ impl Crate {
     }
 
     fn transport(&mut self, t: Transport, cx: &mut Context<Self>) {
+        // These work with nothing playing.
+        match t {
+            Transport::Raise => {
+                self.raise_requested = true;
+                cx.notify();
+                return;
+            }
+            Transport::SetVolume(v) => return self.set_volume(v, cx),
+            Transport::SetShuffle(on) => return self.set_modes(Some(on), None, cx),
+            Transport::SetRepeat(r) => return self.set_modes(None, Some(r), cx),
+            _ => {}
+        }
         let Some(now) = self.now.as_mut() else { return };
         let (idx, elapsed, n) = (now.idx, now.elapsed_ms, now.tracks.len());
         eprintln!("[crate] transport {t:?}");
@@ -945,9 +962,7 @@ impl Crate {
                 self.play_from(idx, to, cx);
             }
             Transport::SetPosition(ms) => self.play_from(idx, ms, cx),
-            Transport::SetShuffle(on) => self.set_modes(Some(on), None, cx),
-            Transport::SetRepeat(r) => self.set_modes(None, Some(r), cx),
-            Transport::SetVolume(v) => self.set_volume(v, cx),
+            Transport::SetShuffle(_) | Transport::SetRepeat(_) | Transport::SetVolume(_) | Transport::Raise => {}
             Transport::Stop => {
                 self.engine = None;
                 now.finished = true;
@@ -1476,6 +1491,10 @@ impl Render for Crate {
             self.open_palette(window, cx);
             self.on_search_change(q, cx);
         }
+        if std::mem::take(&mut self.raise_requested) {
+            window.activate_window();
+            instance::focus_hint();
+        }
         if std::mem::take(&mut self.reset_search) {
             self.search.update(cx, |s, cx| s.set_value("", window, cx));
             self.search_query.clear();
@@ -1819,6 +1838,10 @@ fn main() {
         run_setup(rt);
         return;
     };
+    // One Crate at a time: a second launch raises the first and exits.
+    if instance::hand_off() {
+        return;
+    }
     let (base, token, section) = (acct.url.clone(), acct.token.clone(), acct.section.clone());
     let _ = SECTION.set(section.clone());
 
@@ -1829,6 +1852,9 @@ fn main() {
     let (tracks_tx, tracks_rx) = mpsc::unbounded_channel::<TracksRequest>();
     let plex_creds = (base.clone(), token.clone());
     let (transport_tx, transport_rx) = mpsc::unbounded_channel::<Transport>();
+    if !instance::listen(transport_tx.clone()) && instance::hand_off() {
+        return;
+    }
     let (search_tx, search_rx) = mpsc::unbounded_channel::<SearchRequest>();
     let (hubs_tx, hubs_rx) = mpsc::unbounded_channel::<HubsRequest>();
     let (artist_tx, artist_rx) = mpsc::unbounded_channel::<ArtistRequest>();

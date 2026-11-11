@@ -21,6 +21,8 @@ pub enum Transport {
     SetRepeat(crate::queue::Repeat),
     /// 0.0..=1.0
     SetVolume(f32),
+    /// Bring the window forward (a second launch, or MPRIS Raise).
+    Raise,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +55,7 @@ pub fn start(cmds: mpsc::UnboundedSender<Transport>) -> mpsc::UnboundedSender<Up
                     .can_control(true)
                     .loop_status(LoopStatus::None)
                     .shuffle(false)
+                    .can_raise(true)
                     .build()
                     .await
                 {
@@ -74,6 +77,7 @@ pub fn start(cmds: mpsc::UnboundedSender<Transport>) -> mpsc::UnboundedSender<Up
                 player.connect_next(send(Transport::Next));
                 player.connect_previous(send(Transport::Prev));
                 player.connect_stop(send(Transport::Stop));
+                player.connect_raise(send(Transport::Raise));
                 {
                     let c = cmds.clone();
                     player.connect_seek(move |_, offset: Time| {
