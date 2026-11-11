@@ -190,6 +190,12 @@ struct Crate {
     sonic_albums: HashMap<String, Option<Vec<Album>>>,
     /// Card formats of other editions shown on album pages, by album key.
     edition_formats: HashMap<String, (u32, String)>,
+    /// Guest DJ (canvas): slips a sonically nearby track in after each one.
+    guest_dj: bool,
+    /// Tracks the Guest DJ added (badged in the queue), and the (queue, index)
+    /// it last picked for, so each track gets one pick.
+    dj_keys: std::collections::HashSet<String>,
+    dj_for: Option<(u64, usize)>,
     /// Appears on, by artist key: album keys (fetched after the artist page shows).
     appears_on: HashMap<String, Vec<String>>,
     sonic_artists: HashMap<String, Option<Vec<sonic::ArtistRef>>>,
@@ -743,6 +749,9 @@ impl Crate {
             sonic_albums: HashMap::new(),
             edition_formats: HashMap::new(),
             appears_on: HashMap::new(),
+            guest_dj: std::env::var_os("CRATE_GUEST_DJ").is_some(),
+            dj_keys: std::collections::HashSet::new(),
+            dj_for: None,
             sonic_artists: HashMap::new(),
             sonic: sonic::SonicState::default(),
             artist_kinds: HashMap::new(),
@@ -1533,6 +1542,7 @@ impl Crate {
         self.request_track_detail(rk, cx);
         // Now Playing's ambient field comes from the album's UltraBlur colors.
         self.request_album_detail(album_key, cx);
+        self.guest_dj_tick(cx);
         let Some(now) = self.now.as_mut() else { return false };
         // Radio: fetch the next window when two tracks from the end.
         if let Some(key) = now.refill.clone()

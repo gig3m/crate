@@ -225,6 +225,46 @@ impl Crate {
         cx.notify();
     }
 
+    /// Guest DJ: once per track, add a sonically nearby library track (not
+    /// already queued, from another album) right after it. Not on radio (it's
+    /// sonic already) or repeat-one, and not after a DJ pick.
+    pub(crate) fn guest_dj_tick(&mut self, cx: &mut Context<Self>) {
+        let Some(now) = self.now.as_ref() else { return };
+        if !self.guest_dj || now.refill.is_some() || self.repeat == Repeat::One || now.finished {
+            return;
+        }
+        let at = (now.queue_id, now.idx);
+        if self.dj_for == Some(at) {
+            return;
+        }
+        self.dj_for = Some(at);
+        let cur = now.tracks[now.idx].clone();
+        if self.dj_keys.contains(&cur.rating_key) {
+            return;
+        }
+        let queued: std::collections::HashSet<String> = now.tracks.iter().map(|t| t.rating_key.clone()).collect();
+        let k = cur.rating_key.clone();
+        let rx = crate::plex_call(move |c| async move { c.nearest_tracks(&k, 15).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(near)) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                // Still the same track playing in the same queue.
+                if this.now.as_ref().map(|n| (n.queue_id, n.idx)) != Some(at) || !this.guest_dj {
+                    return;
+                }
+                let Some(pick) = near.into_iter().find(|t| !queued.contains(&t.rating_key) && t.album_key != cur.album_key) else { return };
+                this.dj_keys.insert(pick.rating_key.clone());
+                // Quietly: a toast for every pick would be noise.
+                let (status, seen) = (this.status.clone(), this.status_seen.clone());
+                this.enqueue(vec![pick], true, "Guest DJ".into(), cx);
+                this.status = status;
+                this.status_seen = seen;
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(crate) fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
         self.shuffle = !self.shuffle;
         // Reorder and hand over against the SAME `started`: if the decoder opens a

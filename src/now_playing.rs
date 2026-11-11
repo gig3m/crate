@@ -321,16 +321,53 @@ impl Crate {
                                     .child(div().text_size(px(12.0)).text_color(white(0.66)).truncate().child(q.artist.clone())),
                             )
                             .when(radio, |d| d.child(div().font_family(MONO).text_size(px(10.0)).text_color(rgb(t.healthy)).child("RADIO")))
+                            .when(!radio && self.dj_keys.contains(&q.rating_key), |d| d.child(div().font_family(MONO).text_size(px(10.0)).text_color(rgb(t.discovery)).child("DJ")))
                             .child(div().font_family(MONO).text_size(px(11.0)).text_color(white(0.66)).child(fmt_ms(q.duration_ms)))
                             .on_click(cx.listener(move |this, _, _, cx| this.play_from(i, 0, cx)))
                     })
                     .collect();
                 let label = if radio { "NEXT FROM RADIO" } else { "NEXT UP" };
+                let dj_on = self.guest_dj;
+                // Guest DJ toggle (canvas): not offered on radio, which is sonic already.
+                let dj = (!radio).then(|| {
+                    div()
+                        .id("guest-dj")
+                        .h(px(22.0))
+                        .px(px(9.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(11.0))
+                        .border_1()
+                        .border_color(if dj_on { rgb(t.discovery).into() } else { white(0.2) })
+                        .font_family(MONO)
+                        .text_size(px(10.0))
+                        .text_color(if dj_on { rgb(t.discovery).into() } else { white(0.66) })
+                        .cursor_pointer()
+                        .child(if dj_on { "GUEST DJ · ON" } else { "GUEST DJ" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.guest_dj = !this.guest_dj;
+                            this.dj_for = None;
+                            this.say(if this.guest_dj { "Guest DJ on: a sonically nearby track after each one" } else { "Guest DJ off" });
+                            if this.guest_dj {
+                                this.guest_dj_tick(cx);
+                            }
+                            cx.notify();
+                        }))
+                });
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .child(div().px(px(6.0)).py(px(4.0)).font_family(MONO).font_weight(FontWeight::MEDIUM).text_size(px(11.0)).text_color(white(0.66)).child(label))
+                    .child(
+                        div()
+                            .px(px(6.0))
+                            .py(px(4.0))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(div().font_family(MONO).font_weight(FontWeight::MEDIUM).text_size(px(11.0)).text_color(white(0.66)).child(label))
+                            .children(dj),
+                    )
                     .when(rows.is_empty(), |d| d.child(div().px(px(6.0)).text_size(px(13.0)).text_color(white(0.6)).child("End of queue")))
                     .children(rows)
             }
