@@ -694,7 +694,15 @@ impl Crate {
                 Ok(Ok(t)) => {
                     this.update(cx, |this, cx| f(this, album, t, cx)).ok();
                 }
-                Ok(Err(e)) => eprintln!("[crate] tracks: {e:#}"),
+                Ok(Err(e)) => {
+                    eprintln!("[crate] tracks: {e:#}");
+                    let title = album.title.clone();
+                    this.update(cx, |this, cx| {
+                        this.status = format!("Couldn't load {title}: {e:#}").into();
+                        cx.notify();
+                    })
+                    .ok();
+                }
                 Err(_) => {}
             }
         })

@@ -48,8 +48,10 @@ impl Crate {
                 Ok(Ok(list)) => {
                     // Not the artist itself; photos by the thumb the cards look up.
                     let list: Vec<ArtistRef> = list.into_iter().filter(|(k, _, _)| *k != key).take(6).collect();
-                    for (_, _, th) in &list {
-                        this.request_thumb(&th.clone());
+                    for (k, _, th) in &list {
+                        // The card falls back to the bare thumb path when Plex gave none.
+                        let th = if th.is_empty() { format!("/library/metadata/{k}/thumb") } else { th.clone() };
+                        this.request_thumb(&th);
                     }
                     this.sonic_artists.insert(key, Some(list));
                     cx.notify();
@@ -75,17 +77,22 @@ impl Crate {
             let res = rx.await;
             this.update(cx, |this, cx| match res {
                 _ if this.play_intent != intent => {}
-                Ok(Ok(near)) if near.is_empty() => {
-                    this.status = format!("{} hasn't been sonically analyzed yet", seed.title).into();
-                    cx.notify();
-                }
                 Ok(Ok(near)) => {
                     let seed_key = seed.rating_key.clone();
+                    let near: Vec<Track> = near.into_iter().filter(|t| t.rating_key != seed_key).collect();
+                    if near.is_empty() {
+                        this.status = format!("{} hasn't been sonically analyzed yet", seed.title).into();
+                        cx.notify();
+                        return;
+                    }
                     let mut q = vec![seed];
-                    q.extend(near.into_iter().filter(|t| t.rating_key != seed_key));
+                    q.extend(near);
                     this.start_queue(title, None, q, 0, cx);
                 }
-                Ok(Err(e)) => this.status = format!("Sonic radio: {e:#}").into(),
+                Ok(Err(e)) => {
+                    this.status = format!("Sonic radio: {e:#}").into();
+                    cx.notify();
+                }
                 Err(_) => {}
             })
             .ok();
@@ -105,7 +112,10 @@ impl Crate {
             }
             match tracks.into_iter().next() {
                 Some(first) => this.play_sonic_radio(first, cx),
-                None => this.status = "That album has no tracks to start from".into(),
+                None => {
+                    this.status = "That album has no tracks to start from".into();
+                    cx.notify();
+                }
             }
         });
     }
