@@ -337,6 +337,12 @@ pub struct Track {
     /// Plex playlist item id when this came from a playlist (0 otherwise):
     /// tells duplicate tracks in one playlist apart.
     pub playlist_item: u64,
+    /// The album's artist (`artist` is the track's own, which differs on
+    /// compilations and soundtracks).
+    pub album_artist: String,
+    /// Track number on its disc, and the disc (0 when Plex has none).
+    pub track_no: u32,
+    pub disc: u32,
 }
 
 #[derive(Deserialize)]
@@ -364,6 +370,13 @@ struct Meta {
     parent_thumb: Option<String>,
     #[serde(rename = "lastViewedAt", default)]
     last_viewed_at: Option<i64>,
+    /// A track's own artist when it differs from the album artist.
+    #[serde(rename = "originalTitle", default)]
+    original_title: Option<String>,
+    #[serde(default)]
+    index: Option<u32>,
+    #[serde(rename = "parentIndex", default)]
+    parent_index: Option<u32>,
 }
 
 impl Meta {
@@ -383,13 +396,16 @@ impl Meta {
         Some(Track {
             rating_key: self.rating_key,
             title: self.title,
-            artist: self.grandparent_title,
+            artist: self.original_title.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| self.grandparent_title.clone()),
+            album_artist: self.grandparent_title,
             duration_ms: self.duration.unwrap_or(0),
             part_key,
             album_key: self.parent_rating_key,
             album_title: self.parent_title,
             thumb: self.parent_thumb.unwrap_or_default(),
             playlist_item: 0,
+            track_no: self.index.unwrap_or(0),
+            disc: self.parent_index.unwrap_or(0),
         })
     }
 }

@@ -217,7 +217,7 @@ impl Crate {
                     album_key: it.album_key.clone(),
                     album_title: it.album.clone(),
                     thumb: it.thumb.clone(),
-                    playlist_item: 0,
+                    ..Default::default()
                 };
                 let (ak, tk) = (it.album_key.clone(), it.rating_key.clone());
                 self.track_row(i, &tr, crate::home::ago(it.viewed_at), t)

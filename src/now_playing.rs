@@ -222,7 +222,12 @@ impl Crate {
                 .child(gpui::svg().path(format!("icons/{ic}.svg")).size(px(size)).text_color(color))
                 .when_some(tr, |d, tr| d.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.transport(tr, cx))))
         };
-        let (ak, an) = (self.albums.iter().find(|a| a.rating_key == tr.album_key).map(|a| a.artist_key.clone()), tr.artist.clone());
+        // The artist link: the track's own artist when the library has them
+        // (compilations, soundtracks), else the album's.
+        let (ak, an) = match self.albums.iter().find(|a| a.artist == tr.artist && !a.artist_key.is_empty()) {
+            Some(a) => (Some(a.artist_key.clone()), tr.artist.clone()),
+            None => (self.albums.iter().find(|a| a.rating_key == tr.album_key).map(|a| a.artist_key.clone()), tr.album_artist.clone()),
+        };
         let left = div()
             .w(px(art))
             .flex_none()

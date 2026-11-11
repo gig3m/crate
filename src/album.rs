@@ -389,16 +389,40 @@ impl Crate {
             .child(div().w(px(24.0)))
             .child(div().w(px(56.0)).flex().justify_end().child("PLAYS"))
             .child(div().w(px(64.0)).flex().justify_end().child("TIME"));
-        let rows: Vec<_> = tracks
+        // Multi-disc albums get a header per disc.
+        let discs = tracks.map(|v| {
+            let mut d: Vec<u32> = v.iter().map(|t| t.disc).collect();
+            d.sort_unstable();
+            d.dedup();
+            d.len()
+        });
+        let multi_disc = discs.unwrap_or(0) > 1;
+        let rows: Vec<gpui::AnyElement> = tracks
             .map(|v| {
                 v.iter()
                     .enumerate()
-                    .map(|(i, tr)| {
+                    .flat_map(|(i, tr)| {
+                        let new_disc = multi_disc && (i == 0 || v[i - 1].disc != tr.disc);
+                        let header = new_disc.then(|| {
+                            div()
+                                .pt(px(if i == 0 { 8.0 } else { 20.0 }))
+                                .pb(px(6.0))
+                                .px(px(12.0))
+                                .font_family(MONO)
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_size(px(11.0))
+                                .text_color(rgb(t.text2))
+                                .child(format!("DISC {}", tr.disc.max(1)))
+                                .into_any_element()
+                        });
+                        let num = if tr.track_no > 0 { tr.track_no as usize } else { i + 1 };
+                        // The track's own artist, only where it isn't the album's.
+                        let own_artist = (!tr.artist.is_empty() && tr.artist != album.artist).then(|| tr.artist.clone());
                         let playing = playing_here == Some(i);
                         let at_cursor = self.cursor == Some(i);
                         let (plays, rating) = detail.as_ref().and_then(|d| d.stats.get(&tr.rating_key).copied()).unwrap_or((0, None));
                         let album = album.clone();
-                        div()
+                        let row = div()
                             .id(("track", i))
                             .h(px(52.0))
                             .px(px(12.0))
@@ -418,7 +442,7 @@ impl Crate {
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_size(px(13.0))
                                     .text_color(rgb(if playing { t.accent } else { t.muted }))
-                                    .child(if playing { "▶".to_string() } else { (i + 1).to_string() }),
+                                    .child(if playing { "▶".to_string() } else { num.to_string() }),
                             )
                             .child(
                                 div()
@@ -435,7 +459,7 @@ impl Crate {
                                             .truncate()
                                             .child(tr.title.clone()),
                                     )
-                                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(tr.artist.clone())),
+                                    .children(own_artist.map(|a| div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(a))),
                             )
                             .child(div().w(px(110.0)).child({
                                 let k = tr.rating_key.clone();
@@ -466,7 +490,8 @@ impl Crate {
                                 if let Some(tr) = this.album_tracks() {
                                     this.play_tracks(album.clone(), tr, i, cx);
                                 }
-                            }))
+                            }));
+                        header.into_iter().chain(std::iter::once(row.into_any_element()))
                     })
                     .collect()
             })
