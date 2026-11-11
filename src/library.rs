@@ -265,7 +265,30 @@ impl Crate {
                     })
                     .child(sort_btn),
             )
-            .child(div().flex().flex_wrap().items_center().gap(px(8.0)).children(chips).child(add_btn))
+            .child(
+                div().flex().flex_wrap().items_center().gap(px(8.0)).children(chips).child(add_btn).when(!self.lib_filters.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .id("lib-save-smart")
+                            .h(px(30.0))
+                            .px(px(12.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(15.0))
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(t.accent))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgb(t.raised)))
+                            .child("Save as smart playlist")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let query = this.lib_filters.iter().map(|f| f.query.as_str()).collect::<Vec<_>>().join("&");
+                                let name = this.smart_playlist_name();
+                                this.start_naming(crate::playlist_add::NameFor::Smart(query), name, window, cx);
+                            })),
+                    )
+                }),
+            )
             .into_any_element()
     }
 
@@ -491,6 +514,30 @@ impl Crate {
             }
             menu
         });
+        let this = cx.entity().downgrade();
+        let lists: Vec<(String, String)> =
+            self.home.as_ref().map(|h| h.playlists.iter().filter(|p| !p.smart).map(|p| (p.rating_key.clone(), p.title.clone())).collect()).unwrap_or_default();
+        let add = Button::new("sel-add-playlist").ghost().label("Add to playlist").dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |mut menu, _, _| {
+            let t2 = this.clone();
+            menu = menu.item(PopupMenuItem::new("New playlist…").on_click(move |_, window, cx| {
+                t2.update(cx, |this, cx| {
+                    let name = this.selection_playlist_name();
+                    let keys = this.selection.clone();
+                    this.start_naming(crate::playlist_add::NameFor::Albums(keys), name, window, cx);
+                })
+                .ok();
+            }));
+            if !lists.is_empty() {
+                menu = menu.separator();
+            }
+            for (key, title) in &lists {
+                let (key, title, this) = (key.clone(), title.clone(), this.clone());
+                menu = menu.item(PopupMenuItem::new(title.clone()).on_click(move |_, _, cx| {
+                    this.update(cx, |this, cx| this.add_selection_to_playlist(key.clone(), title.clone(), cx)).ok();
+                }));
+            }
+            menu
+        });
         Some(
             div()
                 .absolute()
@@ -518,6 +565,7 @@ impl Crate {
                         .child(div().mr(px(8.0)).text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child(format!("{} selected", self.selection.len())))
                         .child(btn("sel-play", "Play", true).on_click(cx.listener(|this, _, _, cx| this.play_selection(false, cx))))
                         .child(btn("sel-shuffle", "Shuffle", false).on_click(cx.listener(|this, _, _, cx| this.play_selection(true, cx))))
+                        .child(add)
                         .child(btn("sel-offline", "Keep offline", false).on_click(cx.listener(|this, _, _, cx| this.keep_selection_offline(cx))))
                         .child(rate)
                         .child(

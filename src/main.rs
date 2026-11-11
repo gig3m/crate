@@ -19,6 +19,7 @@ mod icons;
 mod instance;
 mod library;
 mod pages;
+mod playlist_add;
 mod palette;
 mod queue;
 mod mpris;
@@ -98,6 +99,8 @@ struct Crate {
     fade_secs: u32,
     /// Remote streaming quality, kbps (0 = original file).
     remote_kbps: u32,
+    /// The "name your new playlist" bar, while open.
+    naming: Option<playlist_add::Naming>,
     /// A queue waiting on loudness before it starts (its queue_seq); cleared
     /// by any transport action or explicit start, which supersede it.
     pending_start: Option<u64>,
@@ -695,6 +698,7 @@ impl Crate {
             gains: HashMap::new(),
             fade_secs: theme::saved_fade(),
             remote_kbps: theme::saved_remote_kbps(),
+            naming: None,
             eq_preset,
             eq_custom,
             eq_sliders,
@@ -2034,11 +2038,26 @@ impl Render for Crate {
         if !self.albums.is_empty()
             && let Some(keys) = self.test_keys.take()
         {
-            cx.spawn(async move |this, cx| {
+            cx.spawn_in(window, async move |this, cx| {
                 for k in keys.split(',').map(str::trim).map(String::from).collect::<Vec<_>>() {
                     cx.background_executor().timer(Duration::from_millis(1500)).await;
-                    let ok = this.update(cx, |this, cx| {
+                    let ok = this.update_in(cx, |this, window, cx| {
                         match k.as_str() {
+                            k if k.starts_with("sel:") => {
+                                this.selection.push(k[4..].to_string());
+                                cx.notify();
+                            }
+                            "plnew" => {
+                                let (name, keys) = (this.selection_playlist_name(), this.selection.clone());
+                                this.start_naming(playlist_add::NameFor::Albums(keys), name, window, cx);
+                            }
+                            "smart" => {
+                                let query = this.lib_filters.iter().map(|f| f.query.as_str()).collect::<Vec<_>>().join("&");
+                                let name = this.smart_playlist_name();
+                                this.start_naming(playlist_add::NameFor::Smart(query), name, window, cx);
+                            }
+                            "commit" => this.commit_naming(cx),
+                            k if k.starts_with("pladd:") => this.add_selection_to_playlist(k[6..].to_string(), "test".into(), cx),
                             "j" => this.move_cursor(1, cx),
                             "k" => this.move_cursor(-1, cx),
                             "enter" => this.activate_cursor(cx),
@@ -2141,7 +2160,7 @@ impl Render for Crate {
             .track_scroll(&self.scroll)
             .flex_1()
         };
-        let sel_bar = self.selection_bar(&t, cx);
+        let sel_bar = self.naming_bar(&t, cx).or_else(|| self.selection_bar(&t, cx));
         // Keep the last rows reachable above the floating bar.
         let grid = if sel_bar.is_some() { grid.pb(px(72.0)) } else { grid };
         let grid = div().flex_1().min_h_0().flex().relative().child(grid).children(if self.lib_list { None } else { rail }).children(sel_bar);
@@ -2290,6 +2309,9 @@ impl Crate {
     /// Show `msg` as a toast even if it's the same text as last time.
     pub(crate) fn say(&mut self, msg: impl Into<SharedString>) {
         self.status = msg.into();
+        if std::env::var_os("CRATE_TRACE").is_some() {
+            eprintln!("[crate] status: {}", self.status);
+        }
         self.status_seen = SharedString::default();
     }
 

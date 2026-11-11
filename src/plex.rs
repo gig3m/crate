@@ -1078,6 +1078,65 @@ impl Client {
         Ok(d)
     }
 
+    /// `server://<machine id>/com.plexapp.plugins.library<path>`, URL-encoded:
+    /// how Plex names library items for playlists and play queues.
+    async fn library_uri(&self, path: &str) -> anyhow::Result<String> {
+        let root: serde_json::Value = self.get("/").await?.json().await.context("server")?;
+        let mid = root["MediaContainer"]["machineIdentifier"].as_str().context("no machine id")?;
+        Ok(urlencode(&format!("server://{mid}/com.plexapp.plugins.library{path}")))
+    }
+
+    async fn send_playlist(&self, req: reqwest::RequestBuilder) -> anyhow::Result<serde_json::Value> {
+        let res = req
+            .header("Accept", "application/json")
+            .header("X-Plex-Token", &self.token)
+            .header("X-Plex-Client-Identifier", client_id())
+            .header("X-Plex-Product", "Crate")
+            .send()
+            .await?;
+        anyhow::ensure!(res.status().is_success(), "Plex answered {}", res.status());
+        res.json().await.context("playlist")
+    }
+
+    /// A new playlist of these items (albums add all their tracks).
+    /// Returns (rating key, track count).
+    pub async fn create_playlist(&self, title: &str, keys: &[String]) -> anyhow::Result<(String, u64)> {
+        anyhow::ensure!(!keys.is_empty(), "nothing to add");
+        let uri = self.library_uri(&format!("/library/metadata/{}", keys.join(","))).await?;
+        let v = self
+            .send_playlist(self.http.post(format!("{}/playlists?type=audio&smart=0&title={}&uri={uri}", self.base, urlencode(title))))
+            .await?;
+        let m = &v["MediaContainer"]["Metadata"][0];
+        Ok((m["ratingKey"].as_str().context("no playlist key")?.to_string(), m["leafCount"].as_u64().unwrap_or(0)))
+    }
+
+    /// Append these items to a (non-smart) playlist; returns tracks added.
+    pub async fn add_to_playlist(&self, playlist: &str, keys: &[String]) -> anyhow::Result<u64> {
+        anyhow::ensure!(!keys.is_empty(), "nothing to add");
+        let uri = self.library_uri(&format!("/library/metadata/{}", keys.join(","))).await?;
+        let v = self.send_playlist(self.http.put(format!("{}/playlists/{playlist}/items?uri={uri}", self.base))).await?;
+        Ok(v["MediaContainer"]["leafCountAdded"].as_u64().unwrap_or(0))
+    }
+
+    /// A smart playlist of the tracks on albums matching `album_query`
+    /// (the library's album filters, e.g. `decade=1990&genre=12`).
+    /// Returns (rating key, track count).
+    pub async fn create_smart_playlist(&self, section: &str, title: &str, album_query: &str) -> anyhow::Result<(String, u64)> {
+        let uri = self.library_uri(&format!("/library/sections/{section}/all?type=10&{}", track_query(album_query))).await?;
+        let v = self
+            .send_playlist(self.http.post(format!("{}/playlists?type=audio&smart=1&title={}&uri={uri}", self.base, urlencode(title))))
+            .await?;
+        let key = v["MediaContainer"]["Metadata"][0]["ratingKey"].as_str().context("no playlist key")?.to_string();
+        // The create answer doesn't carry the count; ask.
+        let n = async {
+            let v: serde_json::Value = self.get(&format!("/playlists/{key}")).await.ok()?.json().await.ok()?;
+            v["MediaContainer"]["Metadata"][0]["leafCount"].as_u64()
+        }
+        .await
+        .unwrap_or(0);
+        Ok((key, n))
+    }
+
     /// Audio playlists, most recently played first.
     pub async fn playlists(&self) -> anyhow::Result<Vec<Playlist>> {
         let v: serde_json::Value =
@@ -1520,5 +1579,21 @@ mod format_tests {
         assert_eq!(short_format("dsd_lsbf", Some(1), Some(352_800)), "DSD");
         assert_eq!(short_format("flac", Some(24), None), "FLAC");
         assert_eq!(short_format("flac", Some(24), Some(22_050)), "24/22");
+    }
+}
+
+/// The library's album filter (`decade=1990&userRating>>=8`) as a track
+/// query: each field moves to the album (`album.decade=1990&album.userRating>>=8`).
+pub(crate) fn track_query(album_query: &str) -> String {
+    album_query.split('&').filter(|t| !t.is_empty()).map(|t| format!("album.{t}")).collect::<Vec<_>>().join("&")
+}
+
+#[cfg(test)]
+mod playlist_tests {
+    #[test]
+    fn album_filters_become_track_filters() {
+        assert_eq!(super::track_query("decade=1990&userRating>>=8"), "album.decade=1990&album.userRating>>=8");
+        assert_eq!(super::track_query("mood=1,2"), "album.mood=1,2");
+        assert_eq!(super::track_query(""), "");
     }
 }
