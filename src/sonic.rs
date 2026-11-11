@@ -217,13 +217,29 @@ impl Crate {
     }
 
     fn compute_sonic_path(&mut self, cx: &mut Context<Self>) {
+        self.compute_sonic_path_inner(false, cx);
+    }
+
+    /// Reroll (canvas): a different path between the same two tracks.
+    pub(crate) fn reroll_sonic_path(&mut self, cx: &mut Context<Self>) {
+        self.compute_sonic_path_inner(true, cx);
+    }
+
+    fn compute_sonic_path_inner(&mut self, reroll: bool, cx: &mut Context<Self>) {
         let (Some(from), Some(to)) = (self.sonic.from.clone(), self.sonic.to.clone()) else { return };
-        self.sonic.path = None;
+        let current: Vec<String> = self.sonic.path.as_ref().map(|p| p.iter().map(|t| t.rating_key.clone()).collect()).unwrap_or_default();
+        let previous = self.sonic.path.take();
         self.sonic.busy = true;
         self.sonic.path_gen += 1;
         let gen_id = self.sonic.path_gen;
         let section = crate::section();
-        let rx = crate::plex_call(move |c| async move { c.sonic_path(&section, &from.rating_key, &to.rating_key).await });
+        let rx = crate::plex_call(move |c| async move {
+            if reroll {
+                c.sonic_path_reroll(&section, &from.rating_key, &to.rating_key, current).await
+            } else {
+                c.sonic_path(&section, &from.rating_key, &to.rating_key).await
+            }
+        });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| {
@@ -246,6 +262,11 @@ impl Crate {
                         this.sonic.path = Some(path);
                     }
                     Ok(Ok(_)) => this.status = "No sonic path between those tracks".into(),
+                    // A reroll that found nothing keeps the path you had.
+                    Ok(Err(e)) if reroll => {
+                        this.sonic.path = previous;
+                        this.say(format!("Couldn't reroll: {e:#}"));
+                    }
                     Ok(Err(e)) => this.status = format!("Sonic Adventure: {e:#}").into(),
                     Err(_) => {}
                 }
@@ -423,7 +444,11 @@ impl Crate {
                             .when(ready, |d| {
                                 let p = path.clone().unwrap_or_default();
                                 let (from, to) = (s.from.clone(), s.to.clone());
-                                d.child(pill("sonic-play", "Play adventure".into(), true).on_click(cx.listener(move |this, _, _, cx| {
+                                d.child(pill("sonic-reroll", "Reroll path".into(), false).on_click(cx.listener(|this, _, _, cx| {
+                                    this.reroll_sonic_path(cx);
+                                    cx.notify();
+                                })))
+                                .child(pill("sonic-play", "Play adventure".into(), true).on_click(cx.listener(move |this, _, _, cx| {
                                     let name = match (&from, &to) {
                                         (Some(a), Some(b)) => format!("Sonic Adventure: {} → {}", a.title, b.title),
                                         _ => "Sonic Adventure".into(),

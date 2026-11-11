@@ -871,6 +871,31 @@ impl Client {
         Ok(env.mc.metadata.into_iter().filter_map(Meta::into_track).collect())
     }
 
+    /// Another sonic path between the same tracks. Plex's computePath is
+    /// deterministic, so this detours through a waypoint: a track sonically
+    /// near the middle of `current` that isn't on it, joining start→waypoint
+    /// and waypoint→end. Errs if no waypoint gives a path.
+    pub async fn sonic_path_reroll(&self, section: &str, start: &str, end: &str, current: Vec<String>) -> anyhow::Result<Vec<Track>> {
+        anyhow::ensure!(current.len() >= 3, "path too short to reroll");
+        let mid = current[current.len() / 2].clone();
+        let mut near: Vec<Track> = self.nearest_tracks(&mid, 40).await?.into_iter().filter(|t| !current.contains(&t.rating_key)).collect();
+        anyhow::ensure!(!near.is_empty(), "nothing near the path to detour through");
+        crate::shuffle(&mut near);
+        for w in near.iter().take(3) {
+            let (a, b) = tokio::join!(self.sonic_path(section, start, &w.rating_key), self.sonic_path(section, &w.rating_key, end));
+            let (Ok(a), Ok(b)) = (a, b) else { continue };
+            if a.is_empty() || b.is_empty() {
+                continue;
+            }
+            let mut seen = std::collections::HashSet::new();
+            let path: Vec<Track> = a.into_iter().chain(b).filter(|t| seen.insert(t.rating_key.clone())).collect();
+            if path.first().is_some_and(|t| t.rating_key == start) && path.last().is_some_and(|t| t.rating_key == end) {
+                return Ok(path);
+            }
+        }
+        anyhow::bail!("no other path found")
+    }
+
     /// The first `limit` tracks of a playlist.
     pub async fn playlist_tracks(&self, rating_key: &str, limit: usize) -> anyhow::Result<Vec<Track>> {
         let res = self

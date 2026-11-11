@@ -1879,7 +1879,7 @@ impl Crate {
 }
 
 /// Fisher–Yates with a time-seeded xorshift (no rand dependency).
-fn shuffle<T>(v: &mut [T]) {
+pub(crate) fn shuffle<T>(v: &mut [T]) {
     let mut x = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;
     for i in (1..v.len()).rev() {
         x ^= x << 13;
@@ -1939,6 +1939,7 @@ impl Render for Crate {
                             "enter" => this.activate_cursor(cx),
                             "x" => this.toggle_cursor_mark(cx),
                             "r" => this.radio_from_selection(cx),
+                            "reroll" => this.reroll_sonic_path(cx),
                             k if k.starts_with("next:") || k.starts_with("queue:") => {
                                 let (next, key) = k.split_once(':').map(|(a, b)| (a == "next", b.to_string())).unwrap_or((false, String::new()));
                                 if let Some(album) = this.albums.iter().find(|a| a.rating_key == key).cloned() {
@@ -1954,6 +1955,11 @@ impl Render for Crate {
                             _ => eprintln!("[crate] CRATE_KEYS: unknown {k}"),
                         }
                         eprintln!("[crate] key {k}: cursor {:?} selection {}", this.cursor, this.selection.len());
+                        if std::env::var_os("CRATE_TRACE").is_some()
+                            && let Some(p) = &this.sonic.path
+                        {
+                            eprintln!("[crate] sonic path: {:?}", p.iter().map(|t| t.title.chars().take(12).collect::<String>()).collect::<Vec<_>>());
+                        }
                     });
                     if ok.is_err() {
                         break;
