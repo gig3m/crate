@@ -112,12 +112,25 @@ pub(crate) struct Viz {
     /// Typical time between the tap's updates (one audio callback), smoothed:
     /// a gap longer than this is silence, shorter is just between callbacks.
     cb_gap: Option<std::time::Duration>,
+    /// For the live layer (see VizLayer): the engine's stats (its audio
+    /// tap), the theme, and the live bars on screen (id, height).
+    stats: Option<std::sync::Arc<crate_audio::audio::Stats>>,
+    theme: Option<Theme>,
+    live_bars: Vec<(&'static str, f32)>,
 }
 
 impl Viz {
     pub fn load() -> Self {
         let (style, palette) = crate::theme::saved_viz();
         Self { style: Style::ALL.into_iter().find(|s| s.key() == style).unwrap_or_default(), palette, ..Default::default() }
+    }
+
+    pub fn clear_live_bars(&mut self) {
+        self.live_bars.clear();
+    }
+
+    pub fn keep_live_bars(&mut self, ids: &[&str]) {
+        self.live_bars.retain(|(id, _)| ids.contains(id));
     }
 
     /// Nothing left to fall: the live view shows silence.
@@ -352,7 +365,12 @@ impl Crate {
                 let alive = this
                     .update(cx, |this, cx| {
                         if this.viz_animating() {
-                            cx.notify();
+                            // Only the live layer repaints: the app is cached
+                            // beneath it (see VizLayer).
+                            match this.viz_layer.as_ref() {
+                                Some(layer) => layer.update(cx, |_, cx| cx.notify()),
+                                None => cx.notify(),
+                            }
                         }
                     })
                     .is_ok();
@@ -371,7 +389,18 @@ impl Crate {
         let t = &theme;
         let mut v = self.viz.borrow_mut();
         v.drawn.set(Some(std::time::Instant::now()));
-        if v.style.live() {
+        // (Not under the palette or another overlay: the layer would sit
+        // above its dimmed backdrop. The bar stays in place, still.)
+        let layered = v.style.live() && self.viz_layer.is_some() && !self.palette && self.autoeq_picker.is_none();
+        if layered {
+            // The layer above draws the moving bars here, at this bar's
+            // bounds; this element keeps the progress line and the input.
+            v.stats = self.engine.as_ref().map(|e| e.stats.clone());
+            v.theme = Some(self.theme.clone());
+            if !v.live_bars.iter().any(|(b, _)| *b == id) {
+                v.live_bars.push((id, height));
+            }
+        } else if v.style.live() {
             v.sample(self.engine.as_ref().map(|e| &e.stats.scope));
         }
         // A drag shows on the bar it started on.
@@ -380,6 +409,8 @@ impl Crate {
         let played = |i: usize| (i as f32 + 0.5) / BARS as f32 <= shown;
         let bar = |h: f32, color: u32| div().flex_1().h(px(h.max(1.0))).rounded(px(1.0)).bg(rgb(color));
         let body: gpui::AnyElement = match v.style {
+            _ if layered => div().size_full().into_any_element(),
+            Style::Spectrum | Style::Wave | Style::Meter => live_body(&v, t, height),
             Style::Sonic => div()
                 .size_full()
                 .flex()
@@ -391,52 +422,6 @@ impl Crate {
                     bar(h, if played(i) { gradient(&st, i as f32 / BARS as f32) } else { t.line })
                 }))
                 .into_any_element(),
-            Style::Spectrum => div()
-                .size_full()
-                .flex()
-                .items_end()
-                .gap(px(1.5))
-                .children((0..BARS).map(|i| {
-                    let lv = v.spectrum.get(i).copied().unwrap_or(0.0);
-                    bar(2.0 + (height - 4.0) * lv, gradient(&st, lv))
-                }))
-                .into_any_element(),
-            Style::Wave => {
-                // Peak per slice of the latest ~45 ms, mirrored round the middle.
-                // The latest ~45 ms only.
-                let skip = v.buf.len().saturating_sub(2048 * 2) / 2;
-                let frames = v.buf.len() / 2 - skip;
-                let wave = &v.buf[skip * 2..];
-                let per = (frames / BARS).max(1);
-                // Auto-gain: scale to the window's peak (never boosting
-                // near-silence past a floor), so the shape is always readable.
-                let top = (0..frames).map(|f| 0.5 * (wave[2 * f] + wave[2 * f + 1]).abs()).fold(0.0f32, f32::max).max(0.08);
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(1.5))
-                    .children((0..BARS).map(|i| {
-                        let a = (i * per..((i + 1) * per).min(frames)).map(|f| 0.5 * (wave[2 * f] + wave[2 * f + 1]).abs()).fold(0.0f32, f32::max);
-                        let lv = (a / top).min(1.0);
-                        bar(2.0 + (height - 2.0) * lv, gradient(&st, i as f32 / BARS as f32))
-                    }))
-                    .into_any_element()
-            }
-            Style::Meter => {
-                let row = |ch: usize| {
-                    let (lv, pk) = (v.level[ch], v.peak[ch]);
-                    div()
-                        .relative()
-                        .w_full()
-                        .h(px((height - 4.0) / 2.0))
-                        .rounded(px(2.0))
-                        .bg(rgb(t.line))
-                        .child(div().absolute().left_0().top_0().bottom_0().w(gpui::relative(lv)).rounded(px(2.0)).bg(rgb(gradient(&st, lv))))
-                        .child(div().absolute().top_0().bottom_0().left(gpui::relative(pk)).w(px(2.0)).bg(rgb(gradient(&st, pk))))
-                };
-                div().size_full().flex().flex_col().justify_center().gap(px(4.0)).child(row(0)).child(row(1)).into_any_element()
-            }
             Style::Line => div()
                 .size_full()
                 .flex()
@@ -689,3 +674,86 @@ mod tests {
     }
 }
 
+
+/// The moving bars of a live style, at `height`.
+fn live_body(v: &Viz, t: &Theme, height: f32) -> gpui::AnyElement {
+    let st = stops(v.palette, t);
+    let bar = |h: f32, color: u32| div().flex_1().h(px(h.max(1.0))).rounded(px(1.0)).bg(rgb(color));
+    match v.style {
+            Style::Spectrum => div()
+                .size_full()
+                .flex()
+                .items_end()
+                .gap(px(1.5))
+                .children((0..BARS).map(|i| {
+                    let lv = v.spectrum.get(i).copied().unwrap_or(0.0);
+                    bar(2.0 + (height - 4.0) * lv, gradient(&st, lv))
+                }))
+                .into_any_element(),
+            Style::Wave => {
+                // Peak per slice of the latest ~45 ms, mirrored round the middle.
+                // The latest ~45 ms only.
+                let skip = v.buf.len().saturating_sub(2048 * 2) / 2;
+                let frames = v.buf.len() / 2 - skip;
+                let wave = &v.buf[skip * 2..];
+                let per = (frames / BARS).max(1);
+                // Auto-gain: scale to the window's peak (never boosting
+                // near-silence past a floor), so the shape is always readable.
+                let top = (0..frames).map(|f| 0.5 * (wave[2 * f] + wave[2 * f + 1]).abs()).fold(0.0f32, f32::max).max(0.08);
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(1.5))
+                    .children((0..BARS).map(|i| {
+                        let a = (i * per..((i + 1) * per).min(frames)).map(|f| 0.5 * (wave[2 * f] + wave[2 * f + 1]).abs()).fold(0.0f32, f32::max);
+                        let lv = (a / top).min(1.0);
+                        bar(2.0 + (height - 2.0) * lv, gradient(&st, i as f32 / BARS as f32))
+                    }))
+                    .into_any_element()
+            }
+            Style::Meter => {
+                let row = |ch: usize| {
+                    let (lv, pk) = (v.level[ch], v.peak[ch]);
+                    div()
+                        .relative()
+                        .w_full()
+                        .h(px((height - 4.0) / 2.0))
+                        .rounded(px(2.0))
+                        .bg(rgb(t.line))
+                        .child(div().absolute().left_0().top_0().bottom_0().w(gpui::relative(lv)).rounded(px(2.0)).bg(rgb(gradient(&st, lv))))
+                        .child(div().absolute().top_0().bottom_0().left(gpui::relative(pk)).w(px(2.0)).bg(rgb(gradient(&st, pk))))
+                };
+                div().size_full().flex().flex_col().justify_center().gap(px(4.0)).child(row(0)).child(row(1)).into_any_element()
+            }
+            _ => div().into_any_element(),
+    }
+}
+
+/// Draws the live styles' moving bars over the app, which is cached beneath
+/// it: the ~30 fps animation then repaints this layer alone, not the whole
+/// window. It paints only (no input), at the bounds the app's bars recorded.
+pub(crate) struct VizLayer {
+    pub viz: Rc<std::cell::RefCell<Viz>>,
+}
+
+impl gpui::Render for VizLayer {
+    fn render(&mut self, _window: &mut gpui::Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let mut v = self.viz.borrow_mut();
+        let root = div().absolute().inset_0();
+        let Some(theme) = v.theme.clone().filter(|_| v.style.live() && !v.live_bars.is_empty()) else {
+            return root;
+        };
+        let stats = v.stats.clone();
+        v.sample(stats.as_ref().map(|s| &s.scope));
+        v.drawn.set(Some(std::time::Instant::now()));
+        let bounds = v.bounds.borrow().clone();
+        let bars: Vec<_> = v
+            .live_bars
+            .iter()
+            .filter_map(|(id, h)| bounds.get(id).map(|b| (*b, *h)))
+            .map(|(b, h)| div().absolute().left(b.origin.x).top(b.origin.y).w(b.size.width).h(b.size.height).child(live_body(&v, &theme, h)))
+            .collect();
+        root.children(bars)
+    }
+}

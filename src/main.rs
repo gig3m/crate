@@ -120,7 +120,9 @@ struct Crate {
     autoeq_index: Option<Arc<Vec<autoeq::Entry>>>,
     autoeq_pick_gen: u64,
     /// Track bar visualizer (style, colors, live-view state, drag).
-    viz: std::cell::RefCell<viz::Viz>,
+    viz: std::rc::Rc<std::cell::RefCell<viz::Viz>>,
+    /// The layer that draws the live visualizer over the (cached) app.
+    pub(crate) viz_layer: Option<Entity<viz::VizLayer>>,
     /// Bumped per playlist page load; stale replies are dropped.
     playlist_load_gen: u64,
     /// (playlist key, error) when its page failed to load.
@@ -149,6 +151,8 @@ struct Crate {
     cols: usize,
     bench: Option<Bench>,
     last_render_us: u128,
+    /// CRATE_RENDER_STATS: frame build times since the last report, and when it was.
+    render_stats: Option<(Vec<u32>, Instant)>,
     tracks_tx: mpsc::UnboundedSender<TracksRequest>,
     plex: (String, String),
     target: Option<String>,
@@ -750,7 +754,8 @@ impl Crate {
             naming: None,
             playlist_busy: false,
             playlist_scroll: UniformListScrollHandle::new(),
-            viz: std::cell::RefCell::new(viz::Viz::load()),
+            viz: std::rc::Rc::new(std::cell::RefCell::new(viz::Viz::load())),
+            viz_layer: None,
             eq_autoeq: saved_autoeq,
             autoeq_picker: None,
             autoeq_index: None,
@@ -783,6 +788,7 @@ impl Crate {
             cols: 6,
             bench,
             last_render_us: 0,
+            render_stats: std::env::var_os("CRATE_RENDER_STATS").map(|_| (Vec::new(), Instant::now())),
             tracks_tx,
             plex,
             target: std::env::var("CRATE_TARGET").ok().or_else(theme::saved_output),
@@ -2467,6 +2473,8 @@ fn report(b: &Bench, art_loaded: usize) {
 impl Render for Crate {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t0 = Instant::now();
+        // The live bars this frame shows register again as they're built.
+        self.viz.borrow_mut().clear_live_bars();
         let t = self.theme.clone();
         // Test hook: canvas key actions, 1.5 s apart, once the library is in.
         if !self.albums.is_empty()
@@ -2813,7 +2821,25 @@ impl Render for Crate {
             .children(now_playing)
             .children(toast)
             .children(palette);
+        // Now Playing covers the player bar (still built underneath it).
+        if self.now_playing && !self.compact {
+            self.viz.borrow_mut().keep_live_bars(&["np-bar"]);
+        }
         self.last_render_us = t0.elapsed().as_micros();
+        // Measurement aid: frames per second and build time, every 5 s.
+        if let Some((times, since)) = self.render_stats.as_mut() {
+            times.push(self.last_render_us.min(u32::MAX as u128) as u32);
+            if since.elapsed() >= Duration::from_secs(5) {
+                let mut v = std::mem::take(times);
+                v.sort_unstable();
+                let n = v.len().max(1);
+                let mean = v.iter().map(|&x| x as u64).sum::<u64>() / n as u64;
+                let p95 = v.get(n * 95 / 100).copied().unwrap_or(0);
+                let max = v.last().copied().unwrap_or(0);
+                eprintln!("[render] {:.1}/s build mean {mean} us p95 {p95} us max {max} us", v.len() as f64 / since.elapsed().as_secs_f64());
+                *since = Instant::now();
+            }
+        }
         el
     }
 }
@@ -3291,7 +3317,12 @@ fn main() {
                     .detach();
                     c
                 });
-                cx.new(|cx| gpui_component::Root::new(view, window, cx))
+                // The app, cached, with the live visualizer layer above it:
+                // the animation repaints only the layer.
+                let layer = cx.new(|cx| viz::VizLayer { viz: view.read(cx).viz.clone() });
+                view.update(cx, |c, _| c.viz_layer = Some(layer.clone()));
+                let shell = cx.new(|_| Shell { app: view, layer });
+                cx.new(|cx| gpui_component::Root::new(shell, window, cx))
             },
         )
         .unwrap();
@@ -3312,5 +3343,21 @@ mod transcode_tests {
         assert_eq!(super::transcoded_kbps("plex:part-46213.mp3"), None);
         assert_eq!(super::transcoded_kbps("song.txt.mp3"), None);
         assert_eq!(super::transcoded_kbps("plex:part-46213.tx192.at150.ogg"), Some(192));
+    }
+}
+
+/// The window's content: the app, cached, under the live visualizer layer.
+struct Shell {
+    app: Entity<Crate>,
+    layer: Entity<viz::VizLayer>,
+}
+
+impl Render for Shell {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .relative()
+            .child(self.app.clone().cached(gpui::StyleRefinement::default().size_full()))
+            .child(self.layer.clone())
     }
 }
