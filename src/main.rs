@@ -20,6 +20,7 @@ mod instance;
 mod library;
 mod pages;
 mod playlist_add;
+mod playlist_view;
 mod palette;
 mod queue;
 mod mpris;
@@ -64,6 +65,7 @@ enum View {
     Library,
     Album { ix: usize, tracks: Option<Vec<Track>> },
     Artist { key: String, name: String, info: Option<ArtistInfo> },
+    Playlist { key: String, title: String, detail: Option<plex::PlaylistDetail> },
     /// A canvas page not built yet.
     Soon(&'static str),
 }
@@ -103,6 +105,7 @@ struct Crate {
     naming: Option<playlist_add::Naming>,
     /// A playlist create/add is in flight (one at a time).
     playlist_busy: bool,
+    playlist_scroll: UniformListScrollHandle,
     /// A queue waiting on loudness before it starts (its queue_seq); cleared
     /// by any transport action or explicit start, which supersede it.
     pending_start: Option<u64>,
@@ -329,6 +332,11 @@ impl Crate {
                             && let Some(p) = home.playlists.get(n)
                         {
                             this.play_playlist(p.rating_key.clone(), p.title.clone(), cx);
+                        }
+                        if let Some(n) = std::env::var("CRATE_OPEN_PLAYLIST").ok().and_then(|v| v.parse::<usize>().ok())
+                            && let Some(p) = home.playlists.get(n)
+                        {
+                            this.open_playlist(p.rating_key.clone(), p.title.clone(), cx);
                         }
                         // Recently Added format labels follow in a second pass, so
                         // Home shows without waiting on them.
@@ -704,6 +712,7 @@ impl Crate {
             remote_kbps: theme::saved_remote_kbps(),
             naming: None,
             playlist_busy: false,
+            playlist_scroll: UniformListScrollHandle::new(),
             eq_preset,
             eq_custom,
             eq_sliders,
@@ -1039,6 +1048,10 @@ impl Crate {
             View::Album { ix, tracks: None } => {
                 let ix = *ix;
                 self.load_album_tracks(ix, cx);
+            }
+            View::Playlist { key, detail: None, .. } => {
+                let key = key.clone();
+                self.load_playlist(key, cx);
             }
             View::Artist { key, info, .. } => {
                 let (key, missing) = (key.clone(), info.is_none());
@@ -2071,6 +2084,9 @@ impl Render for Crate {
                                 this.start_naming(playlist_add::NameFor::Smart(query), name, window, cx);
                             }
                             "commit" => this.commit_naming(cx),
+                            k if k.starts_with("plopen:") => this.open_playlist(k[7..].to_string(), "test".into(), cx),
+                            k if k.starts_with("plplay:") => this.play_playlist_from(k[7..].parse().unwrap_or(0), false, cx),
+                            k if k.starts_with("plrm:") => this.remove_playlist_row(k[5..].parse().unwrap_or(0), cx),
                             k if k.starts_with("pladd:") => this.add_selection_to_playlist(k[6..].to_string(), "test".into(), cx),
                             "j" => this.move_cursor(1, cx),
                             "k" => this.move_cursor(-1, cx),
@@ -2202,6 +2218,10 @@ impl Render for Crate {
             View::Album { ix, tracks } => {
                 let (ix, tracks) = (*ix, tracks.clone());
                 self.album_view(ix, tracks.as_ref(), &t, cx)
+            }
+            View::Playlist { key, title, detail } => {
+                let (key, title, detail) = (key.clone(), title.clone(), detail.clone());
+                self.playlist_view(&key, &title, detail.as_ref(), &t, cx)
             }
         };
         let main_area = if compact && self.compact_playing && self.now.is_some() {

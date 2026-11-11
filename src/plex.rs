@@ -111,6 +111,19 @@ pub struct HubRow {
     pub items: Vec<HubItem>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct PlaylistDetail {
+    pub title: String,
+    pub smart: bool,
+    /// Items in the playlist (may exceed `tracks` when capped).
+    pub count: u64,
+    pub duration_ms: u64,
+    pub thumb: String,
+    pub tracks: Vec<Track>,
+    /// Plex playlist item id per track, same order.
+    pub item_ids: Vec<u64>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Playlist {
     pub rating_key: String,
@@ -981,6 +994,61 @@ impl Client {
         anyhow::ensure!(res.status().is_success(), "playlist {rating_key} -> {}", res.status());
         let env: Envelope = res.json().await.context("playlist")?;
         Ok(env.mc.metadata.into_iter().filter_map(Meta::into_track).collect())
+    }
+
+    /// A playlist's header and items (up to `limit`), with each item's
+    /// playlist item id (what removing it needs).
+    pub async fn playlist_detail(&self, key: &str, limit: usize) -> anyhow::Result<PlaylistDetail> {
+        let (mp, ip) = (format!("/playlists/{key}"), format!("/playlists/{key}/items"));
+        let items = async {
+            let res = self
+                .http
+                .get(format!("{}{ip}", self.base))
+                .header("Accept", "application/json")
+                .header("X-Plex-Token", &self.token)
+                .header("X-Plex-Container-Start", "0")
+                .header("X-Plex-Container-Size", limit.to_string())
+                .send()
+                .await?;
+            anyhow::ensure!(res.status().is_success(), "playlist {key} -> {}", res.status());
+            anyhow::Ok(res.json::<serde_json::Value>().await.context("playlist items")?)
+        };
+        let (meta, items) = tokio::join!(self.get(&mp), items);
+        let meta: serde_json::Value = meta?.json().await.context("playlist")?;
+        let items = items?;
+        let m = &meta["MediaContainer"]["Metadata"][0];
+        let (mut tracks, mut item_ids) = (Vec::new(), Vec::new());
+        for it in items["MediaContainer"]["Metadata"].as_array().cloned().unwrap_or_default() {
+            let id = it["playlistItemID"].as_u64().unwrap_or(0);
+            if let Some(t) = serde_json::from_value::<Meta>(it).ok().and_then(Meta::into_track) {
+                tracks.push(t);
+                item_ids.push(id);
+            }
+        }
+        Ok(PlaylistDetail {
+            title: m["title"].as_str().unwrap_or_default().to_string(),
+            smart: m["smart"].as_bool().unwrap_or(false),
+            count: m["leafCount"].as_u64().unwrap_or(tracks.len() as u64),
+            duration_ms: m["duration"].as_u64().unwrap_or(0),
+            thumb: m["thumb"].as_str().or(m["composite"].as_str()).unwrap_or_default().to_string(),
+            tracks,
+            item_ids,
+        })
+    }
+
+    /// Remove one item (by playlist item id) from a regular playlist.
+    pub async fn remove_from_playlist(&self, playlist: &str, item_id: u64) -> anyhow::Result<()> {
+        let res = self
+            .http
+            .delete(format!("{}/playlists/{playlist}/items/{item_id}", self.base))
+            .timeout(std::time::Duration::from_secs(30))
+            .header("Accept", "application/json")
+            .header("X-Plex-Token", &self.token)
+            .header("X-Plex-Client-Identifier", client_id())
+            .send()
+            .await?;
+        anyhow::ensure!(res.status().is_success(), "Plex answered {}", res.status());
+        Ok(())
     }
 
     pub async fn album_detail(&self, key: &str) -> anyhow::Result<AlbumDetail> {

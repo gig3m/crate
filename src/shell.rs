@@ -25,6 +25,7 @@ impl Crate {
             View::Home => "home",
             View::Library | View::Album { .. } => "albums",
             View::Artist { .. } => "artists",
+            View::Playlist { .. } => "playlists",
             View::Soon("sonic") => "stations",
             View::Soon(id) => id,
         }
@@ -133,7 +134,7 @@ impl Crate {
                     .child(tile)
                     .child(div().flex_1().min_w_0().truncate().child(p.title.clone()))
                     .child(div().font_family(MONO).text_size(px(11.0)).text_color(rgb(t.muted)).child(p.count.to_string()))
-                    .on_click(cx.listener(move |this, _, _, cx| this.play_playlist(p.rating_key.clone(), p.title.clone(), cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_playlist(p.rating_key.clone(), p.title.clone(), cx)))
             })
             .collect();
         let server = self.home.as_ref().map(|h| h.server.clone()).unwrap_or_else(|| "Plex".into());

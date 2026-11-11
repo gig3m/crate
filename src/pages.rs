@@ -263,7 +263,7 @@ impl Crate {
                             .text_color(rgb(t.muted))
                             .child(format!("{}{} tracks", if p.smart { "smart · " } else { "" }, p.count)),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| this.play_playlist(k.clone(), n.clone(), cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_playlist(k.clone(), n.clone(), cx)))
             })
             .collect();
         div()

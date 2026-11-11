@@ -133,7 +133,7 @@ impl Crate {
     }
 
     /// Refresh the playlist list (sidebar, Playlists page, menus).
-    fn reload_playlists(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn reload_playlists(&mut self, cx: &mut Context<Self>) {
         let rx = crate::plex_call(|c| async move { c.playlists().await });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(lists)) = rx.await else { return };
