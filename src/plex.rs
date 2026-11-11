@@ -1046,7 +1046,7 @@ impl Client {
             thumb: m["thumb"].as_str().or(m["composite"].as_str()).unwrap_or_default().to_string(),
             tracks,
             item_ids,
-            capped: loaded >= limit,
+            capped: loaded >= limit && m["leafCount"].as_u64().is_some_and(|c| c > loaded as u64),
             loaded,
         })
     }
