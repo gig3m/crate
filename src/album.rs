@@ -310,6 +310,7 @@ impl Crate {
                     .enumerate()
                     .map(|(i, tr)| {
                         let playing = playing_here == Some(i);
+                        let at_cursor = self.cursor == Some(i);
                         let (plays, rating) = detail.as_ref().and_then(|d| d.stats.get(&tr.rating_key).copied()).unwrap_or((0, None));
                         let album = album.clone();
                         div()
@@ -321,7 +322,9 @@ impl Crate {
                             .gap(px(12.0))
                             .rounded(px(8.0))
                             .cursor_pointer()
-                            .when(playing, |d| d.bg(rgb(t.raised)))
+                            .when(playing || at_cursor, |d| d.bg(rgb(t.raised)))
+                            .border_1()
+                            .border_color(if at_cursor { rgb(t.text2).into() } else { gpui::transparent_black() })
                             .hover(|d| d.bg(rgb(t.raised)))
                             .child(
                                 div()

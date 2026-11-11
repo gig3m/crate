@@ -12,6 +12,7 @@
 mod account;
 mod album;
 mod art;
+mod keys;
 mod artist;
 mod home;
 mod icons;
@@ -51,7 +52,7 @@ use crate_audio::audio::{Engine, Event as AudioEvent, Source};
 use mpris::{Transport, Update as MprisUpdate};
 use plex::{Album, ArtRequest, ArtResult, ArtistInfo, ArtistRequest, HubsRequest, SearchHit, SearchRequest, Track, TracksRequest};
 
-gpui::actions!(crate_app, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch, ToggleNowPlaying, PaletteRadio, Rate1, Rate2, Rate3, Rate4, Rate5, GoHome, GoStations, ShowLyrics, ShowQueue, VolumeUp, VolumeDown]);
+gpui::actions!(crate_app, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch, ToggleNowPlaying, PaletteRadio, Rate1, Rate2, Rate3, Rate4, Rate5, GoHome, GoStations, ShowLyrics, ShowQueue, VolumeUp, VolumeDown, CursorNext, CursorPrev, ActivateCursor, MarkCursor, RadioFromSelection]);
 
 #[derive(Clone)]
 enum View {
@@ -141,6 +142,10 @@ struct Crate {
     pal_sel: usize,
     pal_scope: usize,
     test_search: Option<String>,
+    /// Keyboard cursor (j/k) in the current list: an Albums cell or a track index.
+    cursor: Option<usize>,
+    /// Test hook: canvas key actions to run once the library is in (CRATE_KEYS="j,j,enter").
+    test_keys: Option<String>,
     /// Full-window Now Playing, and its panel tab (queue / signal / info).
     now_playing: bool,
     np_tab: usize,
@@ -616,6 +621,8 @@ impl Crate {
             pal_sel: 0,
             pal_scope: 0,
             test_search: std::env::var("CRATE_SEARCH").ok(),
+            cursor: None,
+            test_keys: std::env::var("CRATE_KEYS").ok(),
             now_playing: std::env::var_os("CRATE_NOW_PLAYING").is_some(),
             sonic_progress: None,
             compact_playing: true,
@@ -771,6 +778,7 @@ impl Crate {
         self.request_sonic_artists(key.clone(), cx);
         self.request_artist_kinds(key.clone(), cx);
         self.album_scroll = gpui::ScrollHandle::new();
+        self.cursor = None;
         cx.notify();
         self.load_artist_info(key, cx);
     }
@@ -827,6 +835,7 @@ impl Crate {
         }
         self.fwd.clear();
         self.album_scroll = gpui::ScrollHandle::new();
+        self.cursor = None;
     }
 
     fn go_back(&mut self, cx: &mut Context<Self>) {
@@ -834,6 +843,7 @@ impl Crate {
             let cur = std::mem::replace(&mut self.view, v);
             self.fwd.push(cur);
             self.album_scroll = gpui::ScrollHandle::new();
+        self.cursor = None;
             if !matches!(self.view, View::Library) {
                 self.selection.clear();
             }
@@ -874,6 +884,7 @@ impl Crate {
             let cur = std::mem::replace(&mut self.view, v);
             self.back.push(cur);
             self.album_scroll = gpui::ScrollHandle::new();
+        self.cursor = None;
             if !matches!(self.view, View::Library) {
                 self.selection.clear();
             }
@@ -889,6 +900,7 @@ impl Crate {
         self.request_album_detail(album.rating_key.clone(), cx);
         self.request_sonic_albums(album.rating_key.clone(), cx);
         self.album_scroll = gpui::ScrollHandle::new();
+        self.cursor = None;
         cx.notify();
         self.load_album_tracks(ix, cx);
     }
@@ -1611,6 +1623,31 @@ impl Render for Crate {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t0 = Instant::now();
         let t = self.theme.clone();
+        // Test hook: canvas key actions, 1.5 s apart, once the library is in.
+        if !self.albums.is_empty()
+            && let Some(keys) = self.test_keys.take()
+        {
+            cx.spawn(async move |this, cx| {
+                for k in keys.split(',').map(str::trim).map(String::from).collect::<Vec<_>>() {
+                    cx.background_executor().timer(Duration::from_millis(1500)).await;
+                    let ok = this.update(cx, |this, cx| {
+                        match k.as_str() {
+                            "j" => this.move_cursor(1, cx),
+                            "k" => this.move_cursor(-1, cx),
+                            "enter" => this.activate_cursor(cx),
+                            "x" => this.toggle_cursor_mark(cx),
+                            "r" => this.radio_from_selection(cx),
+                            _ => eprintln!("[crate] CRATE_KEYS: unknown {k}"),
+                        }
+                        eprintln!("[crate] key {k}: cursor {:?} selection {}", this.cursor, this.selection.len());
+                    });
+                    if ok.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         // Test hook: open the palette with a query once the library is in.
         if !self.albums.is_empty()
             && let Some(q) = self.test_search.take()
@@ -1755,6 +1792,11 @@ impl Render for Crate {
             .on_action(cx.listener(|this, _: &VolumeUp, _, cx| this.set_volume(this.volume + 0.05, cx)))
             .on_action(cx.listener(|this, _: &VolumeDown, _, cx| this.set_volume(this.volume - 0.05, cx)))
             .on_action(cx.listener(|this, _: &ShowQueue, _, cx| this.open_now_playing(Some(0), cx)))
+            .on_action(cx.listener(|this, _: &CursorNext, _, cx| this.move_cursor(1, cx)))
+            .on_action(cx.listener(|this, _: &CursorPrev, _, cx| this.move_cursor(-1, cx)))
+            .on_action(cx.listener(|this, _: &ActivateCursor, _, cx| this.activate_cursor(cx)))
+            .on_action(cx.listener(|this, _: &MarkCursor, _, cx| this.toggle_cursor_mark(cx)))
+            .on_action(cx.listener(|this, _: &RadioFromSelection, _, cx| this.radio_from_selection(cx)))
             .on_action(cx.listener(|this, _: &Rate1, _, cx| this.rate_playing(1, cx)))
             .on_action(cx.listener(|this, _: &Rate2, _, cx| this.rate_playing(2, cx)))
             .on_action(cx.listener(|this, _: &Rate3, _, cx| this.rate_playing(3, cx)))
@@ -2081,6 +2123,11 @@ fn main() {
             gpui::KeyBinding::new("=", VolumeUp, Some("Crate && !Input")),
             gpui::KeyBinding::new("-", VolumeDown, Some("Crate && !Input")),
             gpui::KeyBinding::new("q", ShowQueue, Some("Crate && !Input")),
+            gpui::KeyBinding::new("j", CursorNext, Some("Crate && !Input")),
+            gpui::KeyBinding::new("k", CursorPrev, Some("Crate && !Input")),
+            gpui::KeyBinding::new("enter", ActivateCursor, Some("Crate && !Input")),
+            gpui::KeyBinding::new("x", MarkCursor, Some("Crate && !Input")),
+            gpui::KeyBinding::new("r", RadioFromSelection, Some("Crate && !Input")),
             gpui::KeyBinding::new("1", Rate1, Some("Crate && !Input")),
             gpui::KeyBinding::new("2", Rate2, Some("Crate && !Input")),
             gpui::KeyBinding::new("3", Rate3, Some("Crate && !Input")),

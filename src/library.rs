@@ -71,6 +71,7 @@ impl Crate {
     pub(crate) fn refresh_library(&mut self, cx: &mut Context<Self>) {
         self.lib_gen += 1;
         self.scroll = gpui::UniformListScrollHandle::new();
+        self.cursor = None;
         if self.lib_sort == LibSort::Added && self.lib_filters.is_empty() {
             self.lib_view = None;
             cx.notify();
@@ -349,9 +350,14 @@ impl Crate {
                     .child({
                         let kept = self.offline.index.get(&a.rating_key).is_some_and(|k| k.complete);
                         let selected = self.selection.contains(&a.rating_key);
+                        let at_cursor = self.cursor == Some(cell);
                         div()
                             .relative()
                             .child(cover)
+                            // Keyboard cursor: a ring just outside the cover, readable on light art.
+                            .when(at_cursor, |d| {
+                                d.child(div().absolute().top(px(-4.0)).left(px(-4.0)).right(px(-4.0)).bottom(px(-4.0)).rounded(px(11.0)).border_2().border_color(rgb(t.text_strong)))
+                            })
                             .when(selected, |d| d.child(div().absolute().inset_0().rounded(px(8.0)).border_2().border_color(rgb(t.accent))))
                             .when(selected, |d| {
                                 d.child(
@@ -426,6 +432,7 @@ impl Crate {
         let Some(a) = self.album(ix).cloned() else { return div().id(("lrow", cell)).h(px(LIST_ROW_H)).into_any_element() };
         self.request_thumb(&a.thumb.clone());
         let selected = self.selection.contains(&a.rating_key);
+        let at_cursor = self.cursor == Some(cell);
         let kept = self.offline.index.get(&a.rating_key).is_some_and(|k| k.complete);
         let key = a.rating_key.clone();
         let row = div()
@@ -438,7 +445,9 @@ impl Crate {
             .gap(px(14.0))
             .rounded(px(8.0))
             .cursor_pointer()
-            .when(selected, |d| d.bg(rgb(t.raised)).border_1().border_color(rgb(t.accent)))
+            .border_1()
+            .border_color(if selected { rgb(t.accent).into() } else if at_cursor { rgb(t.text2).into() } else { gpui::transparent_black() })
+            .when(selected || at_cursor, |d| d.bg(rgb(t.raised)))
             .hover(|d| d.bg(rgb(t.raised)))
             .child(div().w(px(18.0)).flex().justify_center().when(selected, |d| d.child(crate::icons::icon("check", 14.0, t.accent))))
             .child(self.cover_or_mark(&a.thumb, &a.rating_key, 44.0, 4.0))
