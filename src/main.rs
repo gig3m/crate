@@ -13,6 +13,7 @@ mod artist;
 mod home;
 mod icons;
 mod library;
+mod palette;
 mod mpris;
 mod player_bar;
 mod shell;
@@ -26,8 +27,8 @@ use std::{
 };
 
 use gpui::{
-    App, Bounds, Context, Entity, Image, ImageFormat, ObjectFit, Pixels, Point, SharedString,
-    Window, WindowBounds, WindowOptions, div, img, prelude::*, px, rgb, size, uniform_list,
+    App, Bounds, Context, Entity, Image, ImageFormat, Pixels, Point, SharedString,
+    Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size, uniform_list,
     UniformListScrollHandle,
 };
 use gpui_component::input::InputState;
@@ -99,6 +100,11 @@ struct Aulos {
     lib_sort: library::LibSort,
     lib_gen: u64,
     card_w: f32,
+    /// Command palette (Ctrl K) open, selected row, scope chip.
+    palette: bool,
+    pal_sel: usize,
+    pal_scope: usize,
+    test_search: Option<String>,
     /// Album rating key -> details (None while loading).
     album_detail: HashMap<String, Option<plex::AlbumDetail>>,
     focus: gpui::FocusHandle,
@@ -212,12 +218,8 @@ impl Aulos {
             match ev {
                 InputEvent::Change => {
                     let q = input.read(cx).value().to_string();
+                    this.pal_sel = 0;
                     this.on_search_change(q, cx);
-                }
-                InputEvent::PressEnter { .. } => {
-                    if let Some(h) = this.hits.first().cloned() {
-                        this.activate_hit(h, cx);
-                    }
                 }
                 _ => {}
             }
@@ -393,6 +395,10 @@ impl Aulos {
             lib_sort: library::LibSort::Added,
             lib_gen: 0,
             card_w: 140.0,
+            palette: false,
+            pal_sel: 0,
+            pal_scope: 0,
+            test_search: std::env::var("AULOS_SEARCH").ok(),
             album_detail: HashMap::new(),
             fwd: Vec::new(),
             album_scroll: gpui::ScrollHandle::new(),
@@ -1003,60 +1009,6 @@ impl Aulos {
         }
     }
 
-    fn search_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let mut col = div()
-            .id("search-results")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .px(px(PAD_X))
-            .pb(px(32.0))
-            .flex()
-            .flex_col()
-            .gap(px(4.0));
-        if self.hits.is_empty() {
-            col = col.child(div().text_color(rgb(t.muted)).child(format!("Searching for {:?}…", self.search_query)));
-        }
-        let mut last_kind = String::new();
-        for (i, h) in self.hits.iter().enumerate() {
-            if h.kind != last_kind {
-                last_kind = h.kind.clone();
-                let label = match h.kind.as_str() { "artist" => "Artists", "album" => "Albums", _ => "Tracks" };
-                col = col.child(div().mt(px(14.0)).mb(px(4.0)).text_size(px(12.0)).text_color(rgb(t.muted)).child(label));
-            }
-            let thumb = match self.art.get(&h.thumb).cloned() {
-                Some(i) => img(i).size(px(40.0)).flex_none().rounded(px(if h.kind == "artist" { 20.0 } else { 4.0 })).object_fit(ObjectFit::Cover).into_any_element(),
-                None => div().size(px(40.0)).flex_none().rounded(px(4.0)).bg(rgb(t.raised)).into_any_element(),
-            };
-            let hit = h.clone();
-            col = col.child(
-                div()
-                    .id(("hit", i))
-                    .h(px(52.0))
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(14.0))
-                    .rounded(px(8.0))
-                    .cursor_pointer()
-                    .when(i == 0, |d| d.bg(rgb(t.raised)))
-                    .hover(|d| d.bg(rgb(t.raised)))
-                    .child(thumb)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_w_0()
-                            .child(div().text_color(rgb(t.text_strong)).truncate().child(h.title.clone()))
-                            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(h.subtitle.clone())),
-                    )
-                    .child(div().flex_1())
-                    .when(i == 0, |d| d.child(div().text_size(px(11.0)).text_color(rgb(t.muted)).child("Enter")))
-                    .on_click(cx.listener(move |this, _, _, cx| this.activate_hit(hit.clone(), cx))),
-            );
-        }
-        col.into_any_element()
-    }
 
 }
 
@@ -1107,6 +1059,14 @@ impl Render for Aulos {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t0 = Instant::now();
         let t = self.theme.clone();
+        // Test hook: open the palette with a query once the library is in.
+        if !self.albums.is_empty()
+            && let Some(q) = self.test_search.take()
+        {
+            self.search.update(cx, |s, cx| s.set_value(q.clone(), window, cx));
+            self.open_palette(window, cx);
+            self.on_search_change(q, cx);
+        }
         if std::mem::take(&mut self.reset_search) {
             self.search.update(cx, |s, cx| s.set_value("", window, cx));
             self.search_query.clear();
@@ -1124,7 +1084,7 @@ impl Render for Aulos {
 
         let sidebar = self.sidebar(&t, cx);
 
-        let header = (matches!(self.view, View::Library) && self.search_query.is_empty()).then(|| self.library_header(&t, cx));
+        let header = matches!(self.view, View::Library).then(|| self.library_header(&t, cx));
         let rail = self.letter_rail(&t, cx);
 
         let grid = uniform_list(
@@ -1139,6 +1099,7 @@ impl Render for Aulos {
         let grid = div().flex_1().min_h_0().flex().child(grid).children(rail);
 
         let player = self.player_bar(&t, cx);
+        let palette = self.palette.then(|| self.palette_view(&t, cx));
 
         let el = div()
             .key_context("Aulos")
@@ -1154,10 +1115,11 @@ impl Render for Aulos {
             .on_action(cx.listener(|this, _: &SeekForward, _, cx| this.transport(Transport::Seek(10_000), cx)))
             .on_action(cx.listener(|this, _: &SeekBack, _, cx| this.transport(Transport::Seek(-10_000), cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
-                this.focus_search(window, cx);
+                this.open_palette(window, cx);
             }))
             .on_action(cx.listener(|this, _: &Back, _, cx| this.go_back(cx)))
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(rgb(t.base))
@@ -1179,7 +1141,6 @@ impl Render for Aulos {
                             .child(self.top_bar(&t, cx))
                             .children(header)
                             .child(match &self.view {
-                                _ if !self.search_query.is_empty() => self.search_view(&t, cx),
                                 View::Home => self.home_view(&t, cx),
                                 View::Artist { key, name, info } => {
                                     let (key, name, info) = (key.clone(), name.clone(), info.clone());
@@ -1194,7 +1155,8 @@ impl Render for Aulos {
                             }),
                     ),
             )
-            .child(player);
+            .child(player)
+            .children(palette);
         self.last_render_us = t0.elapsed().as_micros();
         el
     }

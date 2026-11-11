@@ -45,7 +45,7 @@ impl Aulos {
                 }
                 View::Library
             }
-            "search" => return self.focus_search(window, cx),
+            "search" => return self.open_palette(window, cx),
             other => View::Soon(other),
         };
         let same = match (&v, &self.view) {
@@ -257,34 +257,35 @@ impl Aulos {
             .child(nav_btn("nav-fwd", "forward", !self.fwd.is_empty(), cx))
             .child(
                 div()
+                    .id("search-trigger")
                     .flex_1()
                     .max_w(px(520.0))
                     .h(px(36.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
                     .rounded(px(8.0))
                     .border_1()
                     .border_color(rgb(t.border))
                     .bg(rgb(t.surface))
-                    .px(px(4.0))
-                    .flex()
-                    .items_center()
+                    .cursor_pointer()
+                    .hover(|d| d.border_color(rgb(t.line)))
+                    .child(icons::icon("search", 16.0, t.muted))
+                    .child(div().flex_1().text_size(px(14.0)).text_color(rgb(t.muted)).child("Search, play, or run a command"))
                     .child(
-                        gpui_component::input::Input::new(&self.search)
-                            .appearance(false)
-                            .h(px(34.0))
-                            .prefix(icons::icon("search", 16.0, t.muted).mr(px(4.0)))
-                            .suffix(
-                                div()
-                                    .px(px(6.0))
-                                    .py(px(1.0))
-                                    .rounded(px(4.0))
-                                    .border_1()
-                                    .border_color(rgb(t.line))
-                                    .font_family(MONO)
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(t.text2))
-                                    .child("Ctrl K"),
-                            ),
-                    ),
+                        div()
+                            .px(px(6.0))
+                            .py(px(1.0))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(rgb(t.line))
+                            .font_family(MONO)
+                            .text_size(px(11.0))
+                            .text_color(rgb(t.text2))
+                            .child("Ctrl K"),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx))),
             )
             .child(div().flex_1())
             .child(
