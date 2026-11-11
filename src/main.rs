@@ -133,6 +133,9 @@ struct Crate {
     lib_sort: library::LibSort,
     lib_gen: u64,
     card_w: f32,
+    /// Albums as a list instead of the grid; multi-selected album keys.
+    lib_list: bool,
+    selection: Vec<String>,
     /// Command palette (Ctrl K) open, selected row, scope chip.
     palette: bool,
     pal_sel: usize,
@@ -420,6 +423,18 @@ impl Crate {
                         {
                             this.play_album_sonic_radio(a, cx);
                         }
+                        // Test hooks: CRATE_LIST=1 list view; CRATE_SELECT=key,key preselects.
+                        if std::env::var_os("CRATE_LIST").is_some() {
+                            this.lib_list = true;
+                            this.go(View::Library);
+                        }
+                        if let Ok(v) = std::env::var("CRATE_SELECT") {
+                            this.selection = v.split(',').map(String::from).collect();
+                            this.go(View::Library);
+                        }
+                        if std::env::var_os("CRATE_SELECT_PLAY").is_some() {
+                            this.play_selection(false, cx);
+                        }
                         if std::env::var_os("CRATE_STATIONS").is_some() {
                             this.go(View::Soon("stations"));
                             this.refresh_sonic_progress(cx);
@@ -568,6 +583,8 @@ impl Crate {
             lib_sort: library::LibSort::Added,
             lib_gen: 0,
             card_w: 140.0,
+            lib_list: false,
+            selection: Vec::new(),
             palette: false,
             pal_sel: 0,
             pal_scope: 0,
@@ -1591,16 +1608,25 @@ impl Render for Crate {
         let header = matches!(self.view, View::Library).then(|| self.library_header(&t, cx));
         let rail = self.letter_rail(&t, cx);
 
-        let grid = uniform_list(
-            "albums",
-            rows,
-            cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
-                range.map(|r| this.row(r, cx)).collect::<Vec<_>>()
-            }),
-        )
-        .track_scroll(&self.scroll)
-        .flex_1();
-        let grid = div().flex_1().min_h_0().flex().child(grid).children(rail);
+        let grid = if self.lib_list {
+            uniform_list(
+                "albums-list",
+                self.cells(),
+                cx.processor(|this, range: std::ops::Range<usize>, _window, cx| range.map(|i| this.list_row(i, cx)).collect::<Vec<_>>()),
+            )
+            .track_scroll(&self.scroll)
+            .flex_1()
+        } else {
+            uniform_list(
+                "albums",
+                rows,
+                cx.processor(|this, range: std::ops::Range<usize>, _window, cx| range.map(|r| this.row(r, cx).into_any_element()).collect::<Vec<_>>()),
+            )
+            .track_scroll(&self.scroll)
+            .flex_1()
+        };
+        let sel_bar = self.selection_bar(&t, cx);
+        let grid = div().flex_1().min_h_0().flex().relative().child(grid).children(if self.lib_list { None } else { rail }).children(sel_bar);
 
         let page = match &self.view {
             View::Home => self.home_view(&t, cx),
@@ -1668,7 +1694,10 @@ impl Render for Crate {
                 this.open_palette(window, cx);
             }))
             .on_action(cx.listener(|this, _: &Back, _, cx| {
-                if this.now_playing {
+                if !this.selection.is_empty() {
+                    this.selection.clear();
+                    cx.notify();
+                } else if this.now_playing {
                     this.now_playing = false;
                     cx.notify();
                 } else {

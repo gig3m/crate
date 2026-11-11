@@ -12,6 +12,7 @@ use crate::{Crate, PAD_X, icons, plex::ArtRequest, shell::MONO, theme::Theme};
 pub(crate) const GRID_GAP_X: f32 = 18.0;
 pub(crate) const GRID_GAP_Y: f32 = 22.0;
 pub(crate) const RAIL_W: f32 = 28.0;
+pub(crate) const LIST_ROW_H: f32 = 56.0;
 /// Title and artist lines under a cover.
 const CAPTION_H: f32 = 7.0 + 18.0 + 7.0 + 16.0;
 
@@ -229,6 +230,32 @@ impl Crate {
                     .child(div().text_size(px(30.0)).font_weight(FontWeight::BOLD).text_color(rgb(t.text_strong)).child("Albums"))
                     .child(div().font_family(MONO).text_size(px(13.0)).text_color(rgb(t.muted)).child(count))
                     .child(div().flex_1())
+                    .child({
+                        let toggle = |id: &'static str, ic: &'static str, on: bool, list: bool, cx: &mut Context<Self>| {
+                            div()
+                                .id(id)
+                                .size(px(34.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(rgb(if on { t.raised } else { t.surface }))
+                                .cursor_pointer()
+                                .child(icons::icon(ic, 16.0, if on { t.accent } else { t.text2 }))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.lib_list = list;
+                                    this.scroll = gpui::UniformListScrollHandle::new();
+                                    cx.notify();
+                                }))
+                        };
+                        div()
+                            .flex()
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(rgb(t.border))
+                            .overflow_hidden()
+                            .child(toggle("view-grid", "grid", !self.lib_list, false, cx))
+                            .child(toggle("view-list", "list", self.lib_list, true, cx))
+                    })
                     .child(sort_btn),
             )
             .child(div().flex().flex_wrap().items_center().gap(px(8.0)).children(chips).child(add_btn))
@@ -317,7 +344,29 @@ impl Crate {
                     .cursor_pointer()
                     .child({
                         let kept = self.offline.index.get(&a.rating_key).is_some_and(|k| k.complete);
-                        div().relative().child(cover).when(kept, |d| {
+                        let selected = self.selection.contains(&a.rating_key);
+                        div()
+                            .relative()
+                            .rounded(px(10.0))
+                            .border_2()
+                            .border_color(if selected { rgb(t.accent).into() } else { gpui::transparent_black() })
+                            .child(cover)
+                            .when(selected, |d| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(8.0))
+                                        .top(px(8.0))
+                                        .size(px(22.0))
+                                        .rounded(px(11.0))
+                                        .bg(rgb(t.accent))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(crate::icons::icon("check", 13.0, t.base)),
+                                )
+                            })
+                            .when(kept, |d| {
                             d.child(
                                 div()
                                     .absolute()
@@ -344,9 +393,197 @@ impl Crate {
                             .child(div().min_w_0().truncate().child(a.artist.clone()))
                             .child(div().flex_none().font_family(MONO).text_size(px(11.0)).child(a.year.clone())),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_album(ix, cx))),
+                    .on_click({
+                        let key = a.rating_key.clone();
+                        cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| this.album_click(ix, &key, ev, cx))
+                    }),
             );
         }
         div().h(px(self.row_h())).pl(px(PAD_X)).flex().gap(px(GRID_GAP_X)).children(cards)
+    }
+
+    /// Ctrl+click selects; once something is selected, a plain click does too.
+    fn album_click(&mut self, ix: usize, key: &str, ev: &gpui::ClickEvent, cx: &mut Context<Self>) {
+        let m = ev.modifiers();
+        if m.control || m.platform || !self.selection.is_empty() {
+            if let Some(p) = self.selection.iter().position(|k| k == key) {
+                self.selection.remove(p);
+            } else {
+                self.selection.push(key.to_string());
+            }
+            cx.notify();
+        } else {
+            self.open_album(ix, cx);
+        }
+    }
+
+    /// List view: one album per row.
+    pub(crate) fn list_row(&mut self, cell: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = self.theme.clone();
+        let ix = self.cell_album(cell);
+        let Some(a) = self.album(ix).cloned() else { return div().id(("lrow", cell)).into_any_element() };
+        self.request_thumb(&a.thumb.clone());
+        let selected = self.selection.contains(&a.rating_key);
+        let kept = self.offline.index.get(&a.rating_key).is_some_and(|k| k.complete);
+        let key = a.rating_key.clone();
+        let row = div()
+            .id(("lrow", cell))
+            .w_full()
+            .h(px(LIST_ROW_H))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(14.0))
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .when(selected, |d| d.bg(rgb(t.raised)).border_1().border_color(rgb(t.accent)))
+            .hover(|d| d.bg(rgb(t.raised)))
+            .child(div().w(px(18.0)).flex().justify_center().when(selected, |d| d.child(crate::icons::icon("check", 14.0, t.accent))))
+            .child(self.cover_or_mark(&a.thumb, &a.rating_key, 44.0, 4.0))
+            .child(div().flex_1().min_w_0().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.text_strong)).truncate().child(a.title.clone()))
+            .child(div().w(px(260.0)).min_w_0().text_size(px(13.0)).text_color(rgb(t.text2)).truncate().child(a.artist.clone()))
+            .child(div().w(px(56.0)).font_family(MONO).text_size(px(12.0)).text_color(rgb(t.muted)).child(a.year.clone()))
+            .child(div().w(px(20.0)).when(kept, |d| d.child(crate::icons::icon("offline", 13.0, t.healthy))))
+            .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| this.album_click(ix, &key, ev, cx)));
+        div().w_full().px(px(PAD_X)).child(row).into_any_element()
+    }
+
+    /// The floating bar for a multi-selection (canvas).
+    pub(crate) fn selection_bar(&self, t: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.selection.is_empty() {
+            return None;
+        }
+        let btn = |id: &'static str, label: &'static str, primary: bool| {
+            div()
+                .id(id)
+                .h(px(34.0))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .rounded(px(8.0))
+                .text_size(px(13.0))
+                .font_weight(if primary { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+                .cursor_pointer()
+                .when(primary, |d| d.bg(rgb(t.accent)).text_color(rgb(t.base)).hover(|d| d.opacity(0.9)))
+                .when(!primary, |d| d.text_color(rgb(t.text)).hover(|d| d.bg(rgb(t.line))))
+                .child(label)
+        };
+        let this = cx.entity().downgrade();
+        let rate = Button::new("sel-rate").ghost().label("Rate…").dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |mut menu, _, _| {
+            for n in 1..=5u8 {
+                let this = this.clone();
+                menu = menu.item(PopupMenuItem::new("★".repeat(n as usize)).on_click(move |_, _, cx| {
+                    this.update(cx, |this, cx| this.rate_selection(n, cx)).ok();
+                }));
+            }
+            menu
+        });
+        Some(
+            div()
+                .absolute()
+                .bottom(px(20.0))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .pl(px(16.0))
+                        .pr(px(8.0))
+                        .py(px(8.0))
+                        .rounded(px(14.0))
+                        .bg(rgb(t.raised))
+                        .border_1()
+                        .border_color(rgb(t.line))
+                        .shadow_2xl()
+                        .child(div().mr(px(8.0)).text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child(format!("{} selected", self.selection.len())))
+                        .child(btn("sel-play", "Play", true).on_click(cx.listener(|this, _, _, cx| this.play_selection(false, cx))))
+                        .child(btn("sel-shuffle", "Shuffle", false).on_click(cx.listener(|this, _, _, cx| this.play_selection(true, cx))))
+                        .child(btn("sel-offline", "Keep offline", false).on_click(cx.listener(|this, _, _, cx| this.keep_selection_offline(cx))))
+                        .child(rate)
+                        .child(
+                            div()
+                                .id("sel-esc")
+                                .px(px(8.0))
+                                .font_family(MONO)
+                                .text_size(px(11.0))
+                                .text_color(rgb(t.muted))
+                                .cursor_pointer()
+                                .child("Esc")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.selection.clear();
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The selected albums, in the order they were picked.
+    fn selected_albums(&self) -> Vec<crate::plex::Album> {
+        self.selection.iter().filter_map(|k| self.albums.iter().find(|a| &a.rating_key == k).cloned()).collect()
+    }
+
+    pub(crate) fn play_selection(&mut self, shuffle: bool, cx: &mut Context<Self>) {
+        let albums = self.selected_albums();
+        if albums.is_empty() {
+            return;
+        }
+        self.play_intent += 1;
+        let intent = self.play_intent;
+        let keys: Vec<String> = albums.iter().map(|a| a.rating_key.clone()).collect();
+        let name = if albums.len() == 1 { albums[0].title.clone() } else { format!("{} albums", albums.len()) };
+        self.status = format!("Loading {name}…").into();
+        let rx = crate::plex_call(move |c| async move {
+            let mut all = Vec::new();
+            for k in keys {
+                all.extend(c.tracks(&k).await?);
+            }
+            Ok(all)
+        });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| match res {
+                _ if this.play_intent != intent => {}
+                Ok(Ok(mut tracks)) if !tracks.is_empty() => {
+                    if shuffle {
+                        crate::shuffle(&mut tracks);
+                    }
+                    this.selection.clear();
+                    this.start_queue(name, None, tracks, 0, cx);
+                }
+                Ok(Ok(_)) => this.status = "Those albums have no tracks".into(),
+                Ok(Err(e)) => this.status = format!("Couldn't load the albums: {e:#}").into(),
+                Err(_) => {}
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn keep_selection_offline(&mut self, cx: &mut Context<Self>) {
+        for album in self.selected_albums() {
+            if self.offline.index.get(&album.rating_key).is_none() {
+                self.with_tracks(album, cx, |this, album, tracks, cx| this.keep_offline(album, tracks, cx));
+            }
+        }
+        self.selection.clear();
+        cx.notify();
+    }
+
+    fn rate_selection(&mut self, stars: u8, cx: &mut Context<Self>) {
+        for album in self.selected_albums() {
+            if let Some(Some(d)) = self.album_detail.get_mut(&album.rating_key) {
+                d.rating = Some(f32::from(stars * 2));
+            }
+            self.rate_on_server(album.rating_key.clone(), Some(stars * 2), cx);
+        }
+        self.status = format!("Rated {} albums {}", self.selection.len(), "★".repeat(stars as usize)).into();
+        self.selection.clear();
+        cx.notify();
     }
 }
