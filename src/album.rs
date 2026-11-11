@@ -492,7 +492,39 @@ impl Crate {
                     .collect()
             })
             .unwrap_or_default();
-        let table = div().flex_1().min_w_0().flex().flex_col().child(head).children(rows);
+        // The track list failed to load: say so, with Retry, instead of an
+        // empty table.
+        let failed = (tracks.is_none()).then(|| self.album_error.as_ref().filter(|(k, _)| *k == album.rating_key).map(|(_, e)| e.clone())).flatten();
+        let error_row = failed.map(|e| {
+            div()
+                .px(px(12.0))
+                .py(px(16.0))
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .child(div().flex_1().min_w_0().text_size(px(13.0)).text_color(rgb(t.text2)).child(format!("Couldn't load the tracks: {e}")))
+                .child(
+                    div()
+                        .id("album-retry")
+                        .px(px(12.0))
+                        .h(px(30.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(rgb(t.line))
+                        .text_size(px(13.0))
+                        .text_color(rgb(t.text))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(rgb(t.raised)))
+                        .child("Retry")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.load_album_tracks(ix, cx);
+                            cx.notify();
+                        })),
+                )
+        });
+        let table = div().flex_1().min_w_0().flex().flex_col().child(head).children(rows).children(error_row);
 
         // About.
         // Sonically similar albums, other artists first (canvas: three across).

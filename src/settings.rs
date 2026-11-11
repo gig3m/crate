@@ -18,8 +18,27 @@ pub(crate) struct AudioInfo {
 
 /// Read sinks and clock settings from `pw-dump` (runs off the UI thread).
 fn read_audio_info() -> anyhow::Result<AudioInfo> {
-    let out = std::process::Command::new("pw-dump").output()?;
-    anyhow::ensure!(out.status.success(), "pw-dump failed");
+    // pw-dump waits forever when it can't reach PipeWire: give it 5 s.
+    let mut child = std::process::Command::new("pw-dump").stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn()?;
+    let mut stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("no output"))?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut stdout, &mut buf).map(|_| buf)
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let status = loop {
+        if let Some(st) = child.try_wait()? {
+            break st;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("pw-dump didn't answer (is PipeWire running?)");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    anyhow::ensure!(status.success(), "pw-dump failed");
+    let out = std::process::Output { status, stdout: reader.join().map_err(|_| anyhow::anyhow!("pw-dump reader"))??, stderr: Vec::new() };
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     let mut info = AudioInfo::default();
     for o in v.as_array().into_iter().flatten() {
@@ -280,13 +299,20 @@ impl Crate {
         self.go(crate::View::Soon("audio"));
         use crate::theme::{Mode, Theme as Th};
         self.theme_previews = Some((Th::load(Mode::Crate).0, Th::load(Mode::Omarchy).0));
+        self.read_audio_info_async(cx);
+        cx.notify();
+    }
+
+    /// Read the devices and clock settings off the UI thread.
+    pub(crate) fn read_audio_info_async(&mut self, cx: &mut Context<Self>) {
+        self.audio_info_error = None;
         let task = cx.background_spawn(async { read_audio_info() });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
                 match res {
                     Ok(i) => this.audio_info = Some(i),
-                    Err(e) => this.status = format!("PipeWire: {e:#}").into(),
+                    Err(e) => this.audio_info_error = Some(format!("{e:#}")),
                 }
                 cx.notify();
             })
@@ -316,9 +342,39 @@ impl Crate {
     pub(crate) fn audio_settings_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let h2 = |s: &'static str| div().text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child(s);
         let card = || div().p(px(16.0)).rounded(px(12.0)).border_1().border_color(rgb(t.raised)).bg(rgb(t.surface)).flex().flex_col().gap(px(8.0));
-        let Some(info) = self.audio_info.clone() else {
-            return div().px(px(PAD_X)).text_color(rgb(t.muted)).child("Reading PipeWire…").into_any_element();
-        };
+        // The rest of the page doesn't wait on PipeWire: only the device
+        // list and the signal card need it.
+        let info = self.audio_info.clone().unwrap_or_default();
+        let pw_note = self.audio_info.is_none().then(|| {
+            let msg = match &self.audio_info_error {
+                Some(e) => format!("Couldn't read PipeWire ({e}): devices aren't listed."),
+                None => "Reading PipeWire…".to_string(),
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .child(div().text_size(px(13.0)).text_color(rgb(t.muted)).child(msg))
+                .when(self.audio_info_error.is_some(), |d| {
+                    d.child(
+                        div()
+                            .id("pw-retry")
+                            .px(px(12.0))
+                            .h(px(30.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(rgb(t.line))
+                            .text_size(px(13.0))
+                            .text_color(rgb(t.text))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgb(t.raised)))
+                            .child("Retry")
+                            .on_click(cx.listener(|this, _, _, cx| this.read_audio_info_async(cx))),
+                    )
+                })
+        });
         let current = self.target.clone().unwrap_or_else(|| info.default_sink.clone());
         let mut rows: Vec<(Option<String>, String, String)> = vec![(None, "System default".into(), info.default_sink.clone())];
         rows.extend(info.sinks.iter().map(|(n, d)| (Some(n.clone()), d.clone(), n.clone())));
@@ -537,7 +593,7 @@ impl Crate {
                 div()
                     .flex()
                     .gap(px(24.0))
-                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Output device")).children(devices))
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Output device")).children(pw_note).children(devices))
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Signal")).child(bitperfect).child(later).child(fades).child(quality).child(self.eq_card(t, cx))),
             )
             .when(!current.is_empty(), |d| {

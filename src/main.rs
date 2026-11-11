@@ -251,6 +251,10 @@ struct Crate {
     /// Server sonic analysis progress, for the Stations page.
     sonic_progress: Option<u32>,
     audio_info: Option<settings::AudioInfo>,
+    audio_info_error: Option<String>,
+    /// An album whose track list failed to load (rating key, error), shown
+    /// on its page with Retry.
+    pub(crate) album_error: Option<(String, String)>,
     prompt_copied: bool,
     /// Another launch (or MPRIS Raise) asked for the window.
     raise_requested: bool,
@@ -824,6 +828,8 @@ impl Crate {
             sonic_progress: None,
             compact_playing: true,
             audio_info: None,
+            audio_info_error: None,
+            album_error: None,
             prompt_copied: false,
             raise_requested: false,
             // Albums left half-downloaded last time pick up where they stopped.
@@ -1016,6 +1022,8 @@ impl Crate {
                             return;
                         }
                         this.status = format!("Couldn't load {title}: {e:#}").into();
+                        let why = if down { "can't reach your Plex server".to_string() } else { format!("{e:#}") };
+                        this.album_error = Some((album.rating_key.clone(), why));
                         cx.notify();
                     })
                     .ok();
@@ -1364,8 +1372,11 @@ impl Crate {
         self.load_album_tracks(ix, cx);
     }
 
-    fn load_album_tracks(&mut self, ix: usize, cx: &mut Context<Self>) {
+    pub(crate) fn load_album_tracks(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(album) = self.album(ix).cloned() else { return };
+        if self.album_error.as_ref().is_some_and(|(k, _)| *k == album.rating_key) {
+            self.album_error = None;
+        }
         self.with_tracks(album, cx, move |this, _album, tracks, cx| {
             if let View::Album { ix: cur, tracks: slot } = &mut this.view
                 && *cur == ix {
