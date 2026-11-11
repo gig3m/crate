@@ -191,7 +191,8 @@ mod tests {
             let p = match fmt.next_packet() {
                 Ok(Some(p)) => p,
                 Ok(None) => break,
-                // How symphonia's Ogg reader ends a stream (the engine does the same).
+                // Plex's Ogg has no end-of-stream flag: symphonia ends it this way
+                // (the engine also checks the known length).
                 Err(symphonia::core::errors::Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => panic!("next_packet after {frames} frames: {e}"),
             };

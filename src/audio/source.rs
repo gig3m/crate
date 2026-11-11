@@ -45,6 +45,14 @@ impl Source {
         }
     }
 
+    /// The cached copy of a streamed source.
+    pub fn cache_path(&self) -> Option<&std::path::Path> {
+        match self {
+            Source::Http { cache, .. } => Some(cache),
+            Source::File(_) => None,
+        }
+    }
+
     pub fn ext(&self) -> Option<String> {
         let p = match self {
             Source::File(p) => p.clone(),

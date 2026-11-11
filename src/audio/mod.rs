@@ -661,17 +661,39 @@ fn decoder_thread(
         tail_rate = rate;
         let mut dec = opus::codecs()
             .make_audio_decoder(params, &AudioDecoderOptions::default().gapless(true))?;
+        let seeked = index == 0 && start_ms > 0;
+        if seeked {
+            // The decoder starts mid-stream: no start-of-stream trims (Opus
+            // pre-skip) on the first packets it sees.
+            dec.reset();
+        }
         let limit_frames = track_limit.map(|s| (s * rate as f64) as u64);
         let mut track_frames = 0u64;
-        // Symphonia's Ogg reader ends a stream with an UnexpectedEof error
-        // (after every frame, end trim applied) rather than Ok(None). Other
-        // formats end cleanly, so there it still means a cut-off file.
-        let eof_is_end = params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
+        // Symphonia's Ogg reader returns UnexpectedEof, not Ok(None), when the
+        // last page isn't flagged end-of-stream, and Plex never flags it. So
+        // for Opus an EOF is the end only once the track's known length has
+        // played (within half a second); short of that it's a cut-off stream.
+        let is_opus = params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
+        let start_frames = if seeked { start_ms * rate as u64 / 1000 } else { 0 };
         loop {
             let packet = match fmt.next_packet() {
                 Ok(Some(p)) => p,
                 Ok(None) => break,
-                Err(symphonia::core::errors::Error::IoError(e)) if eof_is_end && e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(symphonia::core::errors::Error::IoError(e))
+                    if is_opus
+                        && e.kind() == std::io::ErrorKind::UnexpectedEof
+                        && num_frames.is_some_and(|n| start_frames + track_frames + rate as u64 / 2 >= n) =>
+                {
+                    break;
+                }
+                Err(symphonia::core::errors::Error::IoError(e)) if is_opus && e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    // Cut off: don't keep a cached copy that would fail the
+                    // same way next time (a live download isn't cached yet).
+                    if let Some(p) = src.cache_path() {
+                        let _ = std::fs::remove_file(p);
+                    }
+                    anyhow::bail!("stream ended early at {:.1} s", (start_frames + track_frames) as f64 / rate as f64);
+                }
                 Err(e) => return Err(e.into()),
             };
             if stats.stop.load(Ordering::Acquire) {
