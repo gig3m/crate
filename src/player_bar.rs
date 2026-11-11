@@ -84,11 +84,36 @@ impl Crate {
             .flex()
             .items_center()
             .gap(px(18.0))
-            .child(icon_btn("shuffle", "shuffle", 17.0, t.line, None, cx))
+            .child(
+                icon_btn("shuffle", "shuffle", 17.0, if self.shuffle { t.accent } else { t.text2 }, None, cx)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(t.raised)))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_shuffle(cx))),
+            )
             .child(icon_btn("prev", "prev", 20.0, t.text, Some(Transport::Prev), cx))
             .child(play)
             .child(icon_btn("next", "next", 20.0, t.text, Some(Transport::Next), cx))
-            .child(icon_btn("repeat", "repeat", 17.0, t.line, None, cx));
+            .child({
+                let on = self.repeat != crate::queue::Repeat::Off;
+                icon_btn("repeat", "repeat", 17.0, if on { t.accent } else { t.text2 }, None, cx)
+                    .relative()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(t.raised)))
+                    .when(self.repeat == crate::queue::Repeat::One, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(3.0))
+                                .right(px(3.0))
+                                .font_family(MONO)
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(9.0))
+                                .text_color(rgb(t.accent))
+                                .child("1"),
+                        )
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.cycle_repeat(cx)))
+            });
         let levels = now.and_then(|n| self.track_detail.get(&n.tracks[n.idx].rating_key)).and_then(|d| d.as_ref()).map(|d| &d.levels).filter(|l| !l.is_empty());
         let bars: Vec<_> = (0..BARS)
             .map(|i| {
@@ -165,8 +190,18 @@ impl Crate {
                     .whitespace_nowrap()
                     .child(text)
             }))
-            .child(icon_btn("lyrics", "lyrics", 17.0, t.line, None, cx))
-            .child(icon_btn("queue", "queue", 17.0, t.line, None, cx))
+            .child(
+                icon_btn("lyrics", "lyrics", 17.0, t.text2, None, cx)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(t.raised)))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_now_playing(None, cx))),
+            )
+            .child(
+                icon_btn("queue", "queue", 17.0, t.text2, None, cx)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(t.raised)))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_now_playing(Some(0), cx))),
+            )
             .child(
                 icon_btn("device", "device", 17.0, if self.target.is_some() { t.accent } else { t.text2 }, None, cx)
                     .cursor_pointer()

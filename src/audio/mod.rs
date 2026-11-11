@@ -1,7 +1,7 @@
 //! Crate audio engine (spike quality, shaped for the real app).
 //!
 //! Threads:
-//! - decoder: walks the queue, decodes with symphonia, pushes f32 frames into
+//! - decoder: pops the shared queue, decodes with symphonia, pushes f32 frames into
 //!   an rtrb ring. Asks the PipeWire thread to rebuild the stream when the
 //!   sample rate changes between tracks.
 //! - pipewire: owns the main loop and the stream. The process callback (RT)
@@ -11,6 +11,7 @@
 pub mod source;
 
 use std::{
+    collections::VecDeque,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -83,10 +84,21 @@ enum Cmd {
     Stop,
 }
 
+/// Tracks the decoder hasn't opened yet. The decoder pops from the front;
+/// the caller can append (radio refills) or replace what's left (shuffle).
+struct Queue {
+    items: VecDeque<Source>,
+    /// Tracks the decoder has opened (= the next track's engine index).
+    started: usize,
+    /// The decoder reached the end and is winding down: no more changes.
+    closed: bool,
+}
+
 pub struct Engine {
     pub stats: Arc<Stats>,
     pub events: mpsc::Receiver<Event>,
     cmd: pw::channel::Sender<Cmd>,
+    queue: Arc<Mutex<Queue>>,
 }
 
 impl Engine {
@@ -98,6 +110,34 @@ impl Engine {
     pub fn stop(&self) {
         self.stats.stop.store(true, Ordering::Release);
         let _ = self.cmd.send(Cmd::Stop);
+    }
+
+    /// Add tracks to the end. False once the decoder has finished the queue
+    /// (the caller must start a new engine for them).
+    pub fn append(&self, more: Vec<Source>) -> bool {
+        let mut q = self.queue.lock().unwrap();
+        if q.closed {
+            return false;
+        }
+        q.items.extend(more);
+        true
+    }
+
+    /// How many tracks the decoder has opened so far.
+    pub fn started(&self) -> usize {
+        self.queue.lock().unwrap().started
+    }
+
+    /// Replace the tracks not opened yet, but only if the decoder has opened
+    /// exactly `started` tracks (so the caller's view of what's next is
+    /// current). False means retry with a fresh `started()`, or the queue closed.
+    pub fn replace_upcoming(&self, started: usize, upcoming: Vec<Source>) -> bool {
+        let mut q = self.queue.lock().unwrap();
+        if q.closed || q.started != started {
+            return false;
+        }
+        q.items = upcoming.into();
+        true
     }
 }
 
@@ -116,6 +156,7 @@ impl Engine {
     /// Like `play`, starting `start_ms` into the first track.
     pub fn play_from(queue: Vec<Source>, start_ms: u64, target: Option<String>) -> anyhow::Result<Self> {
         let stats = Arc::new(Stats::default());
+        let queue = Arc::new(Mutex::new(Queue { items: queue.into(), started: 0, closed: false }));
         let (ev_tx, events) = mpsc::channel();
         let (cmd_tx, cmd_rx) = pw::channel::channel::<Cmd>();
 
@@ -135,7 +176,7 @@ impl Engine {
         }
         let cmd = cmd_tx.clone();
         {
-            let (stats, ev_tx) = (stats.clone(), ev_tx.clone());
+            let (stats, ev_tx, queue) = (stats.clone(), ev_tx.clone(), queue.clone());
             std::thread::Builder::new()
                 .name("decoder".into())
                 .spawn(move || {
@@ -149,7 +190,7 @@ impl Engine {
                     stats.decoder_done.store(true, Ordering::Release);
                 })?;
         }
-        Ok(Self { stats, events, cmd })
+        Ok(Self { stats, events, cmd, queue })
     }
 }
 
@@ -167,7 +208,7 @@ fn wait_for(stats: &Stats, mut cond: impl FnMut() -> bool) -> bool {
 }
 
 fn decoder_thread(
-    queue: Vec<Source>,
+    queue: Arc<Mutex<Queue>>,
     start_ms: u64,
     mut prod: rtrb::Producer<f32>,
     cmd_tx: pw::channel::Sender<Cmd>,
@@ -191,7 +232,49 @@ fn decoder_thread(
     // Spike/testing aid: cap each track at N seconds.
     let track_limit: Option<f64> = std::env::var("CRATE_TRACK_LIMIT").ok().and_then(|v| v.parse().ok());
 
-    for (index, src) in queue.into_iter().enumerate() {
+    loop {
+        let popped = {
+            let mut q = queue.lock().unwrap();
+            q.items.pop_front().map(|src| {
+                q.started += 1;
+                (q.started - 1, src)
+            })
+        };
+        let (index, src) = match popped {
+            Some(next) => next,
+            None => {
+                // Out of tracks for now. Let what's buffered play while an
+                // append (radio refill) may still arrive; once the ring is
+                // empty, close the queue and finish.
+                if !activated && stream_frames > 0 {
+                    let _ = cmd_tx.send(Cmd::Activate);
+                    activated = true;
+                }
+                let mut next = None;
+                loop {
+                    if stats.stop.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    {
+                        let mut q = queue.lock().unwrap();
+                        if let Some(src) = q.items.pop_front() {
+                            q.started += 1;
+                            next = Some((q.started - 1, src));
+                            break;
+                        }
+                        if prod.slots() >= cap {
+                            q.closed = true;
+                            break;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                match next {
+                    Some(n) => n,
+                    None => break,
+                }
+            }
+        };
         let mss = MediaSourceStream::new(src.open(stats.stop.clone())?, Default::default());
         let mut hint = Hint::new();
         if let Some(ext) = src.ext() {

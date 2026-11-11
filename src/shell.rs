@@ -35,7 +35,7 @@ impl Crate {
         window.focus(&h, cx);
     }
 
-    fn nav_to(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn nav_to(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         let v = match id {
             "home" => View::Home,
             "albums" => {

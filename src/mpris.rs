@@ -17,6 +17,8 @@ pub enum Transport {
     /// Absolute position in ms within the current track.
     SetPosition(u64),
     Stop,
+    SetShuffle(bool),
+    SetRepeat(crate::queue::Repeat),
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +27,7 @@ pub enum Update {
     Status { playing: bool, stopped: bool },
     Position(u64),
     Seeked(u64),
+    Modes { shuffle: bool, repeat: crate::queue::Repeat },
 }
 
 /// Start the MPRIS server. Returns the sender for state updates.
@@ -46,6 +49,7 @@ pub fn start(cmds: mpsc::UnboundedSender<Transport>) -> mpsc::UnboundedSender<Up
                     .can_seek(true)
                     .can_control(true)
                     .loop_status(LoopStatus::None)
+                    .shuffle(false)
                     .build()
                     .await
                 {
@@ -77,6 +81,24 @@ pub fn start(cmds: mpsc::UnboundedSender<Transport>) -> mpsc::UnboundedSender<Up
                     let c = cmds.clone();
                     player.connect_set_position(move |_, _id, pos: Time| {
                         let _ = c.send(Transport::SetPosition(pos.as_millis().max(0) as u64));
+                    });
+                }
+                {
+                    let c = cmds.clone();
+                    player.connect_set_shuffle(move |_, on| {
+                        let _ = c.send(Transport::SetShuffle(on));
+                    });
+                }
+                {
+                    let c = cmds.clone();
+                    player.connect_set_loop_status(move |_, st| {
+                        use crate::queue::Repeat;
+                        let r = match st {
+                            LoopStatus::None => Repeat::Off,
+                            LoopStatus::Playlist => Repeat::All,
+                            LoopStatus::Track => Repeat::One,
+                        };
+                        let _ = c.send(Transport::SetRepeat(r));
                     });
                 }
                 tokio::task::spawn_local(player.run());
@@ -112,6 +134,18 @@ pub fn start(cmds: mpsc::UnboundedSender<Transport>) -> mpsc::UnboundedSender<Up
                             Ok(())
                         }
                         Update::Seeked(ms) => player.seeked(Time::from_millis(ms as i64)).await,
+                        Update::Modes { shuffle, repeat } => {
+                            use crate::queue::Repeat;
+                            let st = match repeat {
+                                Repeat::Off => LoopStatus::None,
+                                Repeat::All => LoopStatus::Playlist,
+                                Repeat::One => LoopStatus::Track,
+                            };
+                            match player.set_shuffle(shuffle).await {
+                                Ok(()) => player.set_loop_status(st).await,
+                                e => e,
+                            }
+                        }
                     };
                     if let Err(e) = r {
                         eprintln!("[mpris] {e}");

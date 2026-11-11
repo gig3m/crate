@@ -15,6 +15,7 @@ mod icons;
 mod library;
 mod pages;
 mod palette;
+mod queue;
 mod mpris;
 mod now_playing;
 mod tile;
@@ -43,7 +44,7 @@ use crate_audio::audio::{Engine, Event as AudioEvent, Source};
 use mpris::{Transport, Update as MprisUpdate};
 use plex::{Album, ArtRequest, ArtResult, ArtistInfo, ArtistRequest, HubsRequest, SearchHit, SearchRequest, Track, TracksRequest};
 
-gpui::actions!(crate_app, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch, ToggleNowPlaying, PaletteRadio, Rate1, Rate2, Rate3, Rate4, Rate5]);
+gpui::actions!(crate_app, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch, ToggleNowPlaying, PaletteRadio, Rate1, Rate2, Rate3, Rate4, Rate5, GoHome, GoStations, ShowLyrics, ShowQueue]);
 
 #[derive(Clone)]
 enum View {
@@ -104,6 +105,8 @@ struct Crate {
     /// async replies can tell they've been superseded.
     queue_seq: u64,
     play_intent: u64,
+    shuffle: bool,
+    repeat: queue::Repeat,
     /// Album grid order for the current sort/filters (None: the cached list as-is).
     lib_view: Option<Vec<usize>>,
     lib_filters: Vec<library::LibFilter>,
@@ -171,6 +174,8 @@ struct Now {
     rep_state: &'static str,
     rep_elapsed: u64,
     rep_at: Instant,
+    /// Rating keys in the order the queue started, to undo shuffle.
+    orig_order: Vec<String>,
 }
 
 struct Bench {
@@ -479,6 +484,8 @@ impl Crate {
             content_w: 1000.0,
             queue_seq: 0,
             play_intent: 0,
+            shuffle: false,
+            repeat: queue::Repeat::Off,
             lib_view: None,
             lib_filters: Vec::new(),
             lib_sort: library::LibSort::Added,
@@ -761,6 +768,11 @@ impl Crate {
         self.queue_seq += 1;
         self.play_intent += 1;
         self.report_stop();
+        let orig_order: Vec<String> = tracks.iter().map(|t| t.rating_key.clone()).collect();
+        let mut tracks = tracks;
+        if self.shuffle {
+            crate::shuffle(&mut tracks[start + 1..]);
+        }
         for t in &tracks {
             self.request_thumb(&t.thumb.clone());
         }
@@ -787,6 +799,7 @@ impl Crate {
             rep_state: "stopped",
             rep_elapsed: 0,
             rep_at: Instant::now(),
+            orig_order,
         });
         self.play_from(start, 0, cx);
     }
@@ -809,19 +822,9 @@ impl Crate {
             now.rep_elapsed = 0;
         }
         self.engine = None; // dropping stops the old one
-        let (base, token) = self.plex.clone();
-        let queue = now.tracks[idx..]
-            .iter()
-            .map(|t| {
-                let id = t.part_key.split('/').nth(3).unwrap_or("x").to_string();
-                let ext = t.part_key.rsplit('.').next().unwrap_or("bin").to_string();
-                Source::Http {
-                    url: format!("{base}{}", t.part_key),
-                    token: token.clone(),
-                    cache: std::path::PathBuf::from(format!("/scratch/crate-cache/part-{id}.{ext}")),
-                }
-            })
-            .collect();
+        let range = self.engine_slice(&self.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default(), idx);
+        let queue = self.sources(&self.now.as_ref().map(|n| n.tracks[range.clone()].to_vec()).unwrap_or_default());
+        let Some(now) = self.now.as_mut() else { return };
         match Engine::play_from(queue, ms, self.target.clone()) {
             Ok(e) => {
                 self.engine = Some(e);
@@ -833,7 +836,7 @@ impl Crate {
                 now.paused = false;
                 now.finished = false;
                 now.stopped = false;
-                now.engine_end = now.tracks.len();
+                now.engine_end = range.end;
                 self.status = format!("Playing {}", now.context).into();
                 let _ = self.mpris.send(MprisUpdate::Status { playing: true, stopped: false });
                 if ms > 0 {
@@ -902,6 +905,8 @@ impl Crate {
                 self.play_from(idx, to, cx);
             }
             Transport::SetPosition(ms) => self.play_from(idx, ms, cx),
+            Transport::SetShuffle(on) => self.set_modes(Some(on), None, cx),
+            Transport::SetRepeat(r) => self.set_modes(None, Some(r), cx),
             Transport::Stop => {
                 self.engine = None;
                 now.finished = true;
@@ -921,7 +926,14 @@ impl Crate {
         let mut failed = false;
         while let Ok(ev) = engine.events.try_recv() {
             match ev {
-                AudioEvent::TrackStarted { index, source_rate, bits, at_us, .. } => {
+                AudioEvent::TrackStarted { index, label, source_rate, bits, at_us, .. } => {
+                    // The engine's queue must match ours, or the UI shows the wrong track.
+                    let want = now.tracks.get(now.start_idx + index).and_then(|t| t.part_key.split('/').nth(3)).unwrap_or("?");
+                    if !label.contains(&format!("part-{want}.")) {
+                        eprintln!("[crate] queue mismatch at {}: engine opened {label}, expected part {want}", now.start_idx + index);
+                    } else if std::env::var_os("CRATE_TRACE").is_some() {
+                        eprintln!("[crate] engine opened {label} for #{}", now.start_idx + index);
+                    }
                     now.formats.insert(now.start_idx + index, (source_rate, bits));
                     if now.boundaries.len() == index {
                         now.boundaries.push(at_us);
@@ -1000,7 +1012,20 @@ impl Crate {
                                 now.refill = None; // station ran dry
                             }
                             let thumbs: Vec<String> = more.iter().map(|t| t.thumb.clone()).collect();
-                            now.tracks.extend(more);
+                            now.tracks.extend(more.iter().cloned());
+                            // Gapless: hand them to the running engine (unless it already finished,
+                            // or repeat-one keeps it to the current track).
+                            if this.repeat != queue::Repeat::One
+                                && let Some(e) = this.engine.as_ref()
+                                && let Some(n) = this.now.as_ref()
+                                && n.engine_end == n.tracks.len() - more.len()
+                                && e.append(this.sources(&more))
+                                && let Some(n) = this.now.as_mut()
+                            {
+                                n.engine_end = n.tracks.len();
+                            }
+                            let Some(now) = this.now.as_mut() else { return };
+                            let _ = &now;
                             for th in thumbs {
                                 this.request_thumb(&th);
                             }
@@ -1028,11 +1053,15 @@ impl Crate {
             .detach();
         }
         // The engine reached the end of its queue but the queue has grown.
-        if now.finished && !failed && !now.stopped && now.engine_end < now.tracks.len() {
+        if now.finished && !failed && !now.stopped && now.engine_end < now.tracks.len() && self.repeat != queue::Repeat::One {
             let from = now.engine_end;
             self.play_from(from, 0, cx);
             return false;
         }
+        if now.finished && !failed && self.repeat_on_finish(cx) {
+            return false;
+        }
+        let Some(now) = self.now.as_mut() else { return false };
         let _ = self.mpris.send(MprisUpdate::Position(now.elapsed_ms));
         if now.finished {
             let _ = self.mpris.send(MprisUpdate::Status { playing: false, stopped: true });
@@ -1090,6 +1119,18 @@ impl Crate {
             send_timeline(tr.rating_key.clone(), "stopped", at, tr.duration_ms);
             n.rep_state = "stopped";
         }
+    }
+
+    /// Full Now Playing (lyrics are its middle column), optionally on a panel tab.
+    fn open_now_playing(&mut self, tab: Option<usize>, cx: &mut Context<Self>) {
+        if self.now.is_none() {
+            return;
+        }
+        if let Some(t) = tab {
+            self.np_tab = t;
+        }
+        self.now_playing = true;
+        cx.notify();
     }
 
     /// 1–5 keys: rate the playing track.
@@ -1427,6 +1468,16 @@ impl Render for Crate {
                     this.go_back(cx)
                 }
             }))
+            .on_action(cx.listener(|this, _: &GoHome, window, cx| {
+                this.now_playing = false;
+                this.nav_to("home", window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoStations, window, cx| {
+                this.now_playing = false;
+                this.nav_to("stations", window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowLyrics, _, cx| this.open_now_playing(None, cx)))
+            .on_action(cx.listener(|this, _: &ShowQueue, _, cx| this.open_now_playing(Some(0), cx)))
             .on_action(cx.listener(|this, _: &Rate1, _, cx| this.rate_playing(1, cx)))
             .on_action(cx.listener(|this, _: &Rate2, _, cx| this.rate_playing(2, cx)))
             .on_action(cx.listener(|this, _: &Rate3, _, cx| this.rate_playing(3, cx)))
@@ -1602,6 +1653,10 @@ fn main() {
             gpui::KeyBinding::new("left", SeekBack, Some("Crate && !Input")),
             gpui::KeyBinding::new("escape", Back, Some("Crate && !Input")),
             gpui::KeyBinding::new("f", ToggleNowPlaying, Some("Crate && !Input")),
+            gpui::KeyBinding::new("g h", GoHome, Some("Crate && !Input")),
+            gpui::KeyBinding::new("g s", GoStations, Some("Crate && !Input")),
+            gpui::KeyBinding::new("l", ShowLyrics, Some("Crate && !Input")),
+            gpui::KeyBinding::new("q", ShowQueue, Some("Crate && !Input")),
             gpui::KeyBinding::new("1", Rate1, Some("Crate && !Input")),
             gpui::KeyBinding::new("2", Rate2, Some("Crate && !Input")),
             gpui::KeyBinding::new("3", Rate3, Some("Crate && !Input")),
