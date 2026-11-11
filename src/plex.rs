@@ -122,6 +122,8 @@ pub struct PlaylistDetail {
     pub tracks: Vec<Track>,
     /// Plex playlist item id per track, same order.
     pub item_ids: Vec<u64>,
+    /// Items fetched, playable or not (to tell a cap from missing files).
+    pub loaded: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -1008,6 +1010,8 @@ impl Client {
                 .header("X-Plex-Token", &self.token)
                 .header("X-Plex-Container-Start", "0")
                 .header("X-Plex-Container-Size", limit.to_string())
+                .header("X-Plex-Client-Identifier", client_id())
+                .timeout(std::time::Duration::from_secs(30))
                 .send()
                 .await?;
             anyhow::ensure!(res.status().is_success(), "playlist {key} -> {}", res.status());
@@ -1018,7 +1022,9 @@ impl Client {
         let items = items?;
         let m = &meta["MediaContainer"]["Metadata"][0];
         let (mut tracks, mut item_ids) = (Vec::new(), Vec::new());
-        for it in items["MediaContainer"]["Metadata"].as_array().cloned().unwrap_or_default() {
+        let raw = items["MediaContainer"]["Metadata"].as_array().cloned().unwrap_or_default();
+        let loaded = raw.len();
+        for it in raw {
             let id = it["playlistItemID"].as_u64().unwrap_or(0);
             if let Some(t) = serde_json::from_value::<Meta>(it).ok().and_then(Meta::into_track) {
                 tracks.push(t);
@@ -1033,6 +1039,7 @@ impl Client {
             thumb: m["thumb"].as_str().or(m["composite"].as_str()).unwrap_or_default().to_string(),
             tracks,
             item_ids,
+            loaded,
         })
     }
 

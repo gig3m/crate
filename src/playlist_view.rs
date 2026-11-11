@@ -2,6 +2,8 @@
 //! smart playlists run to a thousand tracks). Regular playlists can drop a
 //! track; smart ones are what their rules say.
 
+use std::sync::Arc;
+
 use gpui::{Context, FontWeight, ObjectFit, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb, uniform_list};
 
 use crate::{Crate, PAD_X, View, fmt_ms, icons, plex::PlaylistDetail, shell::MONO, theme::{Theme, mix}};
@@ -18,21 +20,32 @@ impl Crate {
     }
 
     pub(crate) fn load_playlist(&mut self, key: String, cx: &mut Context<Self>) {
+        self.playlist_load_gen += 1;
+        let gen_ = self.playlist_load_gen;
+        if self.playlist_error.as_ref().is_some_and(|(k, _)| *k == key) {
+            self.playlist_error = None;
+        }
         let k = key.clone();
         let rx = crate::plex_call(move |c| async move { c.playlist_detail(&k, LIMIT).await });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| {
+                // A newer load (another removal, a revisit) supersedes this one.
+                if this.playlist_load_gen != gen_ {
+                    return;
+                }
                 match res {
                     Ok(Ok(d)) => {
                         this.request_thumb(&d.thumb);
                         if let View::Playlist { key: cur, detail, .. } = &mut this.view
                             && *cur == key
                         {
-                            *detail = Some(d);
+                            *detail = Some(Arc::new(d));
                         }
                     }
-                    Ok(Err(e)) => this.say(format!("Couldn't load the playlist: {e:#}")),
+                    Ok(Err(e)) => {
+                        this.playlist_error = Some((key, format!("{e:#}")));
+                    }
                     Err(_) => {}
                 }
                 cx.notify();
@@ -42,10 +55,15 @@ impl Crate {
         .detach();
     }
 
-    /// The loaded tracks of the playlist on screen.
-    fn playlist_tracks_shown(&self) -> Option<(String, Vec<crate::plex::Track>)> {
+    /// The queue name for the playlist on screen: the server's title.
+    fn playlist_queue_name(view_title: &str, d: &PlaylistDetail) -> String {
+        if d.title.is_empty() { view_title.to_string() } else { d.title.clone() }
+    }
+
+    /// The loaded tracks of the playlist on screen, and its queue name.
+    fn playlist_tracks_shown(&self) -> Option<(String, Arc<PlaylistDetail>)> {
         match &self.view {
-            View::Playlist { title, detail: Some(d), .. } => Some((title.clone(), d.tracks.clone())),
+            View::Playlist { title, detail: Some(d), .. } => Some((Self::playlist_queue_name(title, d), d.clone())),
             _ => None,
         }
     }
@@ -61,33 +79,60 @@ impl Crate {
     }
 
     pub(crate) fn play_playlist_from(&mut self, i: usize, shuffle: bool, cx: &mut Context<Self>) {
-        let Some((title, mut tracks)) = self.playlist_tracks_shown() else { return };
-        if tracks.is_empty() {
+        /// Longest queue a playlist starts (from the clicked row on).
+        const QUEUE_MAX: usize = 1000;
+        let Some((title, d)) = self.playlist_tracks_shown() else { return };
+        if d.tracks.is_empty() {
             return;
         }
         if shuffle {
+            let mut tracks = d.tracks.clone();
             crate::shuffle(&mut tracks);
+            tracks.truncate(QUEUE_MAX);
             self.start_queue(format!("{title} (shuffled)"), None, tracks, 0, cx);
+        } else if d.tracks.len() <= QUEUE_MAX {
+            self.start_queue(title, None, d.tracks.clone(), i, cx);
         } else {
-            self.start_queue(title, None, tracks, i, cx);
+            let tracks: Vec<_> = d.tracks.iter().skip(i).take(QUEUE_MAX).cloned().collect();
+            self.start_queue(title, None, tracks, 0, cx);
         }
     }
 
     fn remove_playlist_item(&mut self, key: String, item_id: u64, title: String, cx: &mut Context<Self>) {
+        // Off the page at once (no double removes); the reload confirms.
+        if let View::Playlist { key: cur, detail: Some(d), .. } = &mut self.view
+            && *cur == key
+            && let Some(pos) = d.item_ids.iter().position(|&x| x == item_id)
+        {
+            let d = Arc::make_mut(d);
+            d.item_ids.remove(pos);
+            d.tracks.remove(pos);
+            d.count = d.count.saturating_sub(1);
+            d.loaded = d.loaded.saturating_sub(1);
+        }
+        // Copies of this page in history are stale now: refetch on return.
+        for v in self.back.iter_mut().chain(self.fwd.iter_mut()) {
+            if let View::Playlist { key: k, detail, .. } = v
+                && *k == key
+            {
+                *detail = None;
+            }
+        }
         let k = key.clone();
         let rx = crate::plex_call(move |c| async move { c.remove_from_playlist(&k, item_id).await });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| {
                 match res {
-                    Ok(Ok(())) => {
-                        this.say(format!("Removed \u{201c}{title}\u{201d}"));
-                        this.load_playlist(key, cx);
-                        this.reload_playlists(cx);
-                    }
+                    Ok(Ok(())) => this.say(format!("Removed \u{201c}{title}\u{201d}")),
                     Ok(Err(e)) => this.say(format!("Couldn't remove \u{201c}{title}\u{201d}: {e:#}")),
                     Err(_) => {}
                 }
+                // Either way, show what the server has now.
+                if matches!(&this.view, View::Playlist { key: cur, .. } if *cur == key) {
+                    this.load_playlist(key, cx);
+                }
+                this.reload_playlists(cx);
                 cx.notify();
             })
             .ok();
@@ -110,18 +155,24 @@ impl Crate {
             Some(d) => {
                 let n = d.count.max(d.tracks.len() as u64);
                 let mins = if d.duration_ms > 0 { d.duration_ms } else { d.tracks.iter().map(|t| t.duration_ms).sum() } / 60_000;
-                let more = if d.tracks.len() >= LIMIT {
-                    format!(" · showing the first {LIMIT}")
-                } else if (d.tracks.len() as u64) < n {
-                    format!(" · {} unavailable (no file on the server)", n - d.tracks.len() as u64)
-                } else {
-                    String::new()
-                };
+                let missing = d.loaded.saturating_sub(d.tracks.len());
+                let mut more = String::new();
+                if missing > 0 {
+                    more += &format!(" · {missing} unavailable (no file on the server)");
+                }
+                if d.loaded >= LIMIT && (d.loaded as u64) < n {
+                    more += &format!(" · showing the first {LIMIT}");
+                }
                 let len = if mins >= 60 { format!("{} h {} min", mins / 60, mins % 60) } else { format!("{mins} min") };
                 format!("{n} tracks, {len}{more}")
             }
+            None if self.playlist_error.as_ref().is_some_and(|(k, _)| k == key) => {
+                format!("Couldn't load: {}", self.playlist_error.as_ref().map(|(_, e)| e.as_str()).unwrap_or_default())
+            }
             None => listed.map(|p| format!("{} tracks · loading…", p.count)).unwrap_or_else(|| "Loading…".into()),
         };
+        let failed = detail.is_none() && self.playlist_error.as_ref().is_some_and(|(k, _)| k == key);
+        let retry_key = key.to_string();
         let header = div()
             .pt(px(24.0))
             .pb(px(20.0))
@@ -155,7 +206,30 @@ impl Crate {
                             .line_clamp(2)
                             .child(title.to_string()),
                     )
-                    .child(div().text_size(px(14.0)).text_color(rgb(t.text2)).child(facts)),
+                    .child(div().text_size(px(14.0)).text_color(rgb(t.text2)).child(facts))
+                    .when(failed, |d| {
+                        d.child(
+                            div()
+                                .id("pl-retry")
+                                .w(px(80.0))
+                                .h(px(30.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(8.0))
+                                .border_1()
+                                .border_color(rgb(t.line))
+                                .text_size(px(13.0))
+                                .text_color(rgb(t.text))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgb(t.raised)))
+                                .child("Retry")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.load_playlist(retry_key.clone(), cx);
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             );
 
         let actions = div()
@@ -220,7 +294,7 @@ impl Crate {
             cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                 let t = this.theme.clone();
                 let View::Playlist { key, title, detail: Some(d) } = &this.view else { return Vec::new() };
-                let (key, list_title, smart) = (key.clone(), title.clone(), d.smart);
+                let (key, list_title, smart) = (key.clone(), Self::playlist_queue_name(title, d), d.smart);
                 // The row playing now, when this playlist is what's playing.
                 let playing_key = this
                     .now

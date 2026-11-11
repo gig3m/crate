@@ -65,7 +65,7 @@ enum View {
     Library,
     Album { ix: usize, tracks: Option<Vec<Track>> },
     Artist { key: String, name: String, info: Option<ArtistInfo> },
-    Playlist { key: String, title: String, detail: Option<plex::PlaylistDetail> },
+    Playlist { key: String, title: String, detail: Option<std::sync::Arc<plex::PlaylistDetail>> },
     /// A canvas page not built yet.
     Soon(&'static str),
 }
@@ -106,6 +106,10 @@ struct Crate {
     /// A playlist create/add is in flight (one at a time).
     playlist_busy: bool,
     playlist_scroll: UniformListScrollHandle,
+    /// Bumped per playlist page load; stale replies are dropped.
+    playlist_load_gen: u64,
+    /// (playlist key, error) when its page failed to load.
+    playlist_error: Option<(String, String)>,
     /// A queue waiting on loudness before it starts (its queue_seq); cleared
     /// by any transport action or explicit start, which supersede it.
     pending_start: Option<u64>,
@@ -713,6 +717,8 @@ impl Crate {
             naming: None,
             playlist_busy: false,
             playlist_scroll: UniformListScrollHandle::new(),
+            playlist_load_gen: 0,
+            playlist_error: None,
             eq_preset,
             eq_custom,
             eq_sliders,
@@ -1049,9 +1055,12 @@ impl Crate {
                 let ix = *ix;
                 self.load_album_tracks(ix, cx);
             }
-            View::Playlist { key, detail: None, .. } => {
-                let key = key.clone();
-                self.load_playlist(key, cx);
+            View::Playlist { key, detail, .. } => {
+                let (key, missing) = (key.clone(), detail.is_none());
+                self.playlist_scroll = UniformListScrollHandle::new();
+                if missing {
+                    self.load_playlist(key, cx);
+                }
             }
             View::Artist { key, info, .. } => {
                 let (key, missing) = (key.clone(), info.is_none());
@@ -2221,7 +2230,7 @@ impl Render for Crate {
             }
             View::Playlist { key, title, detail } => {
                 let (key, title, detail) = (key.clone(), title.clone(), detail.clone());
-                self.playlist_view(&key, &title, detail.as_ref(), &t, cx)
+                self.playlist_view(&key, &title, detail.as_deref(), &t, cx)
             }
         };
         let main_area = if compact && self.compact_playing && self.now.is_some() {
