@@ -2971,7 +2971,9 @@ fn run_setup(rt: tokio::runtime::Runtime) {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                app_id: Some("crate".into()),
+                // Test runs set CRATE_APP_ID so a window rule can keep them off the
+                // desktop being worked in.
+                app_id: Some(std::env::var("CRATE_APP_ID").unwrap_or_else(|_| "crate".into())),
                 titlebar: Some(gpui::TitlebarOptions { title: Some("Crate — sign in".into()), ..Default::default() }),
                 ..Default::default()
             },
@@ -3297,7 +3299,9 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                app_id: Some("crate".into()),
+                // Test runs set CRATE_APP_ID so a window rule can keep them off the
+                // desktop being worked in.
+                app_id: Some(std::env::var("CRATE_APP_ID").unwrap_or_else(|_| "crate".into())),
                 titlebar: Some(gpui::TitlebarOptions { title: Some("Crate".into()), ..Default::default() }),
                 ..Default::default()
             },

@@ -350,11 +350,12 @@ impl Crate {
     }
 
     /// A live style is showing over audio that is playing, or still settling
-    /// to rest after a pause or stop: worth animating.
+    /// to rest after a pause or stop: worth animating. ("Showing": drawn in
+    /// the last 500 ms, longer than the 250 ms poll that redraws the app.)
     pub(crate) fn viz_animating(&self) -> bool {
         let v = self.viz.borrow();
         let playing = self.engine.is_some() && self.now.as_ref().is_some_and(|n| !n.paused && !n.finished);
-        v.style.live() && v.drawn.get().is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(250)) && (playing || !v.at_rest())
+        v.style.live() && v.drawn.get().is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(500)) && (playing || !v.at_rest())
     }
 
     /// Repaint ~30 times a second while a live style animates.
@@ -364,10 +365,13 @@ impl Crate {
                 cx.background_executor().timer(std::time::Duration::from_millis(33)).await;
                 let alive = this
                     .update(cx, |this, cx| {
-                        if this.viz_animating() {
-                            // Only the live layer repaints: the app is cached
-                            // beneath it (see VizLayer).
-                            match this.viz_layer.as_ref() {
+                        if this.viz_animating() && !this.palette {
+                            // Bars on the layer: only it repaints (the app is
+                            // cached beneath it). A live bar drawn in the app
+                            // (the compact tile): the app repaints. Under the
+                            // palette the bar holds still: nothing to do.
+                            let layered = !this.viz.borrow().live_bars.is_empty();
+                            match this.viz_layer.as_ref().filter(|_| layered) {
                                 Some(layer) => layer.update(cx, |_, cx| cx.notify()),
                                 None => cx.notify(),
                             }
