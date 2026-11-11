@@ -53,6 +53,27 @@ impl KeptTrack {
     }
 }
 
+/// Whether any kept album (other than `except`) still uses `part` as its
+/// current or previous file.
+fn part_in_use(index: &Index, part: &str, except: Option<(&str, &str)>) -> bool {
+    index.albums.iter().any(|a| {
+        a.tracks.iter().any(|t| {
+            if except.is_some_and(|(ak, tk)| ak == a.key && tk == t.rating_key) {
+                return false;
+            }
+            t.part_key == part || t.prev_part.as_deref() == Some(part)
+        })
+    })
+}
+
+/// Delete a kept file (and any partial download of it).
+fn delete_part(part: &str) {
+    if let Some(p) = file_for(part) {
+        let _ = std::fs::remove_file(crate::plex::partial_path(&p));
+        let _ = std::fs::remove_file(&p);
+    }
+}
+
 impl KeptAlbum {
     /// The album's tracks from the index, for playing without the server.
     pub fn to_tracks(&self) -> Vec<Track> {
@@ -331,16 +352,27 @@ impl Crate {
         let Some(a) = self.offline.index.albums.iter_mut().find(|a| a.key == album_key) else { return };
         let mut changed = false;
         let mut refetch = false;
+        let mut orphans: Vec<String> = Vec::new();
         for k in &mut a.tracks {
             if let Some(t) = tracks.iter().find(|t| t.rating_key == k.rating_key) {
                 if t.part_key != k.part_key && file_for(&t.part_key).is_some() {
-                    // Keep the old file playable until the new one lands.
-                    if k.prev_part.is_none() && file_for(&k.part_key).is_some_and(|p| p.exists()) {
-                        k.prev_part = Some(k.part_key.clone());
+                    if k.prev_part.as_deref() == Some(t.part_key.as_str()) {
+                        // Back to the file still kept: nothing to fetch; the
+                        // replacement that never finished is dropped.
+                        orphans.push(std::mem::replace(&mut k.part_key, t.part_key.clone()));
+                        k.prev_part = None;
+                    } else {
+                        if k.prev_part.is_none() && file_for(&k.part_key).is_some_and(|p| p.exists()) {
+                            // Keep the old file playable until the new one lands.
+                            k.prev_part = Some(k.part_key.clone());
+                        } else {
+                            // A replacement replaced again: the middle one goes.
+                            orphans.push(k.part_key.clone());
+                        }
+                        k.part_key = t.part_key.clone();
+                        refetch = true;
                     }
-                    k.part_key = t.part_key.clone();
                     k.title = t.title.clone();
-                    refetch = true;
                     changed = true;
                 }
                 let fresh = KeptTrack::from_track(t);
@@ -359,6 +391,11 @@ impl Crate {
             let key = a.key.clone();
             if !self.offline.queue.contains(&key) {
                 self.offline.queue.push_back(key);
+            }
+        }
+        for part in orphans {
+            if !part_in_use(&self.offline.index, &part, None) {
+                delete_part(&part);
             }
         }
         if changed {
@@ -396,11 +433,9 @@ impl Crate {
         if let Some(pos) = self.offline.index.albums.iter().position(|a| a.key == key) {
             let a = self.offline.index.albums.remove(pos);
             // Keep files another kept album still uses (the same part in a compilation).
-            for t in &a.tracks {
-                let shared = self.offline.index.albums.iter().any(|o| o.tracks.iter().any(|x| x.part_key == t.part_key));
-                if !shared && let Some(p) = file_for(&t.part_key) {
-                    let _ = std::fs::remove_file(crate::plex::partial_path(&p));
-                    let _ = std::fs::remove_file(&p);
+            for part in a.tracks.iter().flat_map(|t| std::iter::once(t.part_key.clone()).chain(t.prev_part.clone())) {
+                if !part_in_use(&self.offline.index, &part, None) {
+                    delete_part(&part);
                 }
             }
             self.save_offline();
@@ -479,20 +514,31 @@ impl Crate {
                 let cancelled = cancel.load(Ordering::Relaxed);
                 this.offline.job = None;
                 let failed = failed.filter(|_| !cancelled);
+                let mut done_with: Vec<(String, String)> = Vec::new();
                 if let Some(a) = this.offline.index.albums.iter_mut().find(|a| a.key == key) {
                     a.complete = !a.tracks.is_empty() && a.tracks.iter().all(|t| file_for(&t.part_key).is_some_and(|p| p.exists()));
                     // Replaced files are no longer needed once their new
                     // ones are kept.
                     for t in a.tracks.iter_mut() {
-                        if t.prev_part.is_some()
+                        if let Some(prev) = t.prev_part.clone()
                             && file_for(&t.part_key).is_some_and(|p| p.exists())
-                            && let Some(old) = t.prev_part.take().and_then(|p| file_for(&p))
                         {
-                            let _ = std::fs::remove_file(old);
+                            t.prev_part = None;
+                            if prev != t.part_key {
+                                done_with.push((t.rating_key.clone(), prev));
+                            }
                         }
                     }
-                    a.bytes = album_bytes(a);
                     a.failed = if a.complete { None } else { failed.clone() };
+                }
+                // Only once nothing kept still uses them (a compilation's shared part).
+                for (track, prev) in done_with {
+                    if !part_in_use(&this.offline.index, &prev, Some((&key, &track))) {
+                        delete_part(&prev);
+                    }
+                }
+                if let Some(a) = this.offline.index.albums.iter_mut().find(|a| a.key == key) {
+                    a.bytes = album_bytes(a);
                 }
                 this.save_offline();
                 if let Some(e) = failed {

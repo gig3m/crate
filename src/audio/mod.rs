@@ -139,6 +139,8 @@ pub const CHANNELS: usize = 2;
 
 #[derive(Default)]
 pub struct Stats {
+    /// Stop flags of the prefetches this engine started (stop() sets them).
+    pub prefetches: Mutex<Vec<Arc<AtomicBool>>>,
     /// Played time in microseconds (exact across rate changes).
     pub played_us: AtomicU64,
     pub frames_played: AtomicU64,
@@ -290,6 +292,11 @@ impl Engine {
 
     pub fn stop(&self) {
         self.stats.stop.store(true, Ordering::Release);
+        // Prefetches end now, not when the decoder thread gets round to
+        // exiting (it may be waiting on the network).
+        for f in self.stats.prefetches.lock().unwrap().iter() {
+            f.store(true, Ordering::Release);
+        }
         let _ = self.cmd.send(Cmd::Stop);
     }
 
@@ -734,7 +741,9 @@ fn decoder_thread(
         // shorter): late enough that a seek or skip right after a start
         // doesn't throw it away, and this track's own download has a head
         // start on the connection.
-        let prefetch_at = num_frames.map(|n| (n / 2).min(10 * rate as u64)).unwrap_or(10 * rate as u64);
+        // Counted in played time (the decoder runs several seconds ahead).
+        let prefetch_after_us = num_frames.map(|n| (n / 2).min(10 * rate as u64)).unwrap_or(10 * rate as u64) * 1_000_000 / rate as u64;
+        let track_start_us = queued_us;
         let mut prefetched = false;
         // Symphonia's Ogg reader returns UnexpectedEof, not Ok(None), when the
         // last page isn't flagged end-of-stream, and Plex never flags it.
@@ -817,11 +826,18 @@ fn decoder_thread(
                 }
             }
             track_frames += (scratch.len() / CHANNELS) as u64;
-            if !prefetched && track_frames >= prefetch_at {
+            if !prefetched && stats.played_us.load(Ordering::Acquire) >= track_start_us + prefetch_after_us {
                 prefetched = true;
                 let next = queue.lock().unwrap().items.front().map(|n| n.src.clone());
-                if let Some(next) = next {
-                    prefetches.add(next.prefetch());
+                if let Some(next) = next
+                    && let Some(flag) = next.prefetch()
+                {
+                    stats.prefetches.lock().unwrap().push(flag.clone());
+                    // A stop that landed just before the push missed it.
+                    if stats.stop.load(Ordering::Acquire) {
+                        flag.store(true, Ordering::Release);
+                    }
+                    prefetches.add(Some(flag));
                 }
             }
             // The previous track's end fades out under this one's start.
