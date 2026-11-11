@@ -1608,22 +1608,26 @@ pub const AUDIO_CACHE_MAX: u64 = 10 << 30;
 /// Delete cached tracks (`part-*`), least recently played first, until the
 /// cache is under `max` bytes. Files used in the last hour stay. (An open
 /// that races a delete re-downloads: see `open_cached`.) Downloads left
-/// behind by a process that died (`part-<id>.part.<pid>.<n>`, pid gone, or
-/// over a day old) go first. Returns (files, bytes) removed.
+/// behind by a process that died (`part-<id>.part.<pid>.<n>`, pid gone)
+/// go first. Returns (files, bytes) removed.
 pub fn prune_audio_cache(dir: &std::path::Path, max: u64) -> (usize, u64) {
     let now = std::time::SystemTime::now();
     let age = |m: &std::fs::Metadata| m.modified().ok().and_then(|t| now.duration_since(t).ok()).unwrap_or_default();
     let (mut n, mut freed) = (0, 0);
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        let Some((_, rest)) = name.split_once(".part.") else { continue };
+        // Only Crate's own: part-<id>[.<ext>].part.<pid>.<n>.
+        let Some((head, rest)) = name.split_once(".part.") else { continue };
+        let Some((pid, nth)) = rest.split_once('.') else { continue };
+        if !head.starts_with("part-") || nth.parse::<u64>().is_err() {
+            continue;
+        }
+        let Ok(pid) = pid.parse::<u32>() else { continue };
         let Some(m) = e.metadata().ok().filter(|m| m.is_file()) else { continue };
-        let pid = rest.split('.').next().unwrap_or_default();
-        let dead = pid.parse::<u32>().is_ok_and(|p| !std::path::Path::new(&format!("/proc/{p}")).exists());
-        let old = age(&m) > std::time::Duration::from_secs(86400);
-        // A dead pid's file could belong to a live download only if the
-        // pid was reused; the 10-minute floor covers a fresh one.
-        if ((dead && age(&m) > std::time::Duration::from_secs(600)) || old) && std::fs::remove_file(e.path()).is_ok() {
+        // Its process is gone (a live owner keeps it however long it stalls).
+        // The 10-minute floor guards a reused pid's fresh download.
+        let dead = !std::path::Path::new(&format!("/proc/{pid}")).exists();
+        if dead && age(&m) > std::time::Duration::from_secs(600) && std::fs::remove_file(e.path()).is_ok() {
             n += 1;
             freed += m.len();
         }
@@ -1669,18 +1673,30 @@ mod audio_cache_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let day = std::time::Duration::from_secs(86400);
         let now = std::time::SystemTime::now();
-        for (name, age_days, len) in [("part-1.flac", 3, 100), ("part-2.flac", 2, 100), ("part-3.flac", 0, 100), ("part-4.part.9.0", 5, 100), ("art-1.jpg", 9, 100)] {
+        let me = std::process::id();
+        let live = format!("part-5.flac.part.{me}.0");
+        // 4294967 is above Linux's pid_max: never a live process.
+        for (name, age_days, len) in [
+            ("part-1.flac", 3, 100),
+            ("part-2.flac", 2, 100),
+            ("part-3.flac", 0, 100),
+            ("part-4.flac.part.4294967.0", 5, 100),
+            (live.as_str(), 9, 100),
+            ("notes.part.2024.txt", 9, 100),
+            ("art-1.jpg", 9, 100),
+        ] {
             let p = dir.join(name);
             std::fs::write(&p, vec![0u8; len]).unwrap();
             let f = std::fs::File::options().write(true).open(&p).unwrap();
             f.set_modified(now - day * age_days).unwrap();
         }
-        // 300 bytes of finished parts, cap 150: the oldest goes, then the
-        // next; the fresh one stays even though still over.
-        // part-4 is an old leftover download: it goes too.
+        // The dead process's download goes; the live one's (however old)
+        // and other files stay. Then 300 bytes of finished parts, cap 150:
+        // the oldest goes, then the next; the fresh one stays though over.
         assert_eq!(super::prune_audio_cache(&dir, 150), (3, 300));
         let left: std::collections::BTreeSet<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into()).collect();
-        assert_eq!(left, ["art-1.jpg", "part-3.flac"].into_iter().map(String::from).collect());
+        let want: std::collections::BTreeSet<String> = ["art-1.jpg", "part-3.flac", live.as_str(), "notes.part.2024.txt"].into_iter().map(String::from).collect();
+        assert_eq!(left, want);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
