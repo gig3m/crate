@@ -42,7 +42,9 @@ fn response_of(cascade: &[[f64; 5]], f: f64, rate: f64) -> f64 {
 }
 
 /// Rates the engine runs at (a stream matches its file's rate).
-const RATES: [f64; 8] = [44_100.0, 48_000.0, 88_200.0, 96_000.0, 176_400.0, 192_000.0, 352_800.0, 384_000.0];
+const RATES: [f64; 13] = [
+    8_000.0, 11_025.0, 16_000.0, 22_050.0, 32_000.0, 44_100.0, 48_000.0, 88_200.0, 96_000.0, 176_400.0, 192_000.0, 352_800.0, 384_000.0,
+];
 
 /// Linear preamp that cancels the cascade's highest boost at any of the
 /// engine's rates (1.0 when it only cuts). Off the RT thread: ~8k evaluations.
@@ -76,7 +78,8 @@ pub struct Eq {
     gen_seen: u64,
     rate: u32,
     active: bool,
-    /// Preamp now and its target: ramped over ~10 ms so a change doesn't click.
+    /// Preamp now and its target. Easing back up ramps over ~10 ms; more
+    /// attenuation (a bigger boost) steps at once so nothing runs short.
     pre: f64,
     pre_target: f64,
     pre_step: f64,
@@ -188,6 +191,15 @@ mod tests {
         let tr = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 4.5, 5.5];
         let worst = (0..2000).map(|i| 20.0 * 1000f64.powf(i as f64 / 1999.0)).map(|f| response_db(&tr, f, 192_000.0)).fold(0.0f64, f64::max);
         assert!(20.0 * (preamp(&tr) as f64).log10() <= -worst + 1e-6);
+        // A bigger boost while active: the preamp drops at once; a smaller one ramps up.
+        let mut e = Eq::default();
+        let small = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0];
+        let big = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 12.0, 12.0, 12.0];
+        e.update(1, 48_000, &small, preamp(&small));
+        e.update(2, 48_000, &big, preamp(&big));
+        assert_eq!(e.pre, preamp(&big) as f64);
+        e.update(3, 48_000, &small, preamp(&small));
+        assert!(e.pre < preamp(&small) as f64);
         // Silence after an impulse drains to exact zero (no denormal state).
         let mut g = [0.0; 10];
         g[9] = 12.0;
