@@ -424,7 +424,20 @@ impl Crate {
                                 .when(artist, |d| d.flex().justify_center())
                                 .child(it.title.clone()),
                         )
-                        .when(!it.subtitle.is_empty(), |d| d.child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(it.subtitle.clone())))
+                        .when(!it.subtitle.is_empty() || !it.format.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .gap(px(8.0))
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(t.muted))
+                                    .child(div().min_w_0().truncate().child(it.subtitle.clone()))
+                                    .when(!it.format.is_empty(), |d| {
+                                        d.child(div().flex_none().font_family(crate::shell::MONO).text_size(px(11.0)).child(it.format.clone()))
+                                    }),
+                            )
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| this.open_hub_item(&kind, &key, &title, cx)))
                 })
                 .collect();

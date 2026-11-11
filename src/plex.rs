@@ -97,6 +97,8 @@ pub struct HubItem {
     /// Plex key (a station's play URL, an album's children); used once stations play.
     #[allow(dead_code)]
     pub key: String,
+    /// Short format for Recently Added cards ("24/96", "FLAC", "DSD64"); empty when unknown.
+    pub format: String,
 }
 
 #[derive(Clone, Debug)]
@@ -172,6 +174,25 @@ pub struct TrackDetail {
     /// (start ms, line); empty when the track has no timed lyrics.
     pub lyrics: Vec<(u64, String)>,
     pub lyrics_by: String,
+}
+
+/// The canvas's card format: bit depth/kHz for hi-res ("24/96", "24/44.1"),
+/// DSD by its multiple of 44.1 kHz ("DSD64"), otherwise the codec ("FLAC", "MP3").
+pub fn short_format(codec: &str, bit_depth: Option<u64>, rate: Option<u64>) -> String {
+    let codec = codec.to_ascii_lowercase();
+    let rate = rate.unwrap_or(0);
+    if codec.starts_with("dsd") {
+        // Plex reports DSD at its PCM-equivalent or native rate; name the native multiple.
+        let native = if rate >= 2_822_400 { rate } else { rate * 32 };
+        return if native >= 2_822_400 { format!("DSD{}", native / 44_100) } else { "DSD".into() };
+    }
+    match bit_depth {
+        Some(b) if b > 16 || rate > 48_000 => {
+            let khz = if rate.is_multiple_of(1000) { format!("{}", rate / 1000) } else { format!("{:.1}", rate as f64 / 1000.0) };
+            format!("{b}/{khz}")
+        }
+        _ => codec.to_uppercase(),
+    }
 }
 
 /// `[mm:ss.xx]text` lines; tags like `[au:...]` are skipped.
@@ -472,7 +493,7 @@ impl Client {
             .json()
             .await
             .context("decoding hubs")?;
-        Ok(env
+        let mut rows = env
             .mc
             .hubs
             .into_iter()
@@ -490,10 +511,41 @@ impl Client {
                         title: m.title,
                         thumb: m.thumb.unwrap_or_default(),
                         key: m.key,
+                        format: String::new(),
                     })
                     .collect(),
             })
-            .collect())
+            .collect::<Vec<_>>();
+        // Recently Added cards show each album's format (two small requests per
+        // album, concurrent). Bounded so a slow server can't hold up Home.
+        if let Some(row) = rows.iter_mut().find(|r| r.kind == "album" && r.id.starts_with("music.recent.added")) {
+            let mut set = tokio::task::JoinSet::new();
+            for (i, it) in row.items.iter().enumerate() {
+                let (c, key) = (self.clone(), it.rating_key.clone());
+                set.spawn(async move { (i, c.album_format_short(&key).await) });
+            }
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+            while let Ok(Some(Ok((i, res)))) = tokio::time::timeout_at(deadline, set.join_next()).await {
+                if let (Ok(f), Some(it)) = (res, row.items.get_mut(i)) {
+                    it.format = f;
+                }
+            }
+            set.abort_all();
+            if std::env::var_os("CRATE_TRACE").is_some() {
+                eprintln!("recent formats: {:?}", row.items.iter().map(|i| format!("{} = {}", i.title, i.format)).collect::<Vec<_>>());
+            }
+        }
+        Ok(rows)
+    }
+
+    /// An album's format, read from its first track's audio stream.
+    pub async fn album_format_short(&self, album_key: &str) -> anyhow::Result<String> {
+        let env: serde_json::Value = self.get(&format!("/library/metadata/{album_key}/children")).await?.json().await.context("tracks")?;
+        let first = env["MediaContainer"]["Metadata"][0]["ratingKey"].as_str().context("no tracks")?.to_string();
+        let v: serde_json::Value = self.get(&format!("/library/metadata/{first}")).await?.json().await.context("track")?;
+        let streams = v["MediaContainer"]["Metadata"][0]["Media"][0]["Part"][0]["Stream"].as_array().cloned().unwrap_or_default();
+        let st = streams.iter().find(|s| s["streamType"].as_i64() == Some(2)).context("no audio stream")?;
+        Ok(short_format(st["codec"].as_str().unwrap_or_default(), st["bitDepth"].as_u64(), st["samplingRate"].as_u64()))
     }
 
     /// Start a station (or any library URI) as a Plex play queue. Creates a
@@ -1138,5 +1190,21 @@ pub async fn run(
             let _ = tx.send(ArtResult { thumb: req.thumb, bytes: bytes.ok() });
             drop(permit);
         });
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::short_format;
+
+    #[test]
+    fn card_formats() {
+        assert_eq!(short_format("flac", Some(16), Some(44_100)), "FLAC");
+        assert_eq!(short_format("flac", Some(24), Some(96_000)), "24/96");
+        assert_eq!(short_format("flac", Some(24), Some(48_000)), "24/48");
+        assert_eq!(short_format("alac", Some(24), Some(44_100)), "24/44.1");
+        assert_eq!(short_format("mp3", None, Some(44_100)), "MP3");
+        assert_eq!(short_format("dsd_lsbf_planar", Some(1), Some(2_822_400)), "DSD64");
+        assert_eq!(short_format("dsd_msbf", None, Some(176_400)), "DSD128");
     }
 }
