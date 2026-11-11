@@ -28,6 +28,7 @@ mod player_bar;
 mod settings;
 mod setup;
 mod shell;
+mod sonic;
 mod stations;
 mod plex;
 mod theme;
@@ -150,6 +151,11 @@ struct Crate {
     raise_requested: bool,
     /// Albums kept offline, and the download in progress.
     offline: offline::Offline,
+    /// Sonic analysis results: similar albums / artists per key (None while loading).
+    sonic_albums: HashMap<String, Option<Vec<Album>>>,
+    sonic_artists: HashMap<String, Option<Vec<sonic::ArtistRef>>>,
+    sonic: sonic::SonicState,
+    sonic_search: Entity<InputState>,
     history: Option<Vec<plex::HistoryItem>>,
     top_tracks: Option<Vec<(Track, u64)>>,
     /// Artists derived from the album list: (key, name, album count).
@@ -293,6 +299,14 @@ impl Crate {
         let (theme, theme_gen) = Theme::load(theme_mode);
         apply_component_theme(&theme, Some(window), cx);
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search, play, or run a command"));
+        let sonic_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search for a track to start or end at"));
+        cx.subscribe(&sonic_search, |this, input, ev: &gpui_component::input::InputEvent, cx| {
+            if let gpui_component::input::InputEvent::Change = ev {
+                let q = input.read(cx).value().to_string();
+                this.on_sonic_search(q, cx);
+            }
+        })
+        .detach();
         cx.subscribe(&search, |this, input, ev: &gpui_component::input::InputEvent, cx| {
             use gpui_component::input::InputEvent;
             if let InputEvent::Change = ev {
@@ -387,6 +401,20 @@ impl Crate {
                             let page: &'static str = Box::leak(page.into_boxed_str());
                             this.go(View::Soon(page));
                             this.load_page(page, cx);
+                        }
+                        // Test hooks: CRATE_SONIC_FROM / CRATE_SONIC_TO (track keys) open
+                        // Sonic Adventure with that path; CRATE_SONIC_RADIO plays sonic radio.
+                        if let (Ok(f), Ok(t)) = (std::env::var("CRATE_SONIC_FROM"), std::env::var("CRATE_SONIC_TO")) {
+                            let mk = |k: String| plex::Track { rating_key: k, title: String::new(), artist: String::new(), duration_ms: 0, part_key: String::new(), album_key: String::new(), album_title: String::new(), thumb: String::new() };
+                            this.sonic.from = Some(mk(f));
+                            this.sonic.to = Some(mk(t));
+                            this.open_sonic(cx);
+                            this.compute_sonic_path_pub(cx);
+                        }
+                        if let Ok(k) = std::env::var("CRATE_SONIC_ALBUM")
+                            && let Some(a) = this.albums.iter().find(|a| a.rating_key == k).cloned()
+                        {
+                            this.play_album_sonic_radio(a, cx);
                         }
                         if std::env::var_os("CRATE_STATIONS").is_some() {
                             this.go(View::Soon("stations"));
@@ -548,6 +576,10 @@ impl Crate {
             raise_requested: false,
             // Albums left half-downloaded last time pick up where they stopped.
             offline: offline::Offline::new(),
+            sonic_albums: HashMap::new(),
+            sonic_artists: HashMap::new(),
+            sonic: sonic::SonicState::default(),
+            sonic_search,
             history: None,
             top_tracks: None,
             artist_cache: Vec::new(),
@@ -678,6 +710,7 @@ impl Crate {
             self.request_art(a);
         }
         self.go(View::Artist { key: key.clone(), name, info: None });
+        self.request_sonic_artists(key.clone(), cx);
         self.album_scroll = gpui::ScrollHandle::new();
         cx.notify();
         self.load_artist_info(key, cx);
@@ -774,6 +807,7 @@ impl Crate {
         self.request_art(&album);
         self.go(View::Album { ix, tracks: None });
         self.request_album_detail(album.rating_key.clone(), cx);
+        self.request_sonic_albums(album.rating_key.clone(), cx);
         self.album_scroll = gpui::ScrollHandle::new();
         cx.notify();
         self.load_album_tracks(ix, cx);
@@ -1557,6 +1591,7 @@ impl Render for Crate {
             View::Soon("playlists") => self.playlists_view(&t, cx),
             View::Soon("genres") => self.genres_view(&t, cx),
             View::Soon("offline") => self.offline_view(&t, cx),
+            View::Soon("sonic") => self.sonic_view(&t, cx),
             View::Soon(name) => self.soon_view(name, &t),
             View::Album { ix, tracks } => {
                 let (ix, tracks) = (*ix, tracks.clone());

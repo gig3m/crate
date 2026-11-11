@@ -28,6 +28,9 @@ impl Crate {
         // Sonic Adventure: honest status until the server can compute paths.
         let progress = self.sonic_progress;
         let sonic = div()
+            .id("sonic-card")
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| this.open_sonic(cx)))
             .rounded(px(16.0))
             .p(px(18.0))
             .bg(linear_gradient(120.0, linear_color_stop(rgb(mix(t.surface, t.discovery, 0.14)), 0.0), linear_color_stop(rgb(t.surface), 0.7)))
@@ -57,9 +60,9 @@ impl Crate {
                     .child(div().text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child("Sonic Adventure"))
                     .child(div().text_size(px(13.0)).text_color(rgb(t.muted)).child(match progress {
                         Some(p) => format!(
-                            "A playlist that travels between two tracks, step by sonic step. Your server is still analyzing the library ({p}% done); this unlocks when it finishes."
+                            "A playlist that travels between two tracks, step by sonic step. Your server is still analyzing the library ({p}% done), so paths may skip unanalyzed albums."
                         ),
-                        None => "A playlist that travels between two tracks, step by sonic step. Waiting on the server's sonic data.".into(),
+                        None => "A playlist that travels between two tracks, step by sonic step. Pick a start and an end.".into(),
                     }))
                     .when_some(progress, |d, p| {
                         d.child(

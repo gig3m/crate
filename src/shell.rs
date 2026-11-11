@@ -25,6 +25,7 @@ impl Crate {
             View::Home => "home",
             View::Library | View::Album { .. } => "albums",
             View::Artist { .. } => "artists",
+            View::Soon("sonic") => "stations",
             View::Soon(id) => id,
         }
     }

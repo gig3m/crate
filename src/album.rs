@@ -218,6 +218,27 @@ impl Crate {
                 }
             })))
             .child({
+                let a4 = album.clone();
+                div()
+                    .id("album-sonic")
+                    .h(px(44.0))
+                    .px(px(16.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .rounded(px(22.0))
+                    .border_1()
+                    .border_color(rgb(t.line))
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(t.text))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(t.raised)))
+                    .child(icons::icon("sonic", 16.0, t.discovery))
+                    .child("Sonically similar")
+                    .on_click(cx.listener(move |this, _, _, cx| this.play_album_sonic_radio(a4.clone(), cx)))
+            })
+            .child({
                 // Keep offline: green when kept, progress while downloading.
                 let kept = self.offline.index.get(&album.rating_key).cloned();
                 let job = self.offline.job.as_ref().filter(|j| j.key == album.rating_key);
@@ -363,6 +384,38 @@ impl Crate {
         let table = div().flex_1().min_w_0().flex().flex_col().child(head).children(rows);
 
         // About.
+        // Sonically similar albums, other artists first (canvas: three across).
+        let similar: Vec<crate::plex::Album> = self
+            .sonic_albums
+            .get(&album.rating_key)
+            .cloned()
+            .flatten()
+            .map(|mut v| {
+                v.sort_by_key(|x| x.artist == album.artist);
+                v.into_iter().filter(|x| x.rating_key != album.rating_key).take(3).collect()
+            })
+            .unwrap_or_default();
+        let similar_el = (!similar.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .child(div().font_family(MONO).font_weight(FontWeight::MEDIUM).text_size(px(11.0)).text_color(rgb(t.discovery)).child("SONICALLY SIMILAR"))
+                .child(div().flex().gap(px(12.0)).children(similar.into_iter().enumerate().map(|(i, a)| {
+                    let ix = self.albums.iter().position(|x| x.rating_key == a.rating_key);
+                    div()
+                        .id(("simalb", i))
+                        .w(px(104.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .cursor_pointer()
+                        .child(self.cover_or_mark(&a.thumb, &a.rating_key, 104.0, 6.0))
+                        .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).truncate().child(a.title.clone()))
+                        .child(div().text_size(px(11.0)).text_color(rgb(t.muted)).truncate().child(a.artist.clone()))
+                        .when_some(ix, |d, ix| d.on_click(cx.listener(move |this, _, _, cx| this.open_album(ix, cx))))
+                })))
+        });
         let aside = detail.as_ref().map(|d| {
             let row = |k: &'static str, v: String| {
                 div()
@@ -399,6 +452,7 @@ impl Crate {
                     el.child(div().text_size(px(13.0)).line_height(px(21.0)).text_color(rgb(t.text2)).line_clamp(8).child(d.summary.clone()))
                 })
                 .child(facts)
+                .children(similar_el)
         });
 
         div()

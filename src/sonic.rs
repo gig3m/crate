@@ -1,0 +1,426 @@
+//! Sonic features from the server's sonic analysis: similar albums and
+//! artists, sonic radio (nearest tracks), and Sonic Adventure (a path of
+//! tracks between two, via /library/sections/N/computePath).
+
+use gpui::{Context, FontWeight, div, linear_color_stop, linear_gradient, prelude::*, px, rgb};
+use gpui_component::input::Input;
+
+use crate::{Crate, PAD_X, View, icons, plex::{Album, SearchHit, Track}, shell::MONO, theme::{Theme, mix}};
+
+impl Crate {
+    pub(crate) fn request_sonic_albums(&mut self, key: String, cx: &mut Context<Self>) {
+        if self.sonic_albums.contains_key(&key) {
+            return;
+        }
+        self.sonic_albums.insert(key.clone(), None);
+        let k = key.clone();
+        let rx = crate::plex_call(move |c| async move { c.nearest_albums(&k, 12).await });
+        cx.spawn(async move |this, cx| {
+            if let Ok(res) = rx.await {
+                this.update(cx, |this, cx| {
+                    let list = res.unwrap_or_default();
+                    for a in &list {
+                        this.request_thumb(&a.thumb.clone());
+                    }
+                    this.sonic_albums.insert(key, Some(list));
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn request_sonic_artists(&mut self, key: String, cx: &mut Context<Self>) {
+        if self.sonic_artists.contains_key(&key) {
+            return;
+        }
+        self.sonic_artists.insert(key.clone(), None);
+        let k = key.clone();
+        let rx = crate::plex_call(move |c| async move { c.nearest_artists(&k, 6).await });
+        cx.spawn(async move |this, cx| {
+            if let Ok(res) = rx.await {
+                this.update(cx, |this, cx| {
+                    let list = res.unwrap_or_default();
+                    for (_, _, th) in &list {
+                        this.request_thumb(&th.clone());
+                    }
+                    this.sonic_artists.insert(key, Some(list));
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Sonic radio: the tracks that sound most like `seed`, starting with it.
+    pub(crate) fn play_sonic_radio(&mut self, seed: Track, cx: &mut Context<Self>) {
+        self.play_intent += 1;
+        let intent = self.play_intent;
+        let title = format!("Sounds like {}", seed.title);
+        let key = seed.rating_key.clone();
+        self.status = format!("Starting {title}…").into();
+        let rx = crate::plex_call(move |c| async move { c.nearest_tracks(&key, 50).await });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| match res {
+                _ if this.play_intent != intent => {}
+                Ok(Ok(near)) => {
+                    let seed_key = seed.rating_key.clone();
+                    let mut q = vec![seed];
+                    q.extend(near.into_iter().filter(|t| t.rating_key != seed_key));
+                    this.start_queue(title, None, q, 0, cx);
+                }
+                Ok(Err(e)) => this.status = format!("Sonic radio: {e:#}").into(),
+                Err(_) => {}
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Sonic radio seeded from an album's first track.
+    pub(crate) fn play_album_sonic_radio(&mut self, album: Album, cx: &mut Context<Self>) {
+        self.with_tracks(album, cx, |this, _album, tracks, cx| {
+            if let Some(first) = tracks.into_iter().next() {
+                this.play_sonic_radio(first, cx);
+            }
+        });
+    }
+
+    pub(crate) fn open_sonic(&mut self, cx: &mut Context<Self>) {
+        if self.sonic.from.is_none() {
+            self.sonic.from = self.now.as_ref().and_then(|n| n.tracks.get(n.idx).cloned());
+        }
+        if !matches!(self.view, View::Soon("sonic")) {
+            self.go(View::Soon("sonic"));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn on_sonic_search(&mut self, q: String, cx: &mut Context<Self>) {
+        self.sonic.query_gen += 1;
+        let gen_id = self.sonic.query_gen;
+        let q = q.trim().to_string();
+        if q.is_empty() {
+            self.sonic.hits.clear();
+            cx.notify();
+            return;
+        }
+        let section = crate::section();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+            if this.update(cx, |this, _| this.sonic.query_gen != gen_id).unwrap_or(true) {
+                return;
+            }
+            let rx = crate::plex_call(move |c| async move { c.search(&q, &section).await });
+            if let Ok(Ok(hits)) = rx.await {
+                this.update(cx, |this, cx| {
+                    if this.sonic.query_gen == gen_id {
+                        this.sonic.hits = hits.into_iter().filter(|h| h.kind == "track").take(8).collect();
+                        for h in this.sonic.hits.clone() {
+                            this.request_thumb(&h.thumb);
+                        }
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// A search hit as a Track (enough for the path endpoints and display).
+    fn hit_track(h: &SearchHit) -> Track {
+        let (artist, album) = h.subtitle.split_once(" · ").map(|(a, b)| (a.to_string(), b.to_string())).unwrap_or((h.subtitle.clone(), String::new()));
+        Track {
+            rating_key: h.rating_key.clone(),
+            title: h.title.clone(),
+            artist,
+            duration_ms: 0,
+            part_key: String::new(),
+            album_key: h.parent_key.clone(),
+            album_title: album,
+            thumb: h.thumb.clone(),
+        }
+    }
+
+    pub(crate) fn compute_sonic_path_pub(&mut self, cx: &mut Context<Self>) {
+        self.compute_sonic_path(cx);
+    }
+
+    fn compute_sonic_path(&mut self, cx: &mut Context<Self>) {
+        let (Some(from), Some(to)) = (self.sonic.from.clone(), self.sonic.to.clone()) else { return };
+        self.sonic.path = None;
+        self.sonic.busy = true;
+        self.sonic.path_gen += 1;
+        let gen_id = self.sonic.path_gen;
+        let section = crate::section();
+        let rx = crate::plex_call(move |c| async move { c.sonic_path(&section, &from.rating_key, &to.rating_key).await });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                if this.sonic.path_gen != gen_id {
+                    return;
+                }
+                this.sonic.busy = false;
+                match res {
+                    Ok(Ok(path)) if !path.is_empty() => {
+                        // Endpoints known only by key get their details from the path.
+                        if this.sonic.from.as_ref().is_some_and(|f| f.title.is_empty()) {
+                            this.sonic.from = path.first().cloned();
+                        }
+                        if this.sonic.to.as_ref().is_some_and(|t| t.title.is_empty()) {
+                            this.sonic.to = path.last().cloned();
+                        }
+                        for t in &path {
+                            this.request_thumb(&t.thumb.clone());
+                        }
+                        this.sonic.path = Some(path);
+                    }
+                    Ok(Ok(_)) => this.status = "No sonic path between those tracks".into(),
+                    Ok(Err(e)) => this.status = format!("Sonic Adventure: {e:#}").into(),
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn endpoint(&self, id: &'static str, label: &'static str, t: &Theme, track: Option<&Track>) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .h(px(52.0))
+            .min_w(px(240.0))
+            .pl(px(6.0))
+            .pr(px(14.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(rgb(t.line))
+            .bg(rgb(t.raised))
+            .child(match track {
+                Some(tr) => self.cover_or_mark(&tr.thumb, &tr.rating_key, 40.0, 6.0),
+                None => div().size(px(40.0)).rounded(px(6.0)).bg(rgb(t.surface)).into_any_element(),
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(div().font_family(MONO).font_weight(FontWeight::MEDIUM).text_size(px(10.0)).text_color(rgb(t.muted)).child(label))
+                    .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child(match track {
+                        Some(tr) => format!("{} · {}", tr.title, tr.artist),
+                        None => "Pick a track below".into(),
+                    })),
+            )
+    }
+
+    pub(crate) fn sonic_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let s = &self.sonic;
+        let path_cards: Vec<_> = s
+            .path
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(i, tr)| {
+                div()
+                    .w(px(96.0))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.0))
+                    .child(self.cover_or_mark(&tr.thumb, &tr.rating_key, 96.0, 6.0))
+                    .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).truncate().child(tr.title.clone()))
+                    .child(div().text_size(px(11.0)).text_color(rgb(t.muted)).truncate().child(tr.artist.clone()))
+                    .id(("step", i))
+            })
+            .collect();
+        let pill = |id: &'static str, label: String, primary: bool| {
+            div()
+                .id(id)
+                .h(px(40.0))
+                .px(px(18.0))
+                .flex()
+                .items_center()
+                .rounded(px(20.0))
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .cursor_pointer()
+                .when(primary, |d| d.bg(rgb(t.accent)).text_color(rgb(t.base)).hover(|d| d.opacity(0.9)))
+                .when(!primary, |d| d.border_1().border_color(rgb(t.line)).text_color(rgb(t.text)).hover(|d| d.bg(rgb(t.raised))))
+                .child(label)
+        };
+        let hits: Vec<_> = s
+            .hits
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(i, h)| {
+                let (h1, h2) = (h.clone(), h.clone());
+                div()
+                    .id(("shit", i))
+                    .h(px(48.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .rounded(px(8.0))
+                    .hover(|d| d.bg(rgb(t.raised)))
+                    .child(self.cover_or_mark(&h.thumb, &h.rating_key, 36.0, 4.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_size(px(13.0)).text_color(rgb(t.text_strong)).truncate().child(h.title.clone()))
+                            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(h.subtitle.clone())),
+                    )
+                    .child(pill_small(("from", i), "From", t).on_click(cx.listener(move |this, _, _, cx| {
+                        this.sonic.from = Some(Self::hit_track(&h1));
+                        this.compute_sonic_path(cx);
+                        cx.notify();
+                    })))
+                    .child(pill_small(("to", i), "To", t).on_click(cx.listener(move |this, _, _, cx| {
+                        this.sonic.to = Some(Self::hit_track(&h2));
+                        this.compute_sonic_path(cx);
+                        cx.notify();
+                    })))
+            })
+            .collect();
+        let path = s.path.clone();
+        let ready = path.as_ref().is_some_and(|p| !p.is_empty());
+        let status = if s.busy {
+            "Walking the sonic path…".to_string()
+        } else if let Some(p) = &path {
+            format!("{} steps", p.len())
+        } else if s.from.is_some() && s.to.is_some() {
+            String::new()
+        } else {
+            "Pick where to start and where to end up.".into()
+        };
+        let now_track = self.now.as_ref().and_then(|n| n.tracks.get(n.idx).cloned());
+
+        div()
+            .id("sonic")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px(px(PAD_X))
+            .pt(px(4.0))
+            .pb(px(40.0))
+            .flex()
+            .flex_col()
+            .gap(px(22.0))
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(14.0))
+                    .child(div().text_size(px(30.0)).font_weight(FontWeight::BOLD).text_color(rgb(t.text_strong)).child("Sonic Adventure"))
+                    .child(div().text_size(px(14.0)).text_color(rgb(t.muted)).child("A playlist that travels between two tracks, step by sonic step")),
+            )
+            .child(
+                div()
+                    .rounded(px(16.0))
+                    .p(px(18.0))
+                    .bg(linear_gradient(120.0, linear_color_stop(rgb(mix(t.surface, t.discovery, 0.12)), 0.0), linear_color_stop(rgb(t.surface), 0.7)))
+                    .border_1()
+                    .border_color(rgb(t.raised))
+                    .flex()
+                    .flex_col()
+                    .gap(px(14.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(self.endpoint("sonic-from", "FROM", t, s.from.as_ref()))
+                            .child(icons::icon("forward", 20.0, t.discovery))
+                            .child(self.endpoint("sonic-to", "TO", t, s.to.as_ref()))
+                            .child(div().flex_1())
+                            .when_some(now_track.filter(|nt| s.from.as_ref().is_none_or(|f| f.rating_key != nt.rating_key)), |d, nt| {
+                                d.child(pill("sonic-now", "Start from what's playing".into(), false).on_click(cx.listener(move |this, _, _, cx| {
+                                    this.sonic.from = Some(nt.clone());
+                                    this.compute_sonic_path(cx);
+                                    cx.notify();
+                                })))
+                            })
+                            .when(ready, |d| {
+                                let p = path.clone().unwrap_or_default();
+                                let (from, to) = (s.from.clone(), s.to.clone());
+                                d.child(pill("sonic-play", "Play adventure".into(), true).on_click(cx.listener(move |this, _, _, cx| {
+                                    let name = match (&from, &to) {
+                                        (Some(a), Some(b)) => format!("Sonic Adventure: {} → {}", a.title, b.title),
+                                        _ => "Sonic Adventure".into(),
+                                    };
+                                    this.start_queue(name, None, p.clone(), 0, cx);
+                                })))
+                            }),
+                    )
+                    .child(div().font_family(MONO).text_size(px(12.0)).text_color(rgb(t.muted)).child(status))
+                    .when(!path_cards.is_empty(), |d| d.child(div().id("path").overflow_x_scroll().flex().gap(px(10.0)).pb(px(4.0)).children(path_cards))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(div().text_size(px(18.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child("Find a track"))
+                    .child(
+                        div()
+                            .h(px(38.0))
+                            .max_w(px(520.0))
+                            .px(px(4.0))
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(rgb(t.border))
+                            .bg(rgb(t.surface))
+                            .child(Input::new(&self.sonic_search).appearance(false)),
+                    )
+                    .children(hits),
+            )
+            .into_any_element()
+    }
+}
+
+fn pill_small(id: (&'static str, usize), label: &'static str, t: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(28.0))
+        .px(px(12.0))
+        .flex()
+        .items_center()
+        .rounded(px(14.0))
+        .border_1()
+        .border_color(rgb(t.discovery))
+        .text_size(px(12.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(t.discovery))
+        .cursor_pointer()
+        .hover(|d| d.bg(rgb(t.raised)))
+        .child(label)
+}
+
+/// (artist key, name, photo)
+pub type ArtistRef = (String, String, String);
+
+#[derive(Default)]
+pub struct SonicState {
+    pub from: Option<Track>,
+    pub to: Option<Track>,
+    pub path: Option<Vec<Track>>,
+    pub busy: bool,
+    pub hits: Vec<SearchHit>,
+    pub query_gen: u64,
+    pub path_gen: u64,
+}
+

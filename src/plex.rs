@@ -703,6 +703,38 @@ impl Client {
             .collect())
     }
 
+    /// Sonically nearest items to a track, album or artist (needs the
+    /// server's sonic analysis). Distances run 0 (same) upward.
+    async fn nearest_meta(&self, key: &str, limit: usize) -> anyhow::Result<Vec<Meta>> {
+        let env: Envelope =
+            self.get(&format!("/library/metadata/{key}/nearest?limit={limit}&maxDistance=0.3")).await?.json().await.context("nearest")?;
+        Ok(env.mc.metadata)
+    }
+
+    pub async fn nearest_tracks(&self, key: &str, limit: usize) -> anyhow::Result<Vec<Track>> {
+        Ok(self.nearest_meta(key, limit).await?.into_iter().filter_map(Meta::into_track).collect())
+    }
+
+    pub async fn nearest_albums(&self, key: &str, limit: usize) -> anyhow::Result<Vec<Album>> {
+        Ok(self.nearest_meta(key, limit).await?.into_iter().map(Meta::into_album).collect())
+    }
+
+    /// (artist key, name, photo)
+    pub async fn nearest_artists(&self, key: &str, limit: usize) -> anyhow::Result<Vec<(String, String, String)>> {
+        Ok(self.nearest_meta(key, limit).await?.into_iter().map(|m| (m.rating_key, m.title, m.thumb.unwrap_or_default())).collect())
+    }
+
+    /// Sonic Adventure: a path of tracks from `start` to `end`, step by sonic step.
+    pub async fn sonic_path(&self, section: &str, start: &str, end: &str) -> anyhow::Result<Vec<Track>> {
+        let env: Envelope = self
+            .get(&format!("/library/sections/{section}/computePath?startID={start}&endID={end}"))
+            .await?
+            .json()
+            .await
+            .context("sonic path")?;
+        Ok(env.mc.metadata.into_iter().filter_map(Meta::into_track).collect())
+    }
+
     /// The first `limit` tracks of a playlist.
     pub async fn playlist_tracks(&self, rating_key: &str, limit: usize) -> anyhow::Result<Vec<Track>> {
         let res = self

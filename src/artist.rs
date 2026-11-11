@@ -217,7 +217,12 @@ impl Crate {
             .child(div().flex().flex_col().gap(px(14.0)).child(h2("Albums")).child(div().flex().flex_wrap().gap(px(20.0)).children(cards)));
 
         // Aside: similar artists you have, biography.
-        let similar: Vec<(String, String)> = info
+        // Sonically similar artists when the server has them, else Plex's
+        // metadata "similar" tags that match artists in the library.
+        let sonic: Vec<(String, String)> =
+            self.sonic_artists.get(key).cloned().flatten().unwrap_or_default().into_iter().map(|(k, n, _)| (k, n)).collect();
+        let sonic_label = !sonic.is_empty();
+        let tagged: Vec<(String, String)> = info
             .map(|i| {
                 i.similar
                     .iter()
@@ -226,6 +231,7 @@ impl Crate {
                     .collect()
             })
             .unwrap_or_default();
+        let similar = if sonic_label { sonic } else { tagged };
         let label = |s: &'static str, c: u32| div().font_family(MONO).font_weight(FontWeight::MEDIUM).text_size(px(11.0)).text_color(rgb(c)).child(s);
         let sim_cards: Vec<_> = similar
             .into_iter()
@@ -262,7 +268,7 @@ impl Crate {
                         .flex()
                         .flex_col()
                         .gap(px(14.0))
-                        .child(label("SIMILAR ARTISTS IN YOUR LIBRARY", t.discovery))
+                        .child(label(if sonic_label { "SONICALLY SIMILAR ARTISTS" } else { "SIMILAR ARTISTS IN YOUR LIBRARY" }, t.discovery))
                         .child(div().flex().flex_wrap().gap(px(14.0)).children(sim_cards)),
                 )
             })

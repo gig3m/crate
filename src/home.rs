@@ -165,6 +165,11 @@ impl Crate {
                                 .when_some(ix, |d, ix| {
                                     d.child(Self::pill("hero-open", "Open album", t).on_click(cx.listener(move |this, _, _, cx| this.open_album(ix, cx))))
                                 })
+                                .child({
+                                    let al = album.clone();
+                                    Self::pill("hero-sonic", "Sonically similar", t)
+                                        .on_click(cx.listener(move |this, _, _, cx| this.play_album_sonic_radio(al.clone(), cx)))
+                                })
                                 .when_some(station.clone(), |d, s| {
                                     d.child(Self::pill("hero-radio", "Library radio", t).on_click(cx.listener(move |this, _, _, cx| {
                                         this.play_station(s.key.clone(), s.title.clone(), cx)
@@ -295,10 +300,7 @@ impl Crate {
                     t.discovery,
                     t,
                 )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.go(View::Soon("stations"));
-                    cx.notify();
-                })),
+                .on_click(cx.listener(|this, _, _, cx| this.open_sonic(cx))),
             );
         let top = div().flex().gap(px(16.0)).child(self.hero(t, cx)).child(right);
 
