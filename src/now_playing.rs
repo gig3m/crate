@@ -49,6 +49,16 @@ impl Crate {
             None => (mix(t.base, t.discovery, 0.25), mix(t.base, t.accent, 0.2)),
         };
         let paused = n.paused || n.finished;
+        let lyrics = detail.as_ref().map(|d| d.lyrics.clone()).unwrap_or_default();
+        // Without lyrics (none, or turned off) the cover takes the middle,
+        // sized to the window.
+        let show_lyrics = self.np_lyrics && !lyrics.is_empty();
+        let art = if show_lyrics {
+            420.0
+        } else {
+            let (vw, vh) = self.view_size;
+            (vh - 410.0).min(vw - 64.0 - 360.0 - 80.0).clamp(320.0, 680.0).floor()
+        };
 
         // Top row.
         let kind = if n.context_key.as_deref().is_some_and(|k| k.starts_with("playlist:")) {
@@ -88,12 +98,40 @@ impl Crate {
                     .gap(px(2.0))
                     .child(div().font_family(MONO).font_weight(FontWeight::MEDIUM).text_size(px(11.0)).text_color(white(0.72)).child(kind))
                     .child(div().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(white(1.0)).child(n.context.clone())),
-            );
+            )
+            .child(div().flex_1())
+            .when(!lyrics.is_empty(), |d| {
+                let on = self.np_lyrics;
+                d.child(
+                    div()
+                        .id("np-lyrics")
+                        .h(px(32.0))
+                        .px(px(14.0))
+                        .rounded(px(16.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .cursor_pointer()
+                        .bg(if on { white(0.16) } else { white(0.06) })
+                        .hover(|d| d.bg(white(0.2)))
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(if on { white(1.0) } else { white(0.66) })
+                        .child("Lyrics")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.np_lyrics = !this.np_lyrics;
+                            if let Err(e) = crate::theme::save_lyrics(this.np_lyrics) {
+                                eprintln!("[settings] couldn't save lyrics choice: {e}");
+                            }
+                            cx.notify();
+                        })),
+                )
+            });
 
         // Left: cover, title, waveform, transport.
         let cover = match self.art.get(&tr.thumb).cloned() {
-            Some(i) => img(i).size(px(420.0)).rounded(px(12.0)).object_fit(ObjectFit::Cover).into_any_element(),
-            None => gpui::img(self.mark(crate::art::placeholder_for(&tr.thumb))).size(px(420.0)).rounded(px(12.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
+            Some(i) => img(i).size(px(art)).rounded(px(12.0)).object_fit(ObjectFit::Cover).into_any_element(),
+            None => gpui::img(self.mark(crate::art::placeholder_for(&tr.thumb))).size(px(art)).rounded(px(12.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
         };
         let len = tr.duration_ms;
         let frac = if len > 0 { (n.elapsed_ms as f32 / len as f32).min(1.0) } else { 0.0 };
@@ -120,7 +158,7 @@ impl Crate {
         };
         let (ak, an) = (self.albums.iter().find(|a| a.rating_key == tr.album_key).map(|a| a.artist_key.clone()), tr.artist.clone());
         let left = div()
-            .w(px(420.0))
+            .w(px(art))
             .flex_none()
             .flex()
             .flex_col()
@@ -197,10 +235,8 @@ impl Crate {
             );
 
         // Middle: synced lyrics around the current line.
-        let lyrics = detail.as_ref().map(|d| d.lyrics.clone()).unwrap_or_default();
-        let lyric_col = if lyrics.is_empty() {
-            let msg = if detail.is_some() { "No lyrics for this track" } else { "" };
-            div().flex_1().min_w_0().flex().items_center().text_size(px(15.0)).text_color(white(0.5)).child(msg)
+        let lyric_col = if !show_lyrics {
+            None
         } else {
             let cur = lyrics.iter().rposition(|l| l.0 <= n.elapsed_ms).unwrap_or(0);
             let start = cur.saturating_sub(3);
@@ -247,6 +283,7 @@ impl Crate {
                         .text_color(white(0.62))
                         .child(if by.contains("lyricfind") { "Synced lyrics via Plex (LyricFind)" } else { "Synced lyrics via Plex" }),
                 )
+                .into()
         };
 
         // Right: Queue / Signal path / Track info.
@@ -519,7 +556,10 @@ impl Crate {
                     .flex_col()
                     .gap(px(20.0))
                     .child(top)
-                    .child(div().flex_1().min_h_0().flex().gap(px(40.0)).child(left).child(lyric_col).child(panel)),
+                    .child(match lyric_col {
+                        Some(lyric_col) => div().flex_1().min_h_0().flex().gap(px(40.0)).child(left).child(lyric_col).child(panel),
+                        None => div().flex_1().min_h_0().flex().gap(px(40.0)).child(div().flex_1().min_w_0().flex().justify_center().child(left)).child(panel),
+                    }),
             )
             .into_any_element()
     }

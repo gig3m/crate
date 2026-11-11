@@ -153,6 +153,17 @@ pub fn save_viz(style: &str, palette: usize) -> std::io::Result<()> {
     save_key("viz_colors", toml::Value::Integer(palette as i64))
 }
 
+/// Now Playing shows synced lyrics when a track has them (default on).
+pub fn saved_lyrics() -> bool {
+    let raw = std::fs::read_to_string(config_path()).unwrap_or_default();
+    let map: HashMap<String, toml::Value> = toml::from_str(&raw).unwrap_or_default();
+    map.get("lyrics").and_then(|v| v.as_bool()).unwrap_or(true)
+}
+
+pub fn save_lyrics(on: bool) -> std::io::Result<()> {
+    save_key("lyrics", toml::Value::Boolean(on))
+}
+
 /// Remote streaming quality, kbps: 0 = original file. Applies only when the
 /// server address in use isn't on this network (canvas: "Original on LAN").
 pub const REMOTE_QUALITIES: [u32; 4] = [0, 320, 192, 128];

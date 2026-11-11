@@ -173,6 +173,10 @@ struct Crate {
     track_detail: HashMap<String, Option<plex::TrackDetail>>,
     /// Width of the main content column, set each render.
     content_w: f32,
+    /// Window size, for layouts that scale with it (Now Playing's cover).
+    view_size: (f32, f32),
+    /// Now Playing shows lyrics when the track has them (saved).
+    np_lyrics: bool,
     /// Bumped per queue started (Now::queue_id) and per play request, so late
     /// async replies can tell they've been superseded.
     queue_seq: u64,
@@ -790,6 +794,8 @@ impl Crate {
             back: Vec::new(),
             track_detail: HashMap::new(),
             content_w: 1000.0,
+            view_size: (1280.0, 800.0),
+            np_lyrics: theme::saved_lyrics(),
             queue_seq: 0,
             play_intent: 0,
             shuffle: false,
@@ -2200,6 +2206,11 @@ impl Render for Crate {
                                 this.move_playlist_row_pub(f, t, cx);
                             }
                             k if k.starts_with("pladd:") => this.add_selection_to_playlist(k[6..].to_string(), "test".into(), cx),
+                            "np" => this.open_now_playing(None, cx),
+                            "lyrics" => {
+                                this.np_lyrics = !this.np_lyrics;
+                                cx.notify();
+                            }
                             "j" => this.move_cursor(1, cx),
                             "k" => this.move_cursor(-1, cx),
                             "enter" => this.activate_cursor(cx),
@@ -2272,6 +2283,7 @@ impl Render for Crate {
             window.focus(&self.focus, cx);
         }
         let vw: f32 = window.viewport_size().width.into();
+        self.view_size = (vw, window.viewport_size().height.into());
         // Narrow tiled window: the canvas Tile layout (no sidebar, bottom nav).
         let compact = vw < 720.0;
         self.compact = compact;
