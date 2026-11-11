@@ -181,7 +181,7 @@ struct Crate {
     /// Now Playing shows lyrics when the track has them (saved).
     np_lyrics: bool,
     /// The next play_from starts its engine paused (a seek while paused).
-    start_paused: bool,
+    pub(crate) start_paused: bool,
     /// Whether the last track shown in Now Playing had lyrics (layout while the next loads).
     np_had_lyrics: std::cell::Cell<bool>,
     /// Tracks whose detail fetch failed (until they're fetched again).
@@ -613,7 +613,7 @@ impl Crate {
                         // Test hooks: CRATE_SONIC_FROM / CRATE_SONIC_TO (track keys) open
                         // Sonic Adventure with that path; CRATE_SONIC_RADIO plays sonic radio.
                         if let (Ok(f), Ok(t)) = (std::env::var("CRATE_SONIC_FROM"), std::env::var("CRATE_SONIC_TO")) {
-                            let mk = |k: String| plex::Track { rating_key: k, title: String::new(), artist: String::new(), duration_ms: 0, part_key: String::new(), album_key: String::new(), album_title: String::new(), thumb: String::new(), playlist_item: 0 };
+                            let mk = |k: String| plex::Track { rating_key: k, ..Default::default() };
                             this.sonic.from = Some(mk(f));
                             this.sonic.to = Some(mk(t));
                             this.open_sonic(cx);
@@ -1523,7 +1523,7 @@ impl Crate {
                 match self.play_note.take() {
                     Some((ctx, note)) if ctx == now.context => self.status = format!("Playing {} · {note}", now.context).into(),
                     // Seeks and resumes (ms > 0) restart the engine too; only a fresh start says so.
-                    _ if ms == 0 => self.status = format!("Playing {}", now.context).into(),
+                    _ if ms == 0 && !start_paused => self.status = format!("Playing {}", now.context).into(),
                     _ => {}
                 }
                 let _ = self.mpris.send(MprisUpdate::Status { playing: !start_paused, stopped: false });
@@ -1610,7 +1610,7 @@ impl Crate {
             Transport::Next => {
                 if idx + 1 < n {
                     self.play_from(idx + 1, 0, cx);
-                } else if self.repeat == queue::Repeat::All && n > 0 {
+                } else if self.repeat == queue::Repeat::All && n > 0 && now.refill.is_none() {
                     // Repeat All: Next at the end wraps to the top.
                     self.play_from(0, 0, cx);
                 }

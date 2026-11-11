@@ -393,11 +393,8 @@ impl Crate {
             && n.start_idx + e.started() > n.idx + 1
         {
             let (i, ms) = (n.idx, n.elapsed_ms);
-            let paused = n.paused;
+            self.start_paused = n.paused;
             self.play_from(i, ms, cx);
-            if paused {
-                self.transport(crate::mpris::Transport::Pause, cx);
-            }
             return;
         }
         self.sync_upcoming();

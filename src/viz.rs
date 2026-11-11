@@ -563,17 +563,18 @@ impl Crate {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
-                    let (press, drag) = {
+                    let (press, drag, click) = {
                         let mut v = this.viz.borrow_mut();
                         let drag = v.drag.take().or_else(|| v.drag_target(ev.position.x));
-                        (v.press.take().filter(|(p, _)| *p == id), drag)
+                        // Where a plain click landed (frac_at needs the press).
+                        let click = v.frac_at(ev.position.x);
+                        (v.press.take().filter(|(p, _)| *p == id), drag, click)
                     };
                     match (press, drag) {
                         (Some(_), Some(f)) if len_ms > 0 => this.transport(Transport::SetPosition((f as f64 * len_ms as f64) as u64), cx),
                         // A plain click seeks to where it landed.
                         (Some(_), None) if len_ms > 0 => {
-                            let f = this.viz.borrow().frac_at(ev.position.x);
-                            if let Some(f) = f {
+                            if let Some(f) = click {
                                 this.transport(Transport::SetPosition((f as f64 * len_ms as f64) as u64), cx);
                             }
                         }
@@ -607,12 +608,14 @@ impl Crate {
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|this, _: &MouseDownEvent, _, _| {
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
                     // In the middle of a drag-to-seek, a right press is part of
-                    // it (see `right_in_press`); otherwise the menu opens.
+                    // it (see `right_in_press`) and the menu stays shut;
+                    // otherwise the menu opens.
                     let mut v = this.viz.borrow_mut();
                     if v.press.is_some() {
                         v.right_in_press = true;
+                        cx.stop_propagation();
                     }
                 }),
             )

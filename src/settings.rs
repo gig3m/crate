@@ -307,10 +307,8 @@ impl Crate {
             && self.engine.is_some()
         {
             let (idx, ms, paused) = (n.idx, n.elapsed_ms, n.paused);
+            self.start_paused = paused;
             self.play_from(idx, ms, cx);
-            if paused {
-                self.transport(crate::mpris::Transport::Pause, cx);
-            }
         }
         cx.notify();
     }
