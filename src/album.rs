@@ -105,7 +105,8 @@ impl Crate {
                     this.edition_formats.remove(k);
                 }
                 if let Ok(Ok(found)) = res {
-                    this.edition_formats.extend(found.into_iter().filter(|(_, n, f)| *n > 0 || !f.is_empty()).map(|(k, n, f)| (k, (n, f))));
+                    // Only complete answers: a timed-out format retries next open.
+                    this.edition_formats.extend(found.into_iter().filter(|(_, _, f)| !f.is_empty()).map(|(k, n, f)| (k, (n, f))));
                 }
                 cx.notify();
             })
@@ -574,11 +575,32 @@ impl Crate {
     }
 }
 
-/// Words that mark a release variant rather than a different record.
-const EDITION_WORDS: [&str; 17] = [
-    "deluxe", "edition", "version", "remaster", "anniversary", "expanded", "bonus", "special", "standard", "reissue", "collector",
-    "mono", "stereo", "explicit", "clean", "redux", "legacy",
+/// Words that mark a release variant rather than a different record
+/// (matched as whole words).
+const EDITION_WORDS: [&str; 26] = [
+    "deluxe", "edition", "editions", "version", "versions", "remaster", "remastered", "remasters", "remix", "remixed", "anniversary",
+    "expanded", "bonus", "special", "standard", "reissue", "reissued", "collector", "collectors", "collector's", "mono", "stereo",
+    "explicit", "clean", "redux", "super",
 ];
+/// Words allowed alongside them in a " - " / ": " suffix ("20th Anniversary Edition").
+const EDITION_FILLER: [&str; 12] = ["the", "and", "with", "track", "tracks", "us", "u.s.", "uk", "international", "japanese", "limited", "digital"];
+
+fn words(s: &str) -> Vec<String> {
+    s.split(|c: char| c.is_whitespace() || matches!(c, ',' | '/' | '-' | '(' | ')' | '[' | ']')).filter(|w| !w.is_empty()).map(|w| w.to_lowercase()).collect()
+}
+
+/// A bracketed group is an edition marker if it has an edition word.
+fn bracket_is_edition(inner: &str) -> bool {
+    words(inner).iter().any(|w| EDITION_WORDS.contains(&w.as_str()))
+}
+
+/// A dash/colon suffix must be only edition words, numbers ("2009",
+/// "20th") and filler, so "TRON: Legacy Reconfigured" stays its own album.
+fn suffix_is_edition(suffix: &str) -> bool {
+    let ws = words(suffix);
+    ws.iter().any(|w| EDITION_WORDS.contains(&w.as_str()))
+        && ws.iter().all(|w| EDITION_WORDS.contains(&w.as_str()) || EDITION_FILLER.contains(&w.as_str()) || w.chars().any(|c| c.is_ascii_digit()))
+}
 
 /// Split trailing edition markers off a title: "(Deluxe Edition)",
 /// "[Remastered]", " - Remastered 2009", ": Special Edition". Only segments
@@ -588,10 +610,6 @@ fn edition_split(title: &str) -> (String, Vec<String>) {
     let mut rest = title.trim().to_string();
     let mut marks = Vec::new();
     loop {
-        let is_edition = |s: &str| {
-            let l = s.to_lowercase();
-            EDITION_WORDS.iter().any(|w| l.contains(w))
-        };
         // A trailing bracketed group, matched from its closing bracket.
         let bracket = rest.chars().last().filter(|c| matches!(c, ')' | ']')).and_then(|close| {
             let open = if close == ')' { '(' } else { '[' };
@@ -610,7 +628,7 @@ fn edition_split(title: &str) -> (String, Vec<String>) {
         });
         if let Some(i) = bracket {
             let inner = rest[i + 1..rest.len() - 1].trim().to_string();
-            if is_edition(&inner) {
+            if bracket_is_edition(&inner) {
                 marks.push(inner);
                 rest = rest[..i].trim().to_string();
                 continue;
@@ -620,7 +638,7 @@ fn edition_split(title: &str) -> (String, Vec<String>) {
         // A " - suffix" or ": suffix".
         if let Some((i, sep)) = [" - ", ": "].iter().filter_map(|sep| rest.rfind(sep).map(|i| (i, sep.len()))).max_by_key(|(i, _)| *i) {
             let suffix = rest[i + sep..].trim().to_string();
-            if is_edition(&suffix) && i > 0 {
+            if suffix_is_edition(&suffix) && i > 0 {
                 marks.push(suffix);
                 rest = rest[..i].trim().to_string();
                 continue;
@@ -665,5 +683,13 @@ mod edition_tests {
         assert_eq!(edition_label("Live (Live"), "Original");
         assert_eq!(edition_base("Live (Live"), "live (live");
         assert_eq!(edition_label("Favourite Worst Nightmare (Standard Version)"), "Standard Version");
+        // Whole words only, and strict dash/colon suffixes.
+        assert_eq!(edition_label("TRON: Legacy"), "Original");
+        assert_eq!(edition_label("TRON: Legacy Reconfigured"), "Original");
+        assert_eq!(edition_label("Album: The Conversion"), "Original");
+        assert_eq!(edition_label("Album (Monochrome)"), "Original");
+        assert_eq!(edition_label("Greatest Hits: Standards"), "Original");
+        assert_eq!(edition_label("OK Computer - 20th Anniversary Edition"), "20th Anniversary Edition");
+        assert_eq!(edition_label("Hoobastank (20th Anniversary Edition)"), "20th Anniversary Edition");
     }
 }
