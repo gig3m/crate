@@ -129,6 +129,7 @@ pub struct Home {
     /// (filter value, label) for the mood and decade chips.
     pub moods: Vec<(String, String)>,
     pub decades: Vec<(String, String)>,
+    pub genres: Vec<(String, String)>,
 }
 
 /// Album page details beyond what the library list carries.
@@ -567,14 +568,19 @@ impl Client {
     }
 
     pub async fn home(&self, section: &str) -> anyhow::Result<Home> {
-        let (mood_path, decade_path) = (format!("/library/sections/{section}/mood"), format!("/library/sections/{section}/decade"));
-        let (rows, playlists, server, last, moods, decades) = tokio::join!(
+        let (mood_path, decade_path, genre_path) = (
+            format!("/library/sections/{section}/mood"),
+            format!("/library/sections/{section}/decade"),
+            format!("/library/sections/{section}/genre"),
+        );
+        let (rows, playlists, server, last, moods, decades, genres) = tokio::join!(
             self.home_hubs(section),
             self.playlists(),
             self.server_name(),
             self.last_played(section),
             self.directory(&mood_path),
             self.directory(&decade_path),
+            self.directory(&genre_path),
         );
         // The canvas's six moods, when the library has them.
         const MOODS: &[&str] = &["Wistful", "Brooding", "Confident", "Playful", "Cathartic", "Swaggering"];
@@ -598,6 +604,7 @@ impl Client {
             last_played: last.ok().flatten(),
             moods,
             decades,
+            genres: genres.unwrap_or_default().into_iter().map(|(k, t)| (format!("genre={k}"), t)).collect(),
         })
     }
 

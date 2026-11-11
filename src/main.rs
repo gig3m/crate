@@ -12,6 +12,7 @@ mod album;
 mod artist;
 mod home;
 mod icons;
+mod library;
 mod mpris;
 mod player_bar;
 mod shell;
@@ -49,10 +50,6 @@ enum View {
 }
 use theme::Theme;
 
-const CARD_W: f32 = 184.0;
-const ART: f32 = 184.0;
-const ROW_H: f32 = ART + 64.0;
-const GAP: f32 = 20.0;
 pub(crate) const SIDEBAR_W: f32 = 240.0;
 pub(crate) const PAD_X: f32 = 36.0;
 
@@ -96,8 +93,12 @@ struct Aulos {
     levels: HashMap<String, Vec<f32>>,
     /// Width of the main content column, set each render.
     content_w: f32,
-    /// Library grid filter: label and album indices.
-    lib_filter: Option<(String, Vec<usize>)>,
+    /// Album grid order for the current sort/filters (None: the cached list as-is).
+    lib_view: Option<Vec<usize>>,
+    lib_filters: Vec<library::LibFilter>,
+    lib_sort: library::LibSort,
+    lib_gen: u64,
+    card_w: f32,
     /// Album rating key -> details (None while loading).
     album_detail: HashMap<String, Option<plex::AlbumDetail>>,
     focus: gpui::FocusHandle,
@@ -252,6 +253,22 @@ impl Aulos {
                             cx.notify();
                             return;
                         }
+                        // Test hooks: AULOS_SORT=artist|title|year|plays, AULOS_FILTER=Decade:1990s:decade=1990
+                        if let Ok(v) = std::env::var("AULOS_SORT") {
+                            this.lib_sort = library::LibSort::ALL
+                                .into_iter()
+                                .find(|s| s.label().to_lowercase().starts_with(&v))
+                                .unwrap_or(library::LibSort::Added);
+                            this.go(View::Library);
+                            this.refresh_library(cx);
+                        }
+                        if let Ok(v) = std::env::var("AULOS_FILTER") {
+                            let p: Vec<&str> = v.splitn(3, ':').collect();
+                            if let [kind, label, query] = p[..] {
+                                let kind: &'static str = Box::leak(kind.to_string().into_boxed_str());
+                                this.add_filter(library::LibFilter { kind, label: label.into(), query: query.into() }, cx);
+                            }
+                        }
                         if let Ok(key) = std::env::var("AULOS_RADIO") {
                             this.play_radio(&key, "Radio".into(), cx);
                         }
@@ -371,7 +388,11 @@ impl Aulos {
             back: Vec::new(),
             levels: HashMap::new(),
             content_w: 1000.0,
-            lib_filter: None,
+            lib_view: None,
+            lib_filters: Vec::new(),
+            lib_sort: library::LibSort::Added,
+            lib_gen: 0,
+            card_w: 140.0,
             album_detail: HashMap::new(),
             fwd: Vec::new(),
             album_scroll: gpui::ScrollHandle::new(),
@@ -872,8 +893,8 @@ impl Aulos {
 
     /// Grid cells: the real library, or AULOS_ITEMS for the scroll benchmark.
     fn cells(&self) -> usize {
-        match &self.lib_filter {
-            Some((_, ix)) => ix.len(),
+        match &self.lib_view {
+            Some(ix) => ix.len(),
             None if self.total == 0 => self.albums.len(),
             None => self.total,
         }
@@ -881,8 +902,8 @@ impl Aulos {
 
     /// Grid cell -> album index.
     fn cell_album(&self, cell: usize) -> usize {
-        match &self.lib_filter {
-            Some((_, ix)) => ix.get(cell).copied().unwrap_or(0),
+        match &self.lib_view {
+            Some(ix) => ix.get(cell).copied().unwrap_or(0),
             None => cell,
         }
     }
@@ -898,6 +919,7 @@ impl Aulos {
     fn bench_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let render_us = self.last_render_us;
         let cells = self.cells();
+        let row_h = self.row_h();
         let Some(b) = self.bench.as_mut() else { return };
         // Wait for the library and the first screen of art before measuring.
         if self.albums.is_empty() || self.art.len() < 12 {
@@ -916,7 +938,7 @@ impl Aulos {
             b.y += b.speed * dt.as_secs_f32();
         }
         b.last = Some(now);
-        let max_y = (cells.div_ceil(self.cols.max(1)) as f32) * ROW_H;
+        let max_y = (cells.div_ceil(self.cols.max(1)) as f32) * row_h;
         if b.y > max_y {
             b.y = 0.0;
         }
@@ -935,70 +957,6 @@ impl Aulos {
         cx.notify();
     }
 
-    fn row(&mut self, row: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let t = self.theme.clone();
-        let mut cards = Vec::with_capacity(self.cols);
-        for c in 0..self.cols {
-            let cell = row * self.cols + c;
-            if cell >= self.cells() {
-                break;
-            }
-            let ix = self.cell_album(cell);
-            let Some(a) = self.album(ix).cloned() else { break };
-            let art = self.art.get(&a.thumb).cloned();
-            if art.is_none() && !a.thumb.is_empty() && self.requested.insert(a.thumb.clone()) {
-                let _ = self.art_tx.send(ArtRequest { thumb: a.thumb.clone() });
-            }
-            let cover = match art {
-                Some(image) => img(image)
-                    .size(px(ART))
-                    .rounded(px(8.0))
-                    .object_fit(ObjectFit::Cover)
-                    .into_any_element(),
-                None => div()
-                    .size(px(ART))
-                    .rounded(px(8.0))
-                    .bg(rgb(t.raised))
-                    .into_any_element(),
-            };
-            cards.push(
-                div()
-                    .id(ix)
-                    .w(px(CARD_W))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .cursor_pointer()
-                    .child(cover)
-                    .child(
-                        div()
-                            .text_size(px(14.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(t.text_strong))
-                            .truncate()
-                            .child(a.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .text_size(px(12.0))
-                            .text_color(rgb(t.muted))
-                            .child(div().truncate().child(a.artist.clone()))
-                            .child(a.year.clone()),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_album(ix, cx);
-                    })),
-            );
-        }
-        div()
-            .h(px(ROW_H))
-            .px(px(PAD_X))
-            .flex()
-            .gap(px(GAP))
-            .children(cards)
-    }
 }
 
 /// Map Omarchy colors onto gpui-component's theme so its controls match.
@@ -1155,9 +1113,9 @@ impl Render for Aulos {
             window.focus(&self.focus, cx);
         }
         let vw: f32 = window.viewport_size().width.into();
-        let usable = (vw - SIDEBAR_W - PAD_X * 2.0).max(CARD_W);
+        let usable = (vw - SIDEBAR_W - PAD_X * 2.0).max(300.0);
         self.content_w = usable;
-        self.cols = (((usable + GAP) / (CARD_W + GAP)).floor() as usize).max(1);
+        self.grid_layout(vw - SIDEBAR_W - PAD_X);
         let rows = self.cells().div_ceil(self.cols);
 
         if self.bench.is_some() {
@@ -1166,61 +1124,8 @@ impl Render for Aulos {
 
         let sidebar = self.sidebar(&t, cx);
 
-        let header = div()
-            .px(px(PAD_X))
-            .pt(px(20.0))
-            .pb(px(16.0))
-            .flex()
-            .flex_col()
-            .gap(px(16.0))
-            .when(matches!(self.view, View::Library) && self.search_query.is_empty(), |d| d.child(
-                div()
-                    .flex()
-                    .items_baseline()
-                    .gap(px(12.0))
-                    .child(
-                        div()
-                            .text_size(px(34.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(t.text_strong))
-                            .child(match &self.lib_filter {
-                                Some((label, _)) => format!("Albums · {label}"),
-                                None => "Albums".to_string(),
-                            }),
-                    )
-                    .child(
-                        div()
-                            .font_family(shell::MONO)
-                            .text_size(px(13.0))
-                            .text_color(rgb(t.muted))
-                            .child(match &self.lib_filter {
-                                Some(_) => format!("{} of {} match", self.cells(), self.albums.len()),
-                                None => format!("{} albums", self.cells()),
-                            }),
-                    )
-                    .when(self.lib_filter.is_some(), |d| {
-                        d.child(
-                            div()
-                                .id("clear-filter")
-                                .px(px(10.0))
-                                .h(px(26.0))
-                                .flex()
-                                .items_center()
-                                .rounded(px(13.0))
-                                .border_1()
-                                .border_color(rgb(t.line))
-                                .text_size(px(12.0))
-                                .text_color(rgb(t.text2))
-                                .cursor_pointer()
-                                .hover(|d| d.bg(rgb(t.raised)))
-                                .child("Clear filter")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.lib_filter = None;
-                                    cx.notify();
-                                })),
-                        )
-                    }),
-            ));
+        let header = (matches!(self.view, View::Library) && self.search_query.is_empty()).then(|| self.library_header(&t, cx));
+        let rail = self.letter_rail(&t, cx);
 
         let grid = uniform_list(
             "albums",
@@ -1231,6 +1136,7 @@ impl Render for Aulos {
         )
         .track_scroll(&self.scroll)
         .flex_1();
+        let grid = div().flex_1().min_h_0().flex().child(grid).children(rail);
 
         let player = self.player_bar(&t, cx);
 
@@ -1271,7 +1177,7 @@ impl Render for Aulos {
                             .flex()
                             .flex_col()
                             .child(self.top_bar(&t, cx))
-                            .child(header)
+                            .children(header)
                             .child(match &self.view {
                                 _ if !self.search_query.is_empty() => self.search_view(&t, cx),
                                 View::Home => self.home_view(&t, cx),

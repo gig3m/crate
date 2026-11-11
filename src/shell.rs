@@ -39,7 +39,10 @@ impl Aulos {
         let v = match id {
             "home" => View::Home,
             "albums" => {
-                self.lib_filter = None;
+                if !self.lib_filters.is_empty() {
+                    self.lib_filters.clear();
+                    self.refresh_library(cx);
+                }
                 View::Library
             }
             "search" => return self.focus_search(window, cx),

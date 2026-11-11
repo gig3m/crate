@@ -69,26 +69,8 @@ impl Aulos {
     }
 
     /// Show the album grid filtered by a Plex query such as `decade=1990`.
-    pub(crate) fn filter_library(&mut self, filter: String, label: String, cx: &mut Context<Self>) {
-        let section = std::env::var("PLEX_SECTION").unwrap_or_else(|_| "5".into());
-        let rx = crate::plex_call(move |c| async move { c.album_keys_where(&section, &filter).await });
-        cx.spawn(async move |this, cx| {
-            if let Ok(res) = rx.await {
-                this.update(cx, |this, cx| match res {
-                    Ok(keys) => {
-                        let keys: std::collections::HashSet<String> = keys.into_iter().collect();
-                        let ix = this.albums.iter().enumerate().filter(|(_, a)| keys.contains(&a.rating_key)).map(|(i, _)| i).collect();
-                        this.lib_filter = Some((label, ix));
-                        this.scroll = gpui::UniformListScrollHandle::new();
-                        this.go(View::Library);
-                        cx.notify();
-                    }
-                    Err(e) => this.status = format!("Filter: {e:#}").into(),
-                })
-                .ok();
-            }
-        })
-        .detach();
+    pub(crate) fn filter_library(&mut self, kind: &'static str, filter: String, label: String, cx: &mut Context<Self>) {
+        self.add_filter(crate::library::LibFilter { kind, label, query: filter }, cx);
     }
 
     fn cover(&self, thumb: &str, size: f32, round: f32, t: &Theme) -> gpui::AnyElement {
@@ -375,7 +357,7 @@ impl Aulos {
             .enumerate()
             .map(|(i, (f, l))| {
                 let (f, l) = (f.clone(), l.clone());
-                Self::chip(("mood", i), l.clone(), false, t).on_click(cx.listener(move |this, _, _, cx| this.filter_library(f.clone(), l.clone(), cx)))
+                Self::chip(("mood", i), l.clone(), false, t).on_click(cx.listener(move |this, _, _, cx| this.filter_library("Mood", f.clone(), l.clone(), cx)))
             })
             .collect();
         let decades: Vec<_> = home
@@ -385,7 +367,7 @@ impl Aulos {
             .map(|(i, (f, l))| {
                 let (f, l) = (f.clone(), l.clone());
                 Self::chip(("decade", i), l.clone(), true, t)
-                    .on_click(cx.listener(move |this, _, _, cx| this.filter_library(f.clone(), format!("The {l}"), cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.filter_library("Decade", f.clone(), l.clone(), cx)))
             })
             .collect();
         let all_stations = div()
