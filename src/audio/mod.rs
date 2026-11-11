@@ -58,6 +58,8 @@ struct Out<'a> {
     activated: &'a mut bool,
     queued_frames: &'a mut u64,
     queued_us: &'a mut u64,
+    /// `frames * 1e6 % rate` not yet counted in `queued_us` (no drift).
+    queued_rem: &'a mut u64,
     stream_frames: &'a mut u64,
 }
 
@@ -91,7 +93,10 @@ impl Out<'_> {
         let frames = (data.len() / CHANNELS) as u64;
         *self.queued_frames += frames;
         *self.stream_frames += frames;
-        *self.queued_us += frames * 1_000_000 / rate.max(1) as u64;
+        let r = rate.max(1) as u64;
+        let num = frames * 1_000_000 + *self.queued_rem;
+        *self.queued_us += num / r;
+        *self.queued_rem = num % r;
         true
     }
 }
@@ -428,6 +433,7 @@ fn decoder_thread(
     let mut activated = false;
     let mut queued_frames = 0u64;
     let mut queued_us = 0u64;
+    let mut queued_rem = 0u64;
     let mut scratch: Vec<f32> = Vec::new();
     // Crossfades: the current track's held-back end (only while the next
     // queued track will fade in), and the previous track's end being mixed
@@ -463,7 +469,7 @@ fn decoder_thread(
                 if !tail.is_empty() {
                     drained.clear();
                     drained.extend(tail.drain(..));
-                    let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, stream_frames: &mut stream_frames };
+                    let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, queued_rem: &mut queued_rem, stream_frames: &mut stream_frames };
                     if !out.push(&drained, tail_rate, &cmd_tx, &stats) {
                         return Ok(());
                     }
@@ -532,7 +538,7 @@ fn decoder_thread(
                         if !tail.is_empty() {
                             drained.clear();
                             drained.extend(tail.drain(..));
-                            let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, stream_frames: &mut stream_frames };
+                            let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, queued_rem: &mut queued_rem, stream_frames: &mut stream_frames };
                             if !out.push(&drained, tail_rate, &cmd_tx, &stats) {
                                 return Ok(());
                             }
@@ -569,7 +575,7 @@ fn decoder_thread(
             if lead > 0 {
                 drained.clear();
                 drained.extend(tail.drain(..lead));
-                let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, stream_frames: &mut stream_frames };
+                let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, queued_rem: &mut queued_rem, stream_frames: &mut stream_frames };
                 if !out.push(&drained, tail_rate, &cmd_tx, &stats) {
                     return Ok(());
                 }
@@ -581,7 +587,7 @@ fn decoder_thread(
             // Gapless (or a rate change ahead): the held-back end plays as is.
             drained.clear();
             drained.extend(tail.drain(..));
-            let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, stream_frames: &mut stream_frames };
+            let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, queued_rem: &mut queued_rem, stream_frames: &mut stream_frames };
             if !out.push(&drained, tail_rate, &cmd_tx, &stats) {
                 return Ok(());
             }
@@ -683,7 +689,7 @@ fn decoder_thread(
             if !fading.is_empty() {
                 fade_done += mix_fade(&mut scratch, &mut fading, fade_done, fade_total);
             }
-            let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, stream_frames: &mut stream_frames };
+            let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, queued_rem: &mut queued_rem, stream_frames: &mut stream_frames };
             if hold == 0 {
                 if !out.push(&scratch, rate, &cmd_tx, &stats) {
                     return Ok(());
@@ -725,7 +731,7 @@ fn decoder_thread(
             if hold > 0 || !tail.is_empty() {
                 tail.extend(drained.iter().copied());
             } else {
-                let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, stream_frames: &mut stream_frames };
+                let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, queued_rem: &mut queued_rem, stream_frames: &mut stream_frames };
                 if !out.push(&drained, rate, &cmd_tx, &stats) {
                     return Ok(());
                 }
@@ -736,7 +742,7 @@ fn decoder_thread(
     if !tail.is_empty() {
         drained.clear();
         drained.extend(tail.drain(..));
-        let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, stream_frames: &mut stream_frames };
+        let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, queued_rem: &mut queued_rem, stream_frames: &mut stream_frames };
         if !out.push(&drained, tail_rate, &cmd_tx, &stats) {
             return Ok(());
         }
@@ -779,6 +785,9 @@ struct Rt {
     cons: Arc<Mutex<rtrb::Consumer<f32>>>,
     stats: Arc<Stats>,
     eq: eq::Eq,
+    /// `frames * 1e6 % rate` not yet counted in `played_us`: small
+    /// callbacks would otherwise lose up to a microsecond each.
+    played_rem: u64,
 }
 
 type Live = (pw::stream::StreamBox<'static>, pw::stream::StreamListener<Rt>);
@@ -833,7 +842,7 @@ fn pw_thread(
             let ev2 = ev.clone();
             let draining = draining.clone();
             let listener = stream
-                .add_local_listener_with_user_data(Rt { cons: cons.clone(), stats: stats.clone(), eq: eq::Eq::default() })
+                .add_local_listener_with_user_data(Rt { cons: cons.clone(), stats: stats.clone(), eq: eq::Eq::default(), played_rem: 0 })
                 // A volume set before the format is negotiated is dropped, so
                 // (re)apply it once the stream reaches Paused or Streaming.
                 .state_changed(|stream, rt, _old, new| {
@@ -909,7 +918,9 @@ fn pw_thread(
                         }
                         rt.stats.frames_played.fetch_add(frames as u64, Ordering::Relaxed);
                         let sr = rt.stats.stream_rate.load(Ordering::Relaxed).max(1) as u64;
-                        rt.stats.played_us.fetch_add(frames as u64 * 1_000_000 / sr, Ordering::Relaxed);
+                        let num = frames as u64 * 1_000_000 + rt.played_rem;
+                        rt.stats.played_us.fetch_add(num / sr, Ordering::Relaxed);
+                        rt.played_rem = num % sr;
                         written = cap;
                     }
                     let chunk = data.chunk_mut();
