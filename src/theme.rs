@@ -153,6 +153,18 @@ pub fn save_viz(style: &str, palette: usize) -> std::io::Result<()> {
     save_key("viz_colors", toml::Value::Integer(palette as i64))
 }
 
+/// The output device chosen in Settings (a PipeWire node.name); None = the
+/// system default.
+pub fn saved_output() -> Option<String> {
+    let raw = std::fs::read_to_string(config_path()).unwrap_or_default();
+    let map: HashMap<String, toml::Value> = toml::from_str(&raw).unwrap_or_default();
+    map.get("output").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from)
+}
+
+pub fn save_output(name: Option<&str>) -> std::io::Result<()> {
+    save_key("output", toml::Value::String(name.unwrap_or_default().into()))
+}
+
 /// Now Playing shows synced lyrics when a track has them (default on).
 pub fn saved_lyrics() -> bool {
     let raw = std::fs::read_to_string(config_path()).unwrap_or_default();

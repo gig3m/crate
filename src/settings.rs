@@ -258,6 +258,24 @@ impl Crate {
             .into_any_element()
     }
 
+    /// At launch: say so when the saved output isn't connected (PipeWire
+    /// then plays to the system default until it's back).
+    pub(crate) fn check_saved_output(&mut self, cx: &mut Context<Self>) {
+        let Some(want) = self.target.clone() else { return };
+        let task = cx.background_spawn(async { read_audio_info() });
+        cx.spawn(async move |this, cx| {
+            let Ok(info) = task.await else { return };
+            if !info.sinks.iter().any(|(n, _)| *n == want) {
+                this.update(cx, |this, cx| {
+                    this.say(format!("Your saved output ({want}) isn't connected: playing to the system default"));
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn open_audio_settings(&mut self, cx: &mut Context<Self>) {
         self.go(crate::View::Soon("audio"));
         use crate::theme::{Mode, Theme as Th};
@@ -280,6 +298,9 @@ impl Crate {
 
     /// Switch output; restarts playback at the same position on the new sink.
     fn set_output(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        if let Err(e) = crate::theme::save_output(name.as_deref()) {
+            eprintln!("[settings] couldn't save output choice: {e}");
+        }
         self.target = name;
         if let Some(n) = self.now.as_ref()
             && !n.finished

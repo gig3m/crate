@@ -180,6 +180,8 @@ struct Crate {
     view_size: (f32, f32),
     /// Now Playing shows lyrics when the track has them (saved).
     np_lyrics: bool,
+    /// The next play_from starts its engine paused (a seek while paused).
+    start_paused: bool,
     /// Whether the last track shown in Now Playing had lyrics (layout while the next loads).
     np_had_lyrics: std::cell::Cell<bool>,
     /// Tracks whose detail fetch failed (until they're fetched again).
@@ -794,7 +796,7 @@ impl Crate {
             last_render_us: 0,
             tracks_tx,
             plex,
-            target: std::env::var("CRATE_TARGET").ok(),
+            target: std::env::var("CRATE_TARGET").ok().or_else(theme::saved_output),
             engine: None,
             now: None,
             autoplay: std::env::var("CRATE_AUTOPLAY").ok().and_then(|v| v.parse().ok()),
@@ -805,6 +807,7 @@ impl Crate {
             content_w: 1000.0,
             view_size: (1280.0, 800.0),
             np_lyrics: theme::saved_lyrics(),
+            start_paused: false,
             np_had_lyrics: std::cell::Cell::new(false),
             detail_failed: Default::default(),
             mixes: HashMap::new(),
@@ -1471,6 +1474,8 @@ impl Crate {
 
     /// (Re)start the engine at album track `idx`, `ms` into it.
     fn play_from(&mut self, idx: usize, ms: u64, cx: &mut Context<Self>) {
+        // Read first, so an early return can't leave it set for a later play.
+        let start_paused = std::mem::take(&mut self.start_paused);
         // An explicit start supersedes a queue waiting on loudness.
         self.pending_start = None;
         // The new engine reports its own gains; don't show the old one's meanwhile.
@@ -1498,6 +1503,10 @@ impl Crate {
         let Some(now) = self.now.as_mut() else { return };
         match Engine::play_from(queue, ms, self.target.clone()) {
             Ok(e) => {
+                if start_paused {
+                    // Before the stream activates, so nothing is heard.
+                    e.set_active(false);
+                }
                 e.set_volume(self.volume.powi(3));
                 e.set_eq(eq);
                 self.engine = Some(e);
@@ -1506,7 +1515,7 @@ impl Crate {
                 now.boundaries.clear();
                 now.idx = idx;
                 now.elapsed_ms = ms;
-                now.paused = false;
+                now.paused = start_paused;
                 now.finished = false;
                 now.stopped = false;
                 now.engine_end = range.end;
@@ -1517,7 +1526,7 @@ impl Crate {
                     _ if ms == 0 => self.status = format!("Playing {}", now.context).into(),
                     _ => {}
                 }
-                let _ = self.mpris.send(MprisUpdate::Status { playing: true, stopped: false });
+                let _ = self.mpris.send(MprisUpdate::Status { playing: !start_paused, stopped: false });
                 if ms > 0 {
                     let _ = self.mpris.send(MprisUpdate::Seeked(ms));
                 }
@@ -1601,6 +1610,9 @@ impl Crate {
             Transport::Next => {
                 if idx + 1 < n {
                     self.play_from(idx + 1, 0, cx);
+                } else if self.repeat == queue::Repeat::All && n > 0 {
+                    // Repeat All: Next at the end wraps to the top.
+                    self.play_from(0, 0, cx);
                 }
             }
             Transport::Prev => {
@@ -1613,9 +1625,18 @@ impl Crate {
             Transport::Seek(off) => {
                 let len = now.tracks[idx].duration_ms;
                 let to = (elapsed as i64 + off).clamp(0, len.saturating_sub(1000) as i64) as u64;
+                // A seek while paused stays paused.
+                self.start_paused = now.paused && !now.finished;
                 self.play_from(idx, to, cx);
             }
-            Transport::SetPosition(ms) => self.play_from(idx, ms, cx),
+            Transport::SetPosition(ms) => {
+                // Clamped like relative seeks: a seek to the very end (a drag
+                // released at the right edge, MPRIS) is a fatal seek error.
+                let len = now.tracks[idx].duration_ms;
+                let to = if len > 0 { ms.min(len.saturating_sub(1000)) } else { ms };
+                self.start_paused = now.paused && !now.finished;
+                self.play_from(idx, to, cx);
+            }
             Transport::SetShuffle(_) | Transport::SetRepeat(_) | Transport::SetVolume(_) | Transport::Raise => {}
             Transport::Stop => {
                 self.engine = None;
@@ -2298,6 +2319,10 @@ impl Render for Crate {
                                 }
                             }
                             "pause" => this.transport(Transport::Pause, cx),
+                            "play" => this.transport(Transport::Play, cx),
+                            "shuffle" => this.toggle_shuffle(cx),
+                            "repeat" => this.cycle_repeat(cx),
+                            "next" => this.transport(Transport::Next, cx),
                             "stop" => this.transport(Transport::Stop, cx),
                             _ => eprintln!("[crate] CRATE_KEYS: unknown {k}"),
                         }
@@ -2961,7 +2986,11 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                let view = cx.new(|cx| Crate::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds, transport_rx, mpris_tx, search_tx, hubs_tx, artist_tx));
+                let view = cx.new(|cx| {
+                    let mut c = Crate::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds, transport_rx, mpris_tx, search_tx, hubs_tx, artist_tx);
+                    c.check_saved_output(cx);
+                    c
+                });
                 cx.new(|cx| gpui_component::Root::new(view, window, cx))
             },
         )

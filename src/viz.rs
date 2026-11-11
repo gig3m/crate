@@ -1,5 +1,5 @@
-//! The player bar's track visualizer. Omarchy-style: a left click cycles
-//! the style, a right click cycles the colors, and press-and-drag seeks.
+//! The player bar's track visualizer. A click or press-and-drag seeks;
+//! right-click picks the style and colours.
 //! Styles: Plex's sonic profile of the track, or live views of what is
 //! playing (spectrum, mirrored waveform, level meter), or a plain line.
 //! Colors come from the current theme, so they follow Omarchy themes.
@@ -7,6 +7,8 @@
 use std::{cell::Cell, rc::Rc};
 
 use gpui::{Bounds, Context, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, div, prelude::*, px, rgb};
+
+use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 
 use crate::{Crate, mpris::Transport, theme::Theme};
 
@@ -55,11 +57,6 @@ impl Style {
     /// Animates from the live output.
     pub fn live(self) -> bool {
         matches!(self, Style::Spectrum | Style::Wave | Style::Meter)
-    }
-
-    fn next(self) -> Style {
-        let i = Style::ALL.iter().position(|s| *s == self).unwrap_or(0);
-        Style::ALL[(i + 1) % Style::ALL.len()]
     }
 }
 
@@ -303,10 +300,10 @@ fn fft(re: &mut [f32], im: &mut [f32]) {
 }
 
 impl Crate {
-    pub(crate) fn cycle_viz_style(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn set_viz_style(&mut self, to: Style, cx: &mut Context<Self>) {
         let style = {
             let mut v = self.viz.borrow_mut();
-            v.style = v.style.next();
+            v.style = to;
             // The last style's values would otherwise sit frozen.
             v.spectrum.iter_mut().for_each(|x| *x = 0.0);
             v.level = Default::default();
@@ -318,10 +315,10 @@ impl Crate {
         cx.notify();
     }
 
-    pub(crate) fn cycle_viz_palette(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn set_viz_palette(&mut self, to: usize, cx: &mut Context<Self>) {
         let p = {
             let mut v = self.viz.borrow_mut();
-            v.palette = (v.palette + 1) % PALETTES.len();
+            v.palette = to % PALETTES.len();
             v.palette
         };
         self.save_viz();
@@ -470,6 +467,7 @@ impl Crate {
         let bounds = v.bounds.clone();
         drop(v);
         let weak = cx.entity().downgrade();
+        let menu_weak = weak.clone();
         div()
             .id(id)
             .relative()
@@ -572,7 +570,13 @@ impl Crate {
                     };
                     match (press, drag) {
                         (Some(_), Some(f)) if len_ms > 0 => this.transport(Transport::SetPosition((f as f64 * len_ms as f64) as u64), cx),
-                        (Some(_), None) => this.cycle_viz_style(cx),
+                        // A plain click seeks to where it landed.
+                        (Some(_), None) if len_ms > 0 => {
+                            let f = this.viz.borrow().frac_at(ev.position.x);
+                            if let Some(f) = f {
+                                this.transport(Transport::SetPosition((f as f64 * len_ms as f64) as u64), cx);
+                            }
+                        }
                         _ => {}
                     }
                     cx.notify();
@@ -603,17 +607,33 @@ impl Crate {
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                    // Not in the middle of a drag-to-seek.
+                cx.listener(|this, _: &MouseDownEvent, _, _| {
+                    // In the middle of a drag-to-seek, a right press is part of
+                    // it (see `right_in_press`); otherwise the menu opens.
                     let mut v = this.viz.borrow_mut();
                     if v.press.is_some() {
                         v.right_in_press = true;
-                    } else {
-                        drop(v);
-                        this.cycle_viz_palette(cx);
                     }
                 }),
             )
+            // Right-click: the bar's style and colours.
+            .context_menu(move |mut menu, _, cx| {
+                let (cur, pal) = menu_weak.upgrade().map(|e| { let v = e.read(cx).viz.borrow(); (v.style, v.palette) }).unwrap_or_default();
+                for s in Style::ALL {
+                    let w = menu_weak.clone();
+                    menu = menu.item(PopupMenuItem::new(s.label()).checked(s == cur).on_click(move |_, _, cx| {
+                        w.update(cx, |this, cx| this.set_viz_style(s, cx)).ok();
+                    }));
+                }
+                menu = menu.separator();
+                for (i, name) in PALETTES.iter().enumerate() {
+                    let w = menu_weak.clone();
+                    menu = menu.item(PopupMenuItem::new(format!("{name} colours")).checked(i == pal).on_click(move |_, _, cx| {
+                        w.update(cx, |this, cx| this.set_viz_palette(i, cx)).ok();
+                    }));
+                }
+                menu
+            })
             .into_any_element()
     }
 }

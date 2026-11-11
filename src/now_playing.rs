@@ -280,7 +280,11 @@ impl Crate {
                     .items_center()
                     .justify_center()
                     .gap(px(26.0))
-                    .child(btn("np-shuffle", "shuffle", 20.0, white(0.3), None))
+                    .child(
+                        btn("np-shuffle", "shuffle", 20.0, if self.shuffle { rgb(t.accent).into() } else { white(0.45) }, None)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_shuffle(cx))),
+                    )
                     .child(btn("np-prev", "prev", 26.0, white(1.0), Some(Transport::Prev)))
                     .child(
                         div()
@@ -297,7 +301,26 @@ impl Crate {
                             .on_click(cx.listener(|this, _, _, cx| this.transport(Transport::PlayPause, cx))),
                     )
                     .child(btn("np-next", "next", 26.0, white(1.0), Some(Transport::Next)))
-                    .child(btn("np-repeat", "repeat", 20.0, white(0.3), None)),
+                    .child({
+                        let rep = self.repeat;
+                        btn("np-repeat", "repeat", 20.0, if rep != crate::queue::Repeat::Off { rgb(t.accent).into() } else { white(0.45) }, None)
+                            .relative()
+                            .cursor_pointer()
+                            .when(rep == crate::queue::Repeat::One, |d| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .top(px(6.0))
+                                        .right(px(6.0))
+                                        .font_family(MONO)
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_size(px(10.0))
+                                        .text_color(rgb(t.accent))
+                                        .child("1"),
+                                )
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.cycle_repeat(cx)))
+                    }),
             );
 
         // Middle: synced lyrics around the current line.
