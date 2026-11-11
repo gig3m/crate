@@ -252,8 +252,8 @@ struct Crate {
     sonic_progress: Option<u32>,
     audio_info: Option<settings::AudioInfo>,
     audio_info_error: Option<String>,
-    /// An album whose track list failed to load (rating key, error), shown
-    /// on its page with Retry.
+    /// Albums whose last track-list load failed (rating key -> error),
+    /// shown on their page with Retry.
     pub(crate) album_error: HashMap<String, String>,
     prompt_copied: bool,
     /// Another launch (or MPRIS Raise) asked for the window.
