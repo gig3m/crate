@@ -43,7 +43,7 @@ use aulos_spike::audio::{Engine, Event as AudioEvent, Source};
 use mpris::{Transport, Update as MprisUpdate};
 use plex::{Album, ArtRequest, ArtResult, ArtistInfo, ArtistRequest, HubsRequest, SearchHit, SearchRequest, Track, TracksRequest};
 
-gpui::actions!(aulos, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch, ToggleNowPlaying]);
+gpui::actions!(aulos, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch, ToggleNowPlaying, PaletteRadio]);
 
 #[derive(Clone)]
 enum View {
@@ -1401,6 +1401,9 @@ fn main() {
             gpui::KeyBinding::new("left", SeekBack, Some("Aulos && !Input")),
             gpui::KeyBinding::new("escape", Back, Some("Aulos && !Input")),
             gpui::KeyBinding::new("f", ToggleNowPlaying, Some("Aulos && !Input")),
+            // gpui-component binds tab to IndentInline in its Input; bound later at
+            // the same depth, this wins inside the palette's search box.
+            gpui::KeyBinding::new("tab", PaletteRadio, Some("Palette > Input")),
             gpui::KeyBinding::new("ctrl-k", FocusSearch, Some("Aulos")),
         ]);
         let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);

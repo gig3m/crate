@@ -98,6 +98,17 @@ impl Aulos {
         }
     }
 
+    /// Tab: radio from the selected artist/album (or the top result).
+    pub(crate) fn palette_radio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let items = self.palette_items();
+        let pick = items.get(self.pal_sel).or(items.first()).map(|(_, i)| i.clone());
+        if let Some(Item::Hit(h)) = pick
+            && (h.kind == "artist" || h.kind == "album")
+        {
+            self.activate_item(Item::Radio(h.rating_key.clone(), format!("Radio: {}", h.title)), window, cx);
+        }
+    }
+
     fn palette_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let items = self.palette_items();
         let n = items.len();
@@ -108,15 +119,6 @@ impl Aulos {
             "enter" => {
                 if let Some((_, it)) = items.into_iter().nth(self.pal_sel) {
                     self.activate_item(it, window, cx);
-                }
-            }
-            "tab" => {
-                // Radio from the selected artist/album (or the top result).
-                let pick = items.get(self.pal_sel).or(items.first()).map(|(_, i)| i.clone());
-                if let Some(Item::Hit(h)) = pick
-                    && (h.kind == "artist" || h.kind == "album")
-                {
-                    self.activate_item(Item::Radio(h.rating_key.clone(), format!("Radio: {}", h.title)), window, cx);
                 }
             }
             "right" => {
@@ -319,6 +321,8 @@ impl Aulos {
                     .flex()
                     .flex_col()
                     .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| this.palette_key(ev, window, cx)))
+                    .key_context("Palette")
+                    .on_action(cx.listener(|this, _: &crate::PaletteRadio, window, cx| this.palette_radio(window, cx)))
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .child(head)
                     .child(body)
