@@ -72,6 +72,7 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("[queue] #{index} {label}: {source_rate} Hz / {bits}-bit, starts at frame {at_frame}");
                 tracks.push((at_frame, source_rate, label));
             }
+            Ok(Event::Skipped { index, error }) => eprintln!("[queue] #{index} skipped: {error}"),
             Ok(Event::Reconnected { from, to, silent_ms }) => {
                 println!("RECONNECT {from} -> {to} Hz: {silent_ms:.1} ms of silence between tracks");
             }

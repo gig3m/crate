@@ -177,6 +177,8 @@ pub enum Event {
     /// `at_us`: where this track begins on the played-time clock (`Stats::played_us`).
     /// `gain` is the leveling factor the decoder applies to this track's samples.
     TrackStarted { index: usize, label: String, source_rate: u32, bits: u32, at_frame: u64, at_us: u64, gain: f32 },
+    /// A queued track (engine index) couldn't be opened and was skipped.
+    Skipped { index: usize, error: String },
     Reconnected { from: u32, to: u32, silent_ms: f64 },
     FirstAudio { ms_since_play: f64 },
     Finished,
@@ -445,21 +447,35 @@ fn decoder_thread(
         let (src, gain) = (item.src, item.gain);
         // A gain that isn't a sane finite factor is ignored rather than trusted.
         let gain = if gain.is_finite() && gain > 0.0 && gain <= 4.0 { gain } else { 1.0 };
-        let mss = MediaSourceStream::new(src.open(stats.stop.clone())?, Default::default());
-        let mut hint = Hint::new();
-        if let Some(ext) = src.ext() {
-            hint.with_extension(&ext);
-        }
-        let mut fmt = symphonia::default::get_probe().probe(
-            &hint,
-            mss,
-            FormatOptions::default(),
-            MetadataOptions::default(),
-        )?;
-        let track = fmt
-            .default_track(TrackType::Audio)
-            .ok_or_else(|| anyhow::anyhow!("no audio track"))?
-            .clone();
+        let open = || -> anyhow::Result<_> {
+            let mss = MediaSourceStream::new(src.open(stats.stop.clone())?, Default::default());
+            let mut hint = Hint::new();
+            if let Some(ext) = src.ext() {
+                hint.with_extension(&ext);
+            }
+            let fmt = symphonia::default::get_probe().probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())?;
+            let track = fmt.default_track(TrackType::Audio).ok_or_else(|| anyhow::anyhow!("no audio track"))?.clone();
+            Ok((fmt, track))
+        };
+        // The first track failing is the error to report. A later one
+        // failing (a server hiccup, a 503) mustn't cut off what's still
+        // buffered: retry once, then skip it and carry on with the queue.
+        let (mut fmt, track) = match open() {
+            Ok(x) => x,
+            Err(e) if index > 0 && !stats.stop.load(Ordering::Acquire) => {
+                std::thread::sleep(Duration::from_millis(500));
+                match open() {
+                    Ok(x) => x,
+                    Err(_) if stats.stop.load(Ordering::Acquire) => return Ok(()),
+                    Err(e2) => {
+                        eprintln!("[engine] skipping {}: {e:#}; retry: {e2:#}", src.label());
+                        let _ = ev.send(Event::Skipped { index, error: format!("{e2:#}") });
+                        continue;
+                    }
+                }
+            }
+            Err(e) => return Err(e),
+        };
         let Some(CodecParameters::Audio(params)) = &track.codec_params else {
             anyhow::bail!("not audio")
         };

@@ -1347,6 +1347,7 @@ impl Crate {
         if let Some(n) = self.now.as_mut() {
             n.level.clear();
             n.transcoded.clear();
+            n.formats.clear();
         }
         let Some(now) = self.now.as_mut() else { return };
         if idx >= now.tracks.len() {
@@ -1519,9 +1520,18 @@ impl Crate {
                     };
                     // What the decoder really applies to this playback (not what we last asked for).
                     now.level.insert(now.start_idx + index, gain);
+                    // A skipped track before this one gets a zero-length slot.
+                    while now.boundaries.len() < index {
+                        now.boundaries.push(at_us);
+                    }
                     if now.boundaries.len() == index {
                         now.boundaries.push(at_us);
                     }
+                }
+                AudioEvent::Skipped { index, error } => {
+                    let title = now.tracks.get(now.start_idx + index).map(|t| t.title.clone()).unwrap_or_default();
+                    eprintln!("[crate] skipped #{} {title}: {error}", now.start_idx + index);
+                    self.status = format!("Skipped \u{201c}{title}\u{201d}: couldn't load it ({error})").into();
                 }
                 AudioEvent::Reconnected { from, to, silent_ms } => {
                     eprintln!("[crate] rate change {from} -> {to}: {silent_ms:.1} ms");

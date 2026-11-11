@@ -58,23 +58,115 @@ impl Source {
     pub fn open(&self, stop: Arc<AtomicBool>) -> anyhow::Result<Box<dyn MediaSource>> {
         match self {
             Source::File(p) => Ok(Box::new(File::open(p)?)),
+            // Plex's transcoded MP3 is VBR without a Xing header: symphonia
+            // would estimate its length from the first frames, then trim
+            // decoded audio and refuse seeks past that guess. Unseekable
+            // with no length, it estimates nothing; seeks scan forward from
+            // the start, which is fine since every seek reopens the source.
+            Source::Http { cache, prepare: Some(_), .. } if cache.exists() => Ok(Box::new(NoLength(File::open(cache)?))),
             Source::Http { cache, .. } if cache.exists() => Ok(Box::new(File::open(cache)?)),
             Source::Http { url, token, cache, prepare: None, .. } => Ok(Box::new(Progressive::start(url, token, CLIENT, cache, stop)?)),
             Source::Http { url, token, cache, prepare: Some(prepare), .. } => {
                 // One transcode session per open, so a reopen (seek, restart)
                 // never shares a server-side job with an attempt being dropped.
                 let session = format!("crate-{}-{}", std::process::id(), ATTEMPT.fetch_add(1, Ordering::Relaxed));
-                reqwest::blocking::Client::new()
+                let d: serde_json::Value = reqwest::blocking::Client::new()
                     .get(prepare.replace("{session}", &session))
                     .header("X-Plex-Token", token.as_str())
                     .header("X-Plex-Client-Identifier", TRANSCODE_CLIENT)
                     .header("Accept", "application/json")
                     .timeout(Duration::from_secs(10))
                     .send()?
-                    .error_for_status()?;
-                Ok(Box::new(Progressive::start(&url.replace("{session}", &session), token, TRANSCODE_CLIENT, cache, stop)?))
+                    .error_for_status()?
+                    .json()?;
+                // Without an accepted transcode decision, start ignores the
+                // bitrate (or fails): say what Plex said instead.
+                let mc = &d["MediaContainer"];
+                let part = &mc["Metadata"][0]["Media"][0]["Part"][0];
+                anyhow::ensure!(
+                    part["decision"].as_str() == Some("transcode"),
+                    "Plex won't transcode this track: {}",
+                    mc["generalDecisionText"].as_str().or(mc["transcodeDecisionText"].as_str()).unwrap_or("no decision")
+                );
+                let base = prepare.split("/music/").next().unwrap_or_default();
+                let p = Progressive::start(&url.replace("{session}", &session), token, TRANSCODE_CLIENT, cache, stop)?;
+                Ok(Box::new(Transcode { p, stop_url: format!("{base}/video/:/transcode/universal/stop?session={session}"), token: token.clone() }))
             }
         }
+    }
+}
+
+/// A source that tells the demuxer it can't seek and has no known length
+/// (see `Source::open`).
+struct NoLength<S>(S);
+
+impl<S: Read> Read for NoLength<S> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl<S: Seek> Seek for NoLength<S> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(pos)
+    }
+}
+
+impl<S: Read + Seek + Send + Sync> MediaSource for NoLength<S> {
+    fn is_seekable(&self) -> bool {
+        false
+    }
+    fn byte_len(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// A transcode being downloaded: unseekable with no length (as NoLength),
+/// and dropping it before the download finishes stops the server's job,
+/// which would otherwise run on (and upload) until Plex times it out.
+struct Transcode {
+    p: Progressive,
+    stop_url: String,
+    token: String,
+}
+
+impl Drop for Transcode {
+    fn drop(&mut self) {
+        if self.p.st.done.load(Ordering::Acquire) {
+            return;
+        }
+        // Cancel first, so the stream the stop closes is never published.
+        self.p.cancel.store(true, Ordering::Release);
+        let (url, token) = (std::mem::take(&mut self.stop_url), std::mem::take(&mut self.token));
+        let _ = std::thread::Builder::new().name("transcode-stop".into()).spawn(move || {
+            let _ = reqwest::blocking::Client::new()
+                .get(url)
+                .header("X-Plex-Token", token)
+                .header("X-Plex-Client-Identifier", TRANSCODE_CLIENT)
+                .timeout(Duration::from_secs(5))
+                .send();
+        });
+    }
+}
+
+impl Read for Transcode {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.p.read(buf)
+    }
+}
+
+impl Seek for Transcode {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.p.seek(pos)
+    }
+}
+
+impl MediaSource for Transcode {
+    fn is_seekable(&self) -> bool {
+        false
+    }
+    fn byte_len(&self) -> Option<u64> {
+        None
     }
 }
 
@@ -160,6 +252,12 @@ impl Progressive {
                     st2.written.fetch_add(n as u64, Ordering::Release);
                 }
                 w.flush()?;
+                // An abandoned attempt can also end in a clean EOF (stopping a
+                // transcode closes the stream), and with no Content-Length
+                // that would look complete: never publish it.
+                if cancel2.load(Ordering::Acquire) {
+                    anyhow::bail!("cancelled");
+                }
                 let total = st2.total.load(Ordering::Acquire);
                 let got = st2.written.load(Ordering::Acquire);
                 anyhow::ensure!(total == 0 || got == total, "short download: {got} of {total} bytes");
