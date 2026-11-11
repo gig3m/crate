@@ -167,7 +167,12 @@ impl Aulos {
             }))
             .child(icon_btn("lyrics", "lyrics", 17.0, t.line, None, cx))
             .child(icon_btn("queue", "queue", 17.0, t.line, None, cx))
-            .child(icon_btn("device", "device", 17.0, if self.target.is_some() { t.accent } else { t.text2 }, None, cx))
+            .child(
+                icon_btn("device", "device", 17.0, if self.target.is_some() { t.accent } else { t.text2 }, None, cx)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(t.raised)))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_audio_settings(cx))),
+            )
             .child(icons::icon("volume", 17.0, t.line))
             .child(div().w(px(72.0)).h(px(4.0)).rounded(px(2.0)).bg(rgb(t.border)).child(div().w_full().h_full().rounded(px(2.0)).bg(rgb(t.line))));
 

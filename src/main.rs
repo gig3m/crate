@@ -17,6 +17,7 @@ mod palette;
 mod mpris;
 mod now_playing;
 mod player_bar;
+mod settings;
 mod shell;
 mod stations;
 mod plex;
@@ -113,6 +114,7 @@ struct Aulos {
     np_tab: usize,
     /// Server sonic analysis progress, for the Stations page.
     sonic_progress: Option<u32>,
+    audio_info: Option<settings::AudioInfo>,
     /// Album rating key -> details (None while loading).
     album_detail: HashMap<String, Option<plex::AlbumDetail>>,
     focus: gpui::FocusHandle,
@@ -276,6 +278,9 @@ impl Aulos {
                                 this.add_filter(library::LibFilter { kind, label: label.into(), query: query.into() }, cx);
                             }
                         }
+                        if std::env::var_os("AULOS_AUDIO_SETTINGS").is_some() {
+                            this.open_audio_settings(cx);
+                        }
                         if std::env::var_os("AULOS_STATIONS").is_some() {
                             this.go(View::Soon("stations"));
                             this.refresh_sonic_progress(cx);
@@ -413,6 +418,7 @@ impl Aulos {
             test_search: std::env::var("AULOS_SEARCH").ok(),
             now_playing: std::env::var_os("AULOS_NOW_PLAYING").is_some(),
             sonic_progress: None,
+            audio_info: None,
             np_tab: std::env::var("AULOS_NP_TAB").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             album_detail: HashMap::new(),
             fwd: Vec::new(),
@@ -1182,6 +1188,7 @@ impl Render for Aulos {
                                 }
                                 View::Library => grid.into_any_element(),
                                 View::Soon("stations") => self.stations_view(&t, cx),
+                                View::Soon("audio") => self.audio_settings_view(&t, cx),
                                 View::Soon(name) => self.soon_view(name, &t),
                                 View::Album { ix, tracks } => {
                                     let (ix, tracks) = (*ix, tracks.clone());
