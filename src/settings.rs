@@ -69,6 +69,65 @@ Trade-off to mention to me: while a file plays at, say, 44.1 kHz, other apps tha
 
 impl Crate {
     /// Theme: Crate's own palette, or follow Omarchy.
+    /// Ten-band EQ (canvas): preset chips over one vertical slider per band.
+    fn eq_card(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::theme::EqPreset;
+        let cur = self.eq_preset;
+        let chips = EqPreset::ALL.into_iter().map(|p| {
+            let on = p == cur;
+            div()
+                .id(("eq-preset", p as usize))
+                .h(px(28.0))
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .rounded(px(14.0))
+                .border_1()
+                .border_color(rgb(if on { t.accent } else { t.raised }))
+                .when(on, |d| d.bg(rgb(t.raised)))
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(if on { t.text_strong } else { t.text2 }))
+                .cursor_pointer()
+                .child(p.label())
+                .on_click(cx.listener(move |this, _, window, cx| this.set_eq_preset(p, window, cx)))
+        });
+        let gains = self.eq_gains();
+        let shown = cur.curve().unwrap_or(self.eq_custom);
+        let bands = self.eq_sliders.iter().enumerate().map(|(i, s)| {
+            let f = crate_audio::audio::eq::BANDS[i];
+            let label = if f >= 1000.0 { format!("{}k", f / 1000.0) } else { format!("{f}") };
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(6.0))
+                .child(div().font_family(crate::shell::MONO).text_size(px(10.0)).text_color(rgb(t.text2)).child(format!("{:+.1}", shown[i])))
+                .child(gpui_component::slider::Slider::new(s).vertical().disabled(cur == EqPreset::Off))
+                .child(div().font_family(crate::shell::MONO).text_size(px(10.0)).text_color(rgb(t.muted)).child(label))
+        });
+        let active = gains.iter().any(|&g| g != 0.0);
+        div()
+            .p(px(16.0))
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(rgb(t.raised))
+            .bg(rgb(t.surface))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.text_strong)).child("Ten-band equalizer"))
+            .child(div().flex().flex_wrap().gap(px(6.0)).children(chips))
+            .child(div().pt(px(6.0)).flex().gap(px(4.0)).opacity(if cur == EqPreset::Off { 0.45 } else { 1.0 }).children(bands))
+            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(if active {
+                "Heard right away. Changes the samples; a preamp cancels the biggest boost so nothing clips."
+            } else {
+                "Off: bypassed, samples untouched (bit-perfect). Moving a slider switches to Custom."
+            }))
+            .into_any_element()
+    }
+
     fn theme_section(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         use crate::theme::{Mode, Theme as Th};
         let option = |id: &'static str, mode: Mode, title: &'static str, blurb: &'static str, preview: Th, cx: &mut Context<Self>| {
@@ -352,6 +411,7 @@ impl Crate {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.settings_scroll)
             .px(px(PAD_X))
             .pt(px(4.0))
             .pb(px(40.0))
@@ -366,7 +426,7 @@ impl Crate {
                     .flex()
                     .gap(px(24.0))
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Output device")).children(devices))
-                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Signal")).child(bitperfect).child(later).child(fades)),
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Signal")).child(bitperfect).child(later).child(fades).child(self.eq_card(t, cx))),
             )
             .when(!current.is_empty(), |d| {
                 d.child(div().font_family(MONO).text_size(px(11.0)).text_color(rgb(t.muted)).child(format!("Playing to {current}")))

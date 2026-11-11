@@ -38,6 +38,14 @@ fn main() -> anyhow::Result<()> {
         .map(|(i, src)| crate_audio::audio::Item { src, gain: 1.0, fade_ms: if i > 0 { fade_ms } else { 0 } })
         .collect();
     let engine = Engine::play(items, target)?;
+    // Test aid: CRATE_EQ="g31,g62,...,g16k" (dB) runs the ten-band EQ.
+    if let Ok(v) = std::env::var("CRATE_EQ") {
+        let mut g = [0.0f32; 10];
+        for (slot, x) in g.iter_mut().zip(v.split(',')) {
+            *slot = x.trim().parse().unwrap_or(0.0);
+        }
+        engine.set_eq(g);
+    }
     let st = engine.stats.clone();
     let mut tracks: Vec<(u64, u32, String)> = Vec::new();
     let mut reported = 0usize;

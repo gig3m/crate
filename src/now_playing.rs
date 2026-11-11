@@ -347,7 +347,8 @@ impl Crate {
                 let native = fmt.is_some_and(|(rate, _)| n.graph_rate == rate);
                 // Reported by the engine for this playback: what's actually audible.
                 let level = n.level.get(&n.idx).copied().unwrap_or(1.0);
-                let bitperfect = native && self.volume >= 1.0 && level == 1.0;
+                let eq_on = self.eq_gains().iter().any(|&g| g != 0.0);
+                let bitperfect = native && self.volume >= 1.0 && level == 1.0 && !eq_on;
                 let output = match fmt {
                     Some((rate, _)) if n.graph_rate == rate => format!("PipeWire · {} kHz matched", khz(rate)),
                     Some((rate, _)) if n.graph_rate > 0 => format!("PipeWire resamples {} → {} kHz", khz(rate), khz(n.graph_rate)),
@@ -365,7 +366,11 @@ impl Crate {
                     ("Plex stream", "Direct play · original file · no transcode".into(), true),
                     ("Decoder", "symphonia · lock-free ring buffer".into(), true),
                     ("Loudness leveling", gain, level == 1.0),
-                    ("EQ", "Bypassed".into(), false),
+                    (
+                        "EQ",
+                        if eq_on { format!("{} · changes the samples (preamp against clipping)", self.eq_preset.label()) } else { "Bypassed · samples untouched".into() },
+                        !eq_on,
+                    ),
                     (
                         "Volume",
                         if self.volume >= 1.0 { "100% · stream samples untouched".into() } else { format!("{:.0}% · PipeWire software volume (not bit-perfect)", self.volume * 100.0) },
@@ -407,6 +412,8 @@ impl Crate {
                             .text_color(if bitperfect { rgb(t.healthy).into() } else { white(0.72) })
                             .child(if bitperfect {
                                 "● bit-perfect from Crate: native rate, stream volume 100%"
+                            } else if native && eq_on {
+                                "● native rate · the EQ changes the samples"
                             } else if native && level != 1.0 {
                                 "● native rate · loudness leveling changes the samples"
                             } else if native {

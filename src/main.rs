@@ -84,6 +84,11 @@ struct Crate {
     /// Loudness leveling setting, and Plex's loudness analysis by track key.
     leveling: theme::Leveling,
     gains: HashMap<String, plex::Gain>,
+    /// Ten-band EQ: preset, the custom curve, and one slider per band.
+    eq_preset: theme::EqPreset,
+    eq_custom: [f32; 10],
+    eq_sliders: Vec<Entity<gpui_component::slider::SliderState>>,
+    settings_scroll: gpui::ScrollHandle,
     /// Sweet fades between albums, in seconds (0 = off).
     fade_secs: u32,
     /// A queue waiting on loudness before it starts (its queue_seq); cleared
@@ -356,6 +361,23 @@ impl Crate {
         apply_component_theme(&theme, Some(window), cx);
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search, play, or run a command"));
         let sonic_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search for a track to start or end at"));
+        let (eq_preset, eq_custom) = theme::saved_eq();
+        let shown = eq_preset.curve().unwrap_or(eq_custom);
+        let eq_sliders: Vec<_> = (0..10)
+            .map(|i| cx.new(|_| gpui_component::slider::SliderState::new().min(-12.0).max(12.0).step(0.5).default_value(shown[i])))
+            .collect();
+        for (i, s) in eq_sliders.iter().enumerate() {
+            cx.subscribe(s, move |this, _, ev: &gpui_component::slider::SliderEvent, cx| {
+                use gpui_component::slider::SliderEvent;
+                // Heard while dragging; saved when let go.
+                let (v, save) = match ev {
+                    SliderEvent::Change(v) => (v, false),
+                    SliderEvent::Release(v) => (v, true),
+                };
+                this.set_eq_band(i, v.start(), save, cx);
+            })
+            .detach();
+        }
         cx.subscribe(&sonic_search, |this, input, ev: &gpui_component::input::InputEvent, cx| {
             if let gpui_component::input::InputEvent::Change = ev {
                 let q = input.read(cx).value().to_string();
@@ -610,6 +632,17 @@ impl Crate {
             leveling: theme::saved_leveling(),
             gains: HashMap::new(),
             fade_secs: theme::saved_fade(),
+            eq_preset,
+            eq_custom,
+            eq_sliders,
+            settings_scroll: {
+                let h = gpui::ScrollHandle::new();
+                // Test hook: open Settings scrolled to the bottom.
+                if std::env::var_os("CRATE_SETTINGS_BOTTOM").is_some() {
+                    h.scroll_to_bottom();
+                }
+                h
+            },
             pending_start: None,
             art: HashMap::new(),
             requested: HashSet::new(),
@@ -1108,6 +1141,47 @@ impl Crate {
         .detach();
     }
 
+    /// The curve the engine should run (all zero when Off).
+    pub(crate) fn eq_gains(&self) -> [f32; 10] {
+        match self.eq_preset {
+            theme::EqPreset::Off => [0.0; 10],
+            theme::EqPreset::Custom => self.eq_custom,
+            p => p.curve().unwrap_or([0.0; 10]),
+        }
+    }
+
+    fn apply_eq(&mut self, save: bool, cx: &mut Context<Self>) {
+        if let Some(e) = &self.engine {
+            e.set_eq(self.eq_gains());
+        }
+        if save && let Err(e) = theme::save_eq(self.eq_preset, &self.eq_custom) {
+            self.status = format!("Couldn't save the EQ: {e}").into();
+        }
+        cx.notify();
+    }
+
+    /// A preset chip: load its curve into the sliders (Off keeps them as they are).
+    pub(crate) fn set_eq_preset(&mut self, p: theme::EqPreset, window: &mut Window, cx: &mut Context<Self>) {
+        self.eq_preset = p;
+        let shown = p.curve().unwrap_or(self.eq_custom);
+        for (s, g) in self.eq_sliders.iter().zip(shown) {
+            s.update(cx, |s, cx| s.set_value(g, window, cx));
+        }
+        self.apply_eq(true, cx);
+    }
+
+    /// A slider moved: that makes the curve Custom (starting from what was shown).
+    fn set_eq_band(&mut self, i: usize, db: f32, save: bool, cx: &mut Context<Self>) {
+        if let Some(curve) = self.eq_preset.curve() {
+            self.eq_custom = curve;
+        }
+        self.eq_preset = theme::EqPreset::Custom;
+        if let Some(g) = self.eq_custom.get_mut(i) {
+            *g = if db.is_finite() { db.clamp(-12.0, 12.0) } else { 0.0 };
+        }
+        self.apply_eq(save, cx);
+    }
+
     pub(crate) fn set_fade(&mut self, secs: u32, cx: &mut Context<Self>) {
         if self.fade_secs == secs {
             return;
@@ -1160,10 +1234,12 @@ impl Crate {
         self.engine = None; // dropping stops the old one
         let range = self.engine_slice(&self.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default(), idx);
         let queue = self.sources(&self.now.as_ref().map(|n| n.tracks[range.clone()].to_vec()).unwrap_or_default(), None);
+        let eq = self.eq_gains();
         let Some(now) = self.now.as_mut() else { return };
         match Engine::play_from(queue, ms, self.target.clone()) {
             Ok(e) => {
                 e.set_volume(self.volume.powi(3));
+                e.set_eq(eq);
                 self.engine = Some(e);
                 now.start_idx = idx;
                 now.start_ms = ms;

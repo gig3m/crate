@@ -139,6 +139,71 @@ pub fn save_fade(secs: u32) -> std::io::Result<()> {
     save_key("fade", toml::Value::Integer(secs as i64))
 }
 
+/// Ten-band EQ presets (canvas). Off bypasses it (bit-perfect) but keeps
+/// the custom curve for later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EqPreset {
+    #[default]
+    Off,
+    BassBoost,
+    Vocal,
+    Treble,
+    Custom,
+}
+
+impl EqPreset {
+    pub const ALL: [EqPreset; 5] = [EqPreset::Off, EqPreset::BassBoost, EqPreset::Vocal, EqPreset::Treble, EqPreset::Custom];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            EqPreset::Off => "Off",
+            EqPreset::BassBoost => "Bass boost",
+            EqPreset::Vocal => "Vocal",
+            EqPreset::Treble => "Treble",
+            EqPreset::Custom => "Custom",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            EqPreset::Off => "off",
+            EqPreset::BassBoost => "bass",
+            EqPreset::Vocal => "vocal",
+            EqPreset::Treble => "treble",
+            EqPreset::Custom => "custom",
+        }
+    }
+
+    /// The fixed curves (31 Hz .. 16 kHz, dB); None for Off and Custom.
+    pub fn curve(self) -> Option<[f32; 10]> {
+        match self {
+            EqPreset::BassBoost => Some([6.0, 5.0, 4.0, 2.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            EqPreset::Vocal => Some([-2.0, -1.5, -0.5, 0.5, 2.0, 3.0, 3.0, 1.5, 0.0, -1.0]),
+            EqPreset::Treble => Some([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 4.5, 5.5]),
+            EqPreset::Off | EqPreset::Custom => None,
+        }
+    }
+}
+
+/// Saved EQ preset and custom curve.
+pub fn saved_eq() -> (EqPreset, [f32; 10]) {
+    let raw = std::fs::read_to_string(config_path()).unwrap_or_default();
+    let map: HashMap<String, toml::Value> = toml::from_str(&raw).unwrap_or_default();
+    let preset = map.get("eq").and_then(|v| v.as_str()).and_then(|k| EqPreset::ALL.into_iter().find(|p| p.key() == k)).unwrap_or_default();
+    let mut gains = [0.0f32; 10];
+    if let Some(arr) = map.get("eq_custom").and_then(|v| v.as_array()) {
+        for (g, v) in gains.iter_mut().zip(arr) {
+            *g = v.as_float().or(v.as_integer().map(|i| i as f64)).filter(|f| f.is_finite()).map(|f| f.clamp(-12.0, 12.0) as f32).unwrap_or(0.0);
+        }
+    }
+    (preset, gains)
+}
+
+pub fn save_eq(preset: EqPreset, custom: &[f32; 10]) -> std::io::Result<()> {
+    save_key("eq", toml::Value::String(preset.key().into()))?;
+    save_key("eq_custom", toml::Value::Array(custom.iter().map(|g| toml::Value::Float(((*g as f64) * 10.0).round() / 10.0)).collect()))
+}
+
 pub fn save_leveling(l: Leveling) -> std::io::Result<()> {
     save_key("leveling", toml::Value::String(l.key().into()))
 }

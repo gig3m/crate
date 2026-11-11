@@ -8,6 +8,7 @@
 //!   only copies from the ring, counts frames and samples the graph rate.
 //! - caller: reads `Stats` and receives `Event`s.
 
+pub mod eq;
 pub mod source;
 
 use std::{
@@ -157,6 +158,11 @@ pub struct Stats {
     /// Volume as attenuation in millionths (0 = full volume, the default):
     /// applied as PipeWire's stream channelVolumes, re-applied on rebuilds.
     pub attenuation: AtomicU32,
+    /// Ten-band EQ: gains (f32 bits, dB), linear preamp (f32 bits), and a
+    /// generation the RT thread watches to recompute its filters.
+    pub eq_gains: [AtomicU32; 10],
+    pub eq_preamp: AtomicU32,
+    pub eq_gen: AtomicU64,
 }
 
 impl Stats {
@@ -219,6 +225,17 @@ impl Engine {
     pub fn stop(&self) {
         self.stats.stop.store(true, Ordering::Release);
         let _ = self.cmd.send(Cmd::Stop);
+    }
+
+    /// Set the ten-band EQ (dB per band; all zero = bypassed, bit-perfect).
+    /// Takes effect on the next audio cycle.
+    pub fn set_eq(&self, gains: [f32; 10]) {
+        let gains = gains.map(|g| if g.is_finite() { g.clamp(-12.0, 12.0) } else { 0.0 });
+        for (slot, g) in self.stats.eq_gains.iter().zip(gains) {
+            slot.store(g.to_bits(), Ordering::Relaxed);
+        }
+        self.stats.eq_preamp.store(eq::preamp(&gains).to_bits(), Ordering::Relaxed);
+        self.stats.eq_gen.fetch_add(1, Ordering::Release);
     }
 
     /// Linear volume 0.0..=1.0 (PipeWire software volume; 1.0 leaves the
@@ -667,6 +684,7 @@ fn format_param(rate: u32) -> Vec<u8> {
 struct Rt {
     cons: Arc<Mutex<rtrb::Consumer<f32>>>,
     stats: Arc<Stats>,
+    eq: eq::Eq,
 }
 
 type Live = (pw::stream::StreamBox<'static>, pw::stream::StreamListener<Rt>);
@@ -721,7 +739,7 @@ fn pw_thread(
             let ev2 = ev.clone();
             let draining = draining.clone();
             let listener = stream
-                .add_local_listener_with_user_data(Rt { cons: cons.clone(), stats: stats.clone() })
+                .add_local_listener_with_user_data(Rt { cons: cons.clone(), stats: stats.clone(), eq: eq::Eq::default() })
                 // A volume set before the format is negotiated is dropped, so
                 // (re)apply it once the stream reaches Paused or Streaming.
                 .state_changed(|stream, rt, _old, new| {
@@ -746,13 +764,25 @@ fn pw_thread(
                         let cap = slice.len() / stride;
                         let mut frames = 0;
                         // Uncontended except during a rebuild, when this stream is gone.
+                        // EQ settings: recompute filters only when they or the rate change.
+                        let gen_id = rt.stats.eq_gen.load(Ordering::Acquire);
+                        let sr = rt.stats.stream_rate.load(Ordering::Relaxed);
+                        let gains = std::array::from_fn(|i| f32::from_bits(rt.stats.eq_gains[i].load(Ordering::Relaxed)));
+                        let pre = f32::from_bits(rt.stats.eq_preamp.load(Ordering::Relaxed));
+                        // Torn read (set_eq mid-update): keep the old filters this cycle.
+                        if rt.stats.eq_gen.load(Ordering::Acquire) == gen_id {
+                            rt.eq.update(gen_id, sr, &gains, pre);
+                        }
+                        let eq_on = rt.eq.active();
                         if let Ok(mut cons) = rt.cons.try_lock() {
                             frames = cap.min(cons.slots() / CHANNELS);
                             if frames > 0 {
                                 let chunk = cons.read_chunk(frames * CHANNELS).unwrap();
                                 let (a, b) = chunk.as_slices();
                                 for (i, s) in a.iter().chain(b).enumerate() {
-                                    slice[i * 4..i * 4 + 4].copy_from_slice(&s.to_le_bytes());
+                                    // Bypassed EQ writes the samples untouched (bit-perfect).
+                                    let v = if eq_on { rt.eq.process(i % CHANNELS, *s) } else { *s };
+                                    slice[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
                                 }
                                 chunk.commit_all();
                                 rt.stats.got_data.store(true, Ordering::Release);
