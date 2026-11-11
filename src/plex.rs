@@ -321,7 +321,7 @@ pub struct Gain {
     pub album_peak: Option<f32>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Track {
     pub rating_key: String,
     pub title: String,
@@ -332,6 +332,9 @@ pub struct Track {
     pub album_title: String,
     /// Album cover path (same key as `Album::thumb`).
     pub thumb: String,
+    /// Plex playlist item id when this came from a playlist (0 otherwise):
+    /// tells duplicate tracks in one playlist apart.
+    pub playlist_item: u64,
 }
 
 #[derive(Deserialize)]
@@ -384,6 +387,7 @@ impl Meta {
             album_key: self.parent_rating_key,
             album_title: self.parent_title,
             thumb: self.parent_thumb.unwrap_or_default(),
+            playlist_item: 0,
         })
     }
 }
@@ -1026,7 +1030,8 @@ impl Client {
         let loaded = raw.len();
         for it in raw {
             let id = it["playlistItemID"].as_u64().unwrap_or(0);
-            if let Some(t) = serde_json::from_value::<Meta>(it).ok().and_then(Meta::into_track) {
+            if let Some(mut t) = serde_json::from_value::<Meta>(it).ok().and_then(Meta::into_track) {
+                t.playlist_item = id;
                 tracks.push(t);
                 item_ids.push(id);
             }
@@ -1063,6 +1068,24 @@ impl Client {
         let res = self
             .http
             .delete(format!("{}/playlists/{playlist}", self.base))
+            .timeout(std::time::Duration::from_secs(30))
+            .header("Accept", "application/json")
+            .header("X-Plex-Token", &self.token)
+            .header("X-Plex-Client-Identifier", client_id())
+            .send()
+            .await?;
+        anyhow::ensure!(res.status().is_success(), "Plex answered {}", res.status());
+        Ok(())
+    }
+
+    /// Move one item of a regular playlist to just after `after` (another
+    /// item id), or to the top when `None`. Plex also puts it at the top
+    /// for an `after` it doesn't know, so pass ids from the current order.
+    pub async fn move_playlist_item(&self, playlist: &str, item_id: u64, after: Option<u64>) -> anyhow::Result<()> {
+        let q = after.map(|a| format!("?after={a}")).unwrap_or_default();
+        let res = self
+            .http
+            .put(format!("{}/playlists/{playlist}/items/{item_id}/move{q}", self.base))
             .timeout(std::time::Duration::from_secs(30))
             .header("Accept", "application/json")
             .header("X-Plex-Token", &self.token)

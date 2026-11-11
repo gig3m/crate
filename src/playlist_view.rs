@@ -1,15 +1,69 @@
 //! A playlist's page: header, Play / Shuffle, and its tracks (virtualized:
-//! smart playlists run to a thousand tracks). Regular playlists can drop a
-//! track; smart ones are what their rules say.
+//! smart playlists run to a thousand tracks). Regular playlists can drop and
+//! reorder tracks (drag the grip, or the row's right-click menu); smart ones
+//! are what their rules say.
 
 use std::sync::Arc;
 
 use gpui::{Context, FontWeight, ObjectFit, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb, uniform_list};
+use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 
 use crate::{Crate, PAD_X, View, fmt_ms, icons, plex::PlaylistDetail, shell::MONO, theme::{Theme, mix}};
 
 /// Most tracks a playlist page loads.
 const LIMIT: usize = 5000;
+
+/// One edit to a regular playlist, by playlist item id.
+#[derive(Clone, Debug)]
+pub(crate) enum PlOp {
+    Remove { item: u64 },
+    /// Put `item` just after `after`, or at the top.
+    Move { item: u64, after: Option<u64> },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PlJob {
+    pub key: String,
+    pub op: PlOp,
+    /// The track's title, for messages.
+    pub title: String,
+}
+
+/// What a dragged playlist row carries.
+#[derive(Clone)]
+struct RowDrag {
+    key: String,
+    item: u64,
+    /// Row index when the drag started (for the drop line only).
+    from: usize,
+}
+
+/// The card that follows the pointer while a row is dragged.
+struct DragGhost {
+    title: String,
+    artist: String,
+    bg: u32,
+    border: u32,
+    text: u32,
+    muted: u32,
+}
+
+impl gpui::Render for DragGhost {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(280.0))
+            .px(px(12.0))
+            .py(px(8.0))
+            .rounded(px(8.0))
+            .bg(rgb(self.bg))
+            .border_1()
+            .border_color(rgb(self.border))
+            .shadow_lg()
+            .opacity(0.95)
+            .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(self.text)).truncate().child(self.title.clone()))
+            .child(div().text_size(px(12.0)).text_color(rgb(self.muted)).truncate().child(self.artist.clone()))
+    }
+}
 
 impl Crate {
     pub(crate) fn open_playlist(&mut self, key: String, title: String, cx: &mut Context<Self>) {
@@ -39,16 +93,12 @@ impl Crate {
                     return;
                 }
                 match res {
-                    Ok(Ok(mut d)) => {
-                        // Removals still in flight stay off the page.
-                        if !this.playlist_removing.is_empty() {
-                            let keep: Vec<bool> = d.item_ids.iter().map(|id| !this.playlist_removing.contains(id)).collect();
-                            let mut it = keep.iter();
-                            d.tracks.retain(|_| *it.next().unwrap_or(&true));
-                            let dropped = keep.iter().filter(|k| !**k).count();
-                            d.item_ids.retain(|id| !this.playlist_removing.contains(id));
-                            d.count = d.count.saturating_sub(dropped as u64);
-                            d.loaded = d.loaded.saturating_sub(dropped);
+                    Ok(Ok(d)) => {
+                        // While edits are still going to Plex, the page shows
+                        // where they lead; the last one reloads.
+                        let shown = matches!(&this.view, View::Playlist { key: cur, detail: Some(_), .. } if *cur == key);
+                        if shown && this.playlist_pending(&key) {
+                            return;
                         }
                         this.request_thumb(&d.thumb);
                         if let View::Playlist { key: cur, detail, .. } = &mut this.view
@@ -94,6 +144,8 @@ impl Crate {
         /// Longest queue a playlist starts (from the clicked row on).
         const QUEUE_MAX: usize = 1000;
         let Some((title, d)) = self.playlist_tracks_shown() else { return };
+        let View::Playlist { key, .. } = &self.view else { return };
+        let ck = Some(format!("playlist:{key}"));
         if d.tracks.is_empty() {
             return;
         }
@@ -101,17 +153,17 @@ impl Crate {
             let mut tracks = d.tracks.clone();
             crate::shuffle(&mut tracks);
             tracks.truncate(QUEUE_MAX);
-            self.start_queue(format!("{title} (shuffled)"), None, tracks, 0, cx);
+            self.start_queue(format!("{title} (shuffled)"), ck, tracks, 0, cx);
         } else if d.tracks.len() <= QUEUE_MAX {
-            self.start_queue(title, None, d.tracks.clone(), i, cx);
+            self.start_queue(title, ck, d.tracks.clone(), i, cx);
         } else {
             let tracks: Vec<_> = d.tracks.iter().skip(i).take(QUEUE_MAX).cloned().collect();
-            self.start_queue(title, None, tracks, 0, cx);
+            self.start_queue(title, ck, tracks, 0, cx);
         }
     }
 
     fn remove_playlist_item(&mut self, key: String, item_id: u64, title: String, cx: &mut Context<Self>) {
-        // Off the page at once (no double removes); the reload confirms.
+        // Off the page at once (no double removes); Plex gets it in turn.
         if let View::Playlist { key: cur, detail: Some(d), .. } = &mut self.view
             && *cur == key
             && let Some(pos) = d.item_ids.iter().position(|&x| x == item_id)
@@ -121,30 +173,143 @@ impl Crate {
             d.tracks.remove(pos);
             d.count = d.count.saturating_sub(1);
             d.loaded = d.loaded.saturating_sub(1);
+        } else {
+            return;
         }
-        self.playlist_removing.insert(item_id);
-        self.forget_playlist_history(&key);
-        let k = key.clone();
-        let rx = crate::plex_call(move |c| async move { c.remove_from_playlist(&k, item_id).await });
+        self.queue_playlist_op(PlJob { key, op: PlOp::Remove { item: item_id }, title }, cx);
+    }
+
+    /// Test hook: move row `from` of the playlist on screen to position `to`.
+    pub(crate) fn move_playlist_row_pub(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if let View::Playlist { key, detail: Some(d), .. } = &self.view
+            && let Some(&item) = d.item_ids.get(from)
+        {
+            let key = key.clone();
+            self.move_playlist_item(key, item, to, cx);
+        }
+    }
+
+    /// Move a regular playlist's item to row `to` of the order on screen.
+    fn move_playlist_item(&mut self, key: String, item: u64, to: usize, cx: &mut Context<Self>) {
+        let View::Playlist { key: cur, detail: Some(d), .. } = &mut self.view else { return };
+        if *cur != key || d.smart {
+            return;
+        }
+        let Some(from) = d.item_ids.iter().position(|&x| x == item) else { return };
+        let to = to.min(d.item_ids.len() - 1);
+        if from == to {
+            return;
+        }
+        let d = Arc::make_mut(d);
+        let id = d.item_ids.remove(from);
+        let tr = d.tracks.remove(from);
+        d.item_ids.insert(to, id);
+        let title = tr.title.clone();
+        d.tracks.insert(to, tr);
+        let after = to.checked_sub(1).map(|p| d.item_ids[p]);
+        self.queue_playlist_op(PlJob { key, op: PlOp::Move { item, after }, title }, cx);
+        cx.notify();
+    }
+
+    /// Edits for `key` not yet confirmed by Plex.
+    pub(crate) fn playlist_pending(&self, key: &str) -> bool {
+        self.playlist_op_running.as_deref() == Some(key) || self.playlist_ops.iter().any(|j| j.key == key)
+    }
+
+    fn queue_playlist_op(&mut self, job: PlJob, cx: &mut Context<Self>) {
+        self.forget_playlist_history(&job.key);
+        self.playlist_ops.push_back(job);
+        if self.playlist_op_running.is_none() {
+            self.run_playlist_op(cx);
+        }
+    }
+
+    /// Send the next queued edit; when a playlist's last one lands, show
+    /// what the server has.
+    fn run_playlist_op(&mut self, cx: &mut Context<Self>) {
+        let Some(job) = self.playlist_ops.pop_front() else {
+            self.playlist_op_running = None;
+            return;
+        };
+        self.playlist_op_running = Some(job.key.clone());
+        let (k, op) = (job.key.clone(), job.op.clone());
+        let rx = crate::plex_call(move |c| async move {
+            match op {
+                PlOp::Remove { item } => c.remove_from_playlist(&k, item).await,
+                PlOp::Move { item, after } => c.move_playlist_item(&k, item, after).await,
+            }
+        });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| {
-                this.playlist_removing.remove(&item_id);
+                let PlJob { key, op, title } = job;
+                let failed = !matches!(res, Ok(Ok(())));
+                match (&op, res) {
+                    (PlOp::Remove { .. }, Ok(Ok(()))) => this.say(format!("Removed \u{201c}{title}\u{201d}")),
+                    (PlOp::Remove { .. }, Ok(Err(e))) => this.say(format!("Couldn't remove \u{201c}{title}\u{201d}: {e:#}")),
+                    (PlOp::Move { .. }, Ok(Err(e))) => this.say(format!("Couldn't move \u{201c}{title}\u{201d}: {e:#}")),
+                    _ => {}
+                }
+                // Later edits were made against the order this one left; after
+                // a failure they'd land in the wrong places.
+                if failed {
+                    let dropped = this.playlist_ops.iter().filter(|j| j.key == key).count();
+                    this.playlist_ops.retain(|j| j.key != key);
+                    if dropped > 0 {
+                        this.say(format!("Couldn't save the playlist changes; showing what Plex has ({dropped} more not sent)"));
+                    }
+                }
+                this.playlist_op_running = None;
                 // Copies pushed to history while this was in flight are stale too.
                 this.forget_playlist_history(&key);
-                match res {
-                    Ok(Ok(())) => this.say(format!("Removed \u{201c}{title}\u{201d}")),
-                    Ok(Err(e)) => this.say(format!("Couldn't remove \u{201c}{title}\u{201d}: {e:#}")),
-                    Err(_) => {}
+                if !this.playlist_pending(&key) {
+                    if matches!(&this.view, View::Playlist { key: cur, .. } if *cur == key) {
+                        this.load_playlist(key.clone(), cx);
+                    }
+                    if matches!(op, PlOp::Remove { .. }) || failed {
+                        this.reload_playlists(cx);
+                    }
                 }
-                // Either way, show what the server has now.
-                if matches!(&this.view, View::Playlist { key: cur, .. } if *cur == key) {
-                    this.load_playlist(key, cx);
-                }
-                this.reload_playlists(cx);
+                this.run_playlist_op(cx);
                 cx.notify();
             })
             .ok();
+        })
+        .detach();
+    }
+
+    /// Scroll the track list while a dragged row sits near its top or
+    /// bottom edge, faster the closer it is.
+    fn playlist_edge_scroll(&mut self, speed: f32, cx: &mut Context<Self>) {
+        self.playlist_edge = speed;
+        if speed == 0.0 || self.playlist_edge_ticking {
+            return;
+        }
+        self.playlist_edge_ticking = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                let go = this
+                    .update(cx, |this, cx| {
+                        if this.playlist_edge == 0.0 || !cx.has_active_drag() || !matches!(this.view, View::Playlist { .. }) {
+                            this.playlist_edge = 0.0;
+                            this.playlist_edge_ticking = false;
+                            return false;
+                        }
+                        let h = this.playlist_scroll.0.borrow().base_handle.clone();
+                        let (off, max) = (h.offset(), h.max_offset());
+                        let y = (off.y - px(this.playlist_edge)).clamp(-max.y, px(0.0));
+                        if y != off.y {
+                            h.set_offset(gpui::point(off.x, y));
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !go {
+                    break;
+                }
+            }
         })
         .detach();
     }
@@ -194,7 +359,7 @@ impl Crate {
     /// Delete takes two clicks: the first arms it for a few seconds.
     fn delete_playlist_clicked(&mut self, key: String, title: String, cx: &mut Context<Self>) {
         let armed = self.playlist_delete_armed.as_ref().is_some_and(|(k, at)| *k == key && at.elapsed() < std::time::Duration::from_secs(4));
-        if self.playlist_busy {
+        if self.playlist_busy || self.playlist_pending(&key) {
             self.say("Still saving the last playlist change…");
             return;
         }
@@ -440,15 +605,20 @@ impl Crate {
             n,
             cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                 let t = this.theme.clone();
-                let View::Playlist { key, title, detail: Some(d) } = &this.view else { return Vec::new() };
-                let (key, list_title, smart) = (key.clone(), Self::playlist_queue_name(title, d), d.smart);
-                // The row playing now, when this playlist is what's playing.
-                let playing_key = this
+                let View::Playlist { key, detail: Some(d), .. } = &this.view else { return Vec::new() };
+                let (key, smart) = (key.clone(), d.smart);
+                // The row playing now, when this playlist is what's playing:
+                // by playlist item, so a track listed twice lights up once.
+                let ck = format!("playlist:{key}");
+                let playing_item = this
                     .now
                     .as_ref()
-                    .filter(|n| n.context == list_title)
+                    .filter(|n| n.context_key.as_deref() == Some(ck.as_str()))
                     .and_then(|n| n.tracks.get(n.idx))
-                    .map(|tr| tr.rating_key.clone());
+                    .map(|tr| tr.playlist_item)
+                    .filter(|&id| id > 0);
+                let reorder = !smart && d.item_ids.len() > 1;
+                let last = d.item_ids.len().saturating_sub(1);
                 let rows: Vec<(usize, crate::plex::Track, u64)> = range.filter_map(|i| Some((i, d.tracks.get(i)?.clone(), d.item_ids.get(i).copied().unwrap_or(0)))).collect();
                 rows.into_iter()
                     .map(|(i, tr, item_id)| {
@@ -457,10 +627,52 @@ impl Crate {
                             Some(im) => img(im).size(px(36.0)).rounded(px(4.0)).object_fit(ObjectFit::Cover).into_any_element(),
                             None => gpui::img(this.mark(crate::art::placeholder_for(&tr.thumb))).size(px(36.0)).rounded(px(4.0)).object_fit(ObjectFit::Cover).into_any_element(),
                         };
-                        let playing = playing_key.as_deref() == Some(tr.rating_key.as_str());
+                        let playing = playing_item.is_some() && playing_item == Some(item_id);
                         let (k, name) = (key.clone(), tr.title.clone());
+                        let num = div()
+                            .w(px(40.0))
+                            .h_full()
+                            .relative()
+                            .flex()
+                            .items_center()
+                            .font_family(MONO)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_size(px(13.0))
+                            .text_color(rgb(if playing { t.accent } else { t.muted }))
+                            .child(
+                                div()
+                                    .when(reorder && item_id > 0, |d| d.group_hover("pl-row", |s| s.opacity(0.0)))
+                                    .child(if playing { "▶".to_string() } else { (i + 1).to_string() }),
+                            )
+                            .when(reorder && item_id > 0, |d| {
+                                let drag = RowDrag { key: key.clone(), item: item_id, from: i };
+                                let (gt, ga) = (tr.title.clone(), tr.artist.clone());
+                                let (bg, border, text, muted) = (t.raised, t.line, t.text, t.muted);
+                                d.child(
+                                    div()
+                                        .id(("pl-grip", i))
+                                        .absolute()
+                                        .left(px(-6.0))
+                                        .top_0()
+                                        .bottom_0()
+                                        .w(px(30.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .opacity(0.0)
+                                        .group_hover("pl-row", |s| s.opacity(1.0))
+                                        .cursor_grab()
+                                        .child(icons::icon("grip", 16.0, t.text2))
+                                        .on_click(|_, _, cx| cx.stop_propagation())
+                                        .on_drag(drag, move |_, _, _, cx| {
+                                            let (title, artist) = (gt.clone(), ga.clone());
+                                            cx.new(|_| DragGhost { title, artist, bg, border, text, muted })
+                                        }),
+                                )
+                            });
                         let row = div()
                             .id(("pl-track", i))
+                            .group("pl-row")
                             .h(px(52.0))
                             .w_full()
                             .px(px(12.0))
@@ -471,15 +683,34 @@ impl Crate {
                             .cursor_pointer()
                             .when(playing, |d| d.bg(rgb(t.raised)))
                             .hover(|d| d.bg(rgb(t.raised)))
-                            .child(
-                                div()
-                                    .w(px(40.0))
-                                    .font_family(MONO)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(if playing { t.accent } else { t.muted }))
-                                    .child(if playing { "▶".to_string() } else { (i + 1).to_string() }),
-                            )
+                            .when(reorder && item_id > 0, |d| {
+                                let (accent, kk) = (t.accent, key.clone());
+                                let (k2, target) = (key.clone(), item_id);
+                                d.drag_over::<RowDrag>(move |st, dr, _, _| {
+                                    // A line where the row will land: below
+                                    // this one moving down, above moving up.
+                                    if dr.key != kk || dr.item == target {
+                                        st
+                                    } else if dr.from < i {
+                                        st.border_b_2().border_color(rgb(accent))
+                                    } else {
+                                        st.border_t_2().border_color(rgb(accent))
+                                    }
+                                })
+                                .on_drop(cx.listener(move |this, dr: &RowDrag, _, cx| {
+                                    if dr.key != k2 {
+                                        return;
+                                    }
+                                    let to = match &this.view {
+                                        View::Playlist { detail: Some(d), .. } => d.item_ids.iter().position(|&x| x == target),
+                                        _ => None,
+                                    };
+                                    if let Some(to) = to {
+                                        this.move_playlist_item(k2.clone(), dr.item, to, cx);
+                                    }
+                                }))
+                            })
+                            .child(num)
                             .child(
                                 div()
                                     .flex_1()
@@ -535,6 +766,41 @@ impl Crate {
                                 )
                             }))
                             .on_click(cx.listener(move |this, _, _, cx| this.play_playlist_from(i, false, cx)));
+                        let entity = cx.entity().downgrade();
+                        let (mk, mtr) = (key.clone(), tr.clone());
+                        let can_edit = !smart && item_id > 0;
+                        let row = row.context_menu(move |mut menu, _, _| {
+                            let e = entity.clone();
+                            menu = menu.item(PopupMenuItem::new("Play from here").on_click(move |_, _, cx| {
+                                e.update(cx, |this, cx| this.play_playlist_from(i, false, cx)).ok();
+                            }));
+                            for (label, next) in [("Play next", true), ("Add to queue", false)] {
+                                let (e, tr) = (entity.clone(), mtr.clone());
+                                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                                    let title = tr.title.clone();
+                                    e.update(cx, |this, cx| this.enqueue(vec![tr.clone()], next, title, cx)).ok();
+                                }));
+                            }
+                            if can_edit {
+                                menu = menu.separator();
+                                if reorder {
+                                    for (label, to, show) in [("Move to top", 0, i > 0), ("Move to bottom", last, i < last)] {
+                                        if !show {
+                                            continue;
+                                        }
+                                        let (e, k) = (entity.clone(), mk.clone());
+                                        menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                                            e.update(cx, |this, cx| this.move_playlist_item(k.clone(), item_id, to, cx)).ok();
+                                        }));
+                                    }
+                                }
+                                let (e, k, n) = (entity.clone(), mk.clone(), mtr.title.clone());
+                                menu = menu.item(PopupMenuItem::new("Remove from playlist").on_click(move |_, _, cx| {
+                                    e.update(cx, |this, cx| this.remove_playlist_item(k.clone(), item_id, n.clone(), cx)).ok();
+                                }));
+                            }
+                            menu
+                        });
                         div().w_full().px(px(PAD_X)).child(row)
                     })
                     .collect::<Vec<_>>()
@@ -559,6 +825,19 @@ impl Crate {
                     .flex()
                     .flex_col()
                     .pt(px(4.0))
+                    .on_drag_move::<RowDrag>(cx.listener(|this, ev: &gpui::DragMoveEvent<RowDrag>, _, cx| {
+                        const ZONE: f32 = 56.0;
+                        let (b, y) = (ev.bounds, ev.event.position.y);
+                        let (top, bottom) = (f32::from(y - b.top()), f32::from(b.bottom() - y));
+                        let speed = if top < ZONE {
+                            -(3.0 + 17.0 * ((ZONE - top) / ZONE).min(1.5))
+                        } else if bottom < ZONE {
+                            3.0 + 17.0 * ((ZONE - bottom) / ZONE).min(1.5)
+                        } else {
+                            0.0
+                        };
+                        this.playlist_edge_scroll(speed, cx);
+                    }))
                     .when(detail.is_some_and(|d| d.tracks.is_empty()), |d| {
                         d.child(div().px(px(PAD_X + 12.0)).pt(px(12.0)).text_size(px(13.0)).text_color(rgb(t.muted)).child("This playlist is empty."))
                     })

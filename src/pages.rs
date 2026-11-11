@@ -217,6 +217,7 @@ impl Crate {
                     album_key: it.album_key.clone(),
                     album_title: it.album.clone(),
                     thumb: it.thumb.clone(),
+                    playlist_item: 0,
                 };
                 let (ak, tk) = (it.album_key.clone(), it.rating_key.clone());
                 self.track_row(i, &tr, crate::home::ago(it.viewed_at), t)
@@ -273,7 +274,7 @@ impl Crate {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .child(title("Playlists", format!("{} playlists · click to play", lists.len()), t))
+            .child(title("Playlists", format!("{} playlists · click to open", lists.len()), t))
             .child(div().px(px(PAD_X)).pb(px(40.0)).flex().flex_wrap().gap_x(px(GRID_GAP_X)).gap_y(px(22.0)).children(cards))
             .into_any_element()
     }

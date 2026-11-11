@@ -213,6 +213,7 @@ impl Crate {
             album_key: h.parent_key.clone(),
             album_title: album,
             thumb: h.thumb.clone(),
+            playlist_item: 0,
         }
     }
 

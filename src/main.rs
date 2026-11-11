@@ -121,7 +121,14 @@ struct Crate {
     /// (playlist key, error) when its page failed to load.
     playlist_error: Option<(String, String)>,
     /// Playlist item ids being removed: kept off any page load meanwhile.
-    playlist_removing: HashSet<u64>,
+    /// Playlist edits (removes, moves) waiting to go to Plex, sent one at a
+    /// time in order: each is relative to the order the one before left.
+    playlist_ops: std::collections::VecDeque<crate::playlist_view::PlJob>,
+    /// The playlist whose edit is on its way to Plex now.
+    playlist_op_running: Option<String>,
+    /// Auto-scroll speed (px per tick) while dragging a row near the list's edge.
+    playlist_edge: f32,
+    playlist_edge_ticking: bool,
     /// A playlist's Delete clicked once (key, when): a second click deletes.
     playlist_delete_armed: Option<(String, Instant)>,
     /// A queue waiting on loudness before it starts (its queue_seq); cleared
@@ -256,7 +263,8 @@ struct Crate {
 struct Now {
     /// What started playback: an album title or station name.
     context: String,
-    /// Album rating key when an album is the context.
+    /// Album rating key when an album is the context, or
+    /// "playlist:<key>" when a playlist is.
     context_key: Option<String>,
     tracks: Vec<Track>,
     /// index -> leveling gain the decoder applied, from engine TrackStarted events.
@@ -590,7 +598,7 @@ impl Crate {
                         // Test hooks: CRATE_SONIC_FROM / CRATE_SONIC_TO (track keys) open
                         // Sonic Adventure with that path; CRATE_SONIC_RADIO plays sonic radio.
                         if let (Ok(f), Ok(t)) = (std::env::var("CRATE_SONIC_FROM"), std::env::var("CRATE_SONIC_TO")) {
-                            let mk = |k: String| plex::Track { rating_key: k, title: String::new(), artist: String::new(), duration_ms: 0, part_key: String::new(), album_key: String::new(), album_title: String::new(), thumb: String::new() };
+                            let mk = |k: String| plex::Track { rating_key: k, title: String::new(), artist: String::new(), duration_ms: 0, part_key: String::new(), album_key: String::new(), album_title: String::new(), thumb: String::new(), playlist_item: 0 };
                             this.sonic.from = Some(mk(f));
                             this.sonic.to = Some(mk(t));
                             this.open_sonic(cx);
@@ -745,7 +753,10 @@ impl Crate {
             autoeq_pick_gen: 0,
             playlist_load_gen: 0,
             playlist_error: None,
-            playlist_removing: HashSet::new(),
+            playlist_ops: Default::default(),
+            playlist_op_running: None,
+            playlist_edge: 0.0,
+            playlist_edge_ticking: false,
             playlist_delete_armed: None,
             eq_preset,
             eq_custom,
@@ -2182,6 +2193,12 @@ impl Render for Crate {
                                 }
                             }
                             k if k.starts_with("plrm:") => this.remove_playlist_row(k[5..].parse().unwrap_or(0), cx),
+                            // plmove:FROM:TO — move row FROM to position TO (0-based).
+                            k if k.starts_with("plmove:") => {
+                                let mut it = k[7..].split(':').map(|v| v.parse::<usize>().unwrap_or(0));
+                                let (f, t) = (it.next().unwrap_or(0), it.next().unwrap_or(0));
+                                this.move_playlist_row_pub(f, t, cx);
+                            }
                             k if k.starts_with("pladd:") => this.add_selection_to_playlist(k[6..].to_string(), "test".into(), cx),
                             "j" => this.move_cursor(1, cx),
                             "k" => this.move_cursor(-1, cx),

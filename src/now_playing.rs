@@ -51,7 +51,9 @@ impl Crate {
         let paused = n.paused || n.finished;
 
         // Top row.
-        let kind = if n.context_key.is_some() {
+        let kind = if n.context_key.as_deref().is_some_and(|k| k.starts_with("playlist:")) {
+            "PLAYING FROM PLAYLIST"
+        } else if n.context_key.is_some() {
             "PLAYING FROM ALBUM"
         } else if n.refill.is_some() {
             "PLAYING FROM RADIO"
