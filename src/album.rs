@@ -218,10 +218,10 @@ impl Crate {
                 }
             })))
             .child(div().flex_1())
-            .child({
+            .when(detail.is_some(), |d| d.child({
                 let k = album.rating_key.clone();
                 rate_stars(format!("ar-{k}"), detail.as_ref().and_then(|d| d.rating), 18.0, t.accent, t.line, cx, move |this, n, cx| this.rate_album(k.clone(), n, cx))
-            });
+            }));
 
         // Track table.
         let head = div()

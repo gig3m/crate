@@ -661,7 +661,13 @@ impl Crate {
     fn play_track_in_album(&mut self, album_key: &str, track_key: String, cx: &mut Context<Self>) {
         let Some(album) = self.albums.iter().find(|a| a.rating_key == album_key).cloned() else { return };
         self.request_art(&album);
+        self.play_intent += 1;
+        let intent = self.play_intent;
         self.with_tracks(album, cx, move |this, album, tracks, cx| {
+            // Something else was played since the click.
+            if this.play_intent != intent {
+                return;
+            }
             let start = tracks.iter().position(|t| t.rating_key == track_key).unwrap_or(0);
             this.play_tracks(album, tracks, start, cx);
         });
@@ -746,8 +752,10 @@ impl Crate {
         self.request_art(&album);
         self.status = format!("Loading {}…", album.title).into();
         cx.notify();
-        self.with_tracks(album, cx, |this, album, tracks, cx| {
-            if !tracks.is_empty() {
+        self.play_intent += 1;
+        let intent = self.play_intent;
+        self.with_tracks(album, cx, move |this, album, tracks, cx| {
+            if this.play_intent == intent && !tracks.is_empty() {
                 this.play_tracks(album, tracks, 0, cx);
             }
         });
