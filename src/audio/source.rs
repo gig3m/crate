@@ -132,7 +132,8 @@ struct Transcode {
 
 impl Drop for Transcode {
     fn drop(&mut self) {
-        if self.p.st.done.load(Ordering::Acquire) {
+        // Done and no error: the whole transcode arrived, nothing to stop.
+        if self.p.st.done.load(Ordering::Acquire) && self.p.st.error.lock().unwrap().is_none() {
             return;
         }
         // Cancel first, so the stream the stop closes is never published.

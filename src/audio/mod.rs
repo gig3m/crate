@@ -470,6 +470,17 @@ fn decoder_thread(
                     Err(e2) => {
                         eprintln!("[engine] skipping {}: {e:#}; retry: {e2:#}", src.label());
                         let _ = ev.send(Event::Skipped { index, error: format!("{e2:#}") });
+                        // The held end was kept for a fade into the skipped
+                        // track; the next one's fade was decided against it
+                        // too. Play the end as is, so nothing crossfades.
+                        if !tail.is_empty() {
+                            drained.clear();
+                            drained.extend(tail.drain(..));
+                            let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, stream_frames: &mut stream_frames };
+                            if !out.push(&drained, tail_rate, &cmd_tx, &stats) {
+                                return Ok(());
+                            }
+                        }
                         continue;
                     }
                 }

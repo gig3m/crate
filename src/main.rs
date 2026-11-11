@@ -237,6 +237,9 @@ struct Now {
     formats: HashMap<usize, (u32, u32)>,
     /// index -> transcode bitrate (kbps) of what the engine opened; absent = original file.
     transcoded: HashMap<usize, u32>,
+    /// Furthest queue index the engine skipped (couldn't open): counts as
+    /// reached for the radio refill, though it was never heard.
+    skipped_to: usize,
     /// Album track index the current engine started at, and the offset into it.
     start_idx: usize,
     start_ms: u64,
@@ -1129,6 +1132,7 @@ impl Crate {
             tracks,
             formats: HashMap::new(),
             transcoded: HashMap::new(),
+            skipped_to: 0,
             level: HashMap::new(),
             start_idx: 0,
             start_ms: 0,
@@ -1531,6 +1535,7 @@ impl Crate {
                 AudioEvent::Skipped { index, error } => {
                     let title = now.tracks.get(now.start_idx + index).map(|t| t.title.clone()).unwrap_or_default();
                     eprintln!("[crate] skipped #{} {title}: {error}", now.start_idx + index);
+                    now.skipped_to = now.skipped_to.max(now.start_idx + index);
                     self.status = format!("Skipped \u{201c}{title}\u{201d}: couldn't load it ({error})").into();
                 }
                 AudioEvent::Reconnected { from, to, silent_ms } => {
@@ -1588,7 +1593,7 @@ impl Crate {
         // Radio: fetch the next window when two tracks from the end.
         if let Some(key) = now.refill.clone()
             && !now.refilling
-            && now.idx + 2 >= now.tracks.len()
+            && now.idx.max(now.skipped_to) + 2 >= now.tracks.len()
         {
             now.refilling = true;
             let qid = now.queue_id;
