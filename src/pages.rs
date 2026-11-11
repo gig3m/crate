@@ -25,7 +25,7 @@ fn title(s: &'static str, sub: String, t: &Theme) -> gpui::Div {
 impl Crate {
     /// Data a page needs when it opens.
     pub(crate) fn load_page(&mut self, id: &str, cx: &mut Context<Self>) {
-        let section = std::env::var("PLEX_SECTION").unwrap_or_else(|_| "5".into());
+        let section = crate::section();
         match id {
             "history" => {
                 let rx = crate::plex_call(move |c| async move { c.history(&section, 200).await });

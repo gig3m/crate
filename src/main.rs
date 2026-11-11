@@ -1,13 +1,15 @@
 //! Crate GPUI spike: themed shell, virtualized album grid over a real Plex
 //! library, cover art fetched on a tokio side thread, and a scroll benchmark.
 //!
-//! Env:
-//!   PLEX_URL      (default http://plex-server:32400)
-//!   PLEX_TOKEN    (required; set in the environment)
-//!   PLEX_SECTION  (default 5)
+//! Sign-in: Crate keeps its Plex account in ~/.config/crate/account.toml (0600)
+//! and shows a sign-in screen when there's none. Flags: --sign-out,
+//! --import-env (save PLEX_URL/PLEX_TOKEN/PLEX_SECTION from the environment).
+//! Env (overrides the stored account):
+//!   PLEX_URL, PLEX_TOKEN, PLEX_SECTION
 //!   CRATE_ITEMS   (default 50000; real albums are cycled to fill)
 //!   CRATE_BENCH   (set: auto-scroll, print frame stats, quit)
 
+mod account;
 mod album;
 mod art;
 mod artist;
@@ -22,6 +24,7 @@ mod now_playing;
 mod tile;
 mod player_bar;
 mod settings;
+mod setup;
 mod shell;
 mod stations;
 mod plex;
@@ -1615,6 +1618,53 @@ impl Render for Crate {
     }
 }
 
+/// The music library section key for this account.
+static SECTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub(crate) fn section() -> String {
+    SECTION.get().cloned().unwrap_or_else(|| "1".into())
+}
+
+fn load_fonts(cx: &mut App) {
+    // Static Inter weights: GPUI on Linux renders a variable font at one weight.
+    cx.text_system()
+        .add_fonts(vec![
+            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Regular.ttf").as_slice()),
+            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Medium.ttf").as_slice()),
+            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-SemiBold.ttf").as_slice()),
+            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Bold.ttf").as_slice()),
+        ])
+        .expect("bundled fonts");
+}
+
+/// No account yet: the sign-in window. It relaunches Crate when done.
+fn run_setup(rt: tokio::runtime::Runtime) {
+    let handle = rt.handle().clone();
+    std::thread::spawn(move || rt.block_on(std::future::pending::<()>()));
+    gpui_platform::application().with_assets(icons::Icons).run(move |cx: &mut App| {
+        gpui_component::init(cx);
+        load_fonts(cx);
+        cx.on_window_closed(|cx, _| cx.quit()).detach();
+        let (t, _) = Theme::load(theme::saved_mode());
+        apply_component_theme(&t, None, cx);
+        let bounds = Bounds::centered(None, size(px(760.0), px(560.0)), cx);
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                app_id: Some("crate".into()),
+                titlebar: Some(gpui::TitlebarOptions { title: Some("Crate — sign in".into()), ..Default::default() }),
+                ..Default::default()
+            },
+            move |window, cx| {
+                let view = cx.new(|cx| setup::Setup::new(window, cx, handle.clone()));
+                cx.new(|cx| gpui_component::Root::new(view, window, cx))
+            },
+        )
+        .unwrap();
+        cx.activate(true);
+    });
+}
+
 /// The tokio runtime and Plex client, for one-off requests from the UI.
 static PLEX: std::sync::OnceLock<(tokio::runtime::Handle, plex::Client)> = std::sync::OnceLock::new();
 
@@ -1693,7 +1743,7 @@ fn fetch_more(key: String) -> tokio::sync::oneshot::Receiver<anyhow::Result<Vec<
     plex_call(move |c| async move {
         match key.strip_prefix("query:") {
             Some(filter) => {
-                let section = std::env::var("PLEX_SECTION").unwrap_or_else(|_| "5".into());
+                let section = crate::section();
                 c.random_tracks(&section, filter, 100).await
             }
             None => c.play_queue(&key).await.map(|(_, t)| t),
@@ -1719,9 +1769,33 @@ fn migrate_old_caches() {
 fn main() {
     migrate_old_caches();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,zbus=warn")).init();
-    let base = std::env::var("PLEX_URL").unwrap_or_else(|_| "http://plex-server:32400".into());
-    let token = std::env::var("PLEX_TOKEN").expect("PLEX_TOKEN not set; set it in the environment");
-    let section = std::env::var("PLEX_SECTION").unwrap_or_else(|_| "5".into());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--sign-out") {
+        match account::remove() {
+            Ok(()) => println!("Signed out: Crate will show its sign-in screen next launch."),
+            Err(e) => eprintln!("couldn't remove the account: {e}"),
+        }
+        return;
+    }
+    if args.iter().any(|a| a == "--import-env") {
+        // Save PLEX_URL / PLEX_TOKEN / PLEX_SECTION from the environment as
+        // Crate's own sign-in (the token is never printed).
+        match account::load().filter(|_| std::env::var_os("PLEX_TOKEN").is_some()) {
+            Some(a) => match account::save(&a) {
+                Ok(()) => println!("Saved the Plex sign-in for {} (library {}).", a.url, a.section),
+                Err(e) => eprintln!("couldn't save: {e:#}"),
+            },
+            None => eprintln!("--import-env needs PLEX_TOKEN (and PLEX_URL, PLEX_SECTION) in the environment"),
+        }
+        return;
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let Some(acct) = account::load() else {
+        run_setup(rt);
+        return;
+    };
+    let (base, token, section) = (acct.url.clone(), acct.token.clone(), acct.section.clone());
+    let _ = SECTION.set(section.clone());
 
     // tokio lives on its own threads; GPUI never sees it except via channels.
     let (art_tx, art_rx_req) = mpsc::unbounded_channel::<ArtRequest>();
@@ -1737,7 +1811,6 @@ fn main() {
     // MPRIS starts at 1.0; tell it the saved level.
     let _ = mpris_tx.send(MprisUpdate::Volume(theme::saved_volume() as f64));
     let client = plex::Client::new(base, token);
-    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     let _ = PLEX.set((rt.handle().clone(), client.clone()));
     std::thread::Builder::new()
         .name("tokio".into())
@@ -1750,15 +1823,7 @@ fn main() {
         gpui_component::init(cx);
         // Closing the window quits (so the on-quit report goes out).
         cx.on_window_closed(|cx, _| cx.quit()).detach();
-        // Static Inter weights: GPUI on Linux renders a variable font at one weight.
-        cx.text_system()
-            .add_fonts(vec![
-                std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Regular.ttf").as_slice()),
-                std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Medium.ttf").as_slice()),
-                std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-SemiBold.ttf").as_slice()),
-                std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Bold.ttf").as_slice()),
-            ])
-            .expect("bundled fonts");
+        load_fonts(cx);
         cx.bind_keys([
             gpui::KeyBinding::new("space", PlayPause, Some("Crate && !Input")),
             gpui::KeyBinding::new("n", NextTrack, Some("Crate && !Input")),

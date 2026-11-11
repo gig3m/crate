@@ -341,6 +341,16 @@ impl Crate {
                 .item(PopupMenuItem::new("Output device…").on_click(move |_, _, cx| {
                     audio.update(cx, |this, cx| this.open_audio_settings(cx)).ok();
                 }))
+                .separator()
+                .item(PopupMenuItem::new("Sign out of Plex").on_click(move |_, _, cx| {
+                    // Forget the stored sign-in and relaunch into the sign-in screen.
+                    if crate::account::remove().is_ok() {
+                        if let Ok(exe) = std::env::current_exe() {
+                            let _ = std::process::Command::new(exe).env_remove("PLEX_TOKEN").spawn();
+                        }
+                        cx.quit();
+                    }
+                }))
             })
             .into_any_element()
     }

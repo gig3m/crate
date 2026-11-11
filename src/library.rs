@@ -76,7 +76,7 @@ impl Crate {
             return;
         }
         let gen_id = self.lib_gen;
-        let section = std::env::var("PLEX_SECTION").unwrap_or_else(|_| "5".into());
+        let section = crate::section();
         let query = self.lib_filters.iter().map(|f| f.query.as_str()).chain(std::iter::once(self.lib_sort.param())).collect::<Vec<_>>().join("&");
         let rx = crate::plex_call(move |c| async move { c.album_keys_where(&section, &query).await });
         cx.spawn(async move |this, cx| {
