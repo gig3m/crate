@@ -224,9 +224,14 @@ impl Crate {
         };
         // The artist link: the track's own artist when the library has them
         // (compilations, soundtracks), else the album's.
-        let (ak, an) = match self.albums.iter().find(|a| a.artist == tr.artist && !a.artist_key.is_empty()) {
-            Some(a) => (Some(a.artist_key.clone()), tr.artist.clone()),
-            None => (self.albums.iter().find(|a| a.rating_key == tr.album_key).map(|a| a.artist_key.clone()), tr.album_artist.clone()),
+        let album_artist = || (self.albums.iter().find(|a| a.rating_key == tr.album_key).map(|a| a.artist_key.clone()), tr.album_artist.clone());
+        let (ak, an) = if tr.artist == tr.album_artist || tr.album_artist.is_empty() {
+            album_artist()
+        } else {
+            match self.albums.iter().find(|a| a.artist == tr.artist && !a.artist_key.is_empty()) {
+                Some(a) => (Some(a.artist_key.clone()), tr.artist.clone()),
+                None => album_artist(),
+            }
         };
         let left = div()
             .w(px(art))

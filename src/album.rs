@@ -156,7 +156,7 @@ impl Crate {
         .detach();
     }
 
-    fn album_tracks(&self) -> Option<Vec<Track>> {
+    pub(crate) fn album_tracks(&self) -> Option<Vec<Track>> {
         match &self.view {
             View::Album { tracks: Some(tr), .. } => Some(tr.clone()),
             _ => None,
@@ -390,22 +390,18 @@ impl Crate {
             .child(div().w(px(56.0)).flex().justify_end().child("PLAYS"))
             .child(div().w(px(64.0)).flex().justify_end().child("TIME"));
         // Multi-disc albums get a header per disc.
-        let discs = tracks.map(|v| {
-            let mut d: Vec<u32> = v.iter().map(|t| t.disc).collect();
-            d.sort_unstable();
-            d.dedup();
-            d.len()
-        });
-        let multi_disc = discs.unwrap_or(0) > 1;
+        let headers = tracks.map(|v| disc_headers(v)).unwrap_or_default();
         let rows: Vec<gpui::AnyElement> = tracks
             .map(|v| {
                 v.iter()
                     .enumerate()
                     .flat_map(|(i, tr)| {
-                        let new_disc = multi_disc && (i == 0 || v[i - 1].disc != tr.disc);
-                        let header = new_disc.then(|| {
+                        let header = headers.get(i).copied().unwrap_or(false).then(|| {
+                            // Fixed height: keys.rs mirrors it (DISC_HEAD_H).
                             div()
-                                .pt(px(if i == 0 { 8.0 } else { 20.0 }))
+                                .h(px(crate::keys::DISC_HEAD_H))
+                                .flex()
+                                .items_end()
                                 .pb(px(6.0))
                                 .px(px(12.0))
                                 .font_family(MONO)
@@ -633,6 +629,19 @@ const EDITION_WORDS: [&str; 23] = [
 const AMBIGUOUS: [&str; 6] = ["clean", "special", "mono", "stereo", "explicit", "standard"];
 /// Words allowed alongside them in a " - " / ": " suffix ("20th Anniversary Edition").
 const EDITION_FILLER: [&str; 12] = ["the", "and", "with", "track", "tracks", "us", "u.s.", "uk", "international", "japanese", "limited", "digital"];
+
+/// Which track rows start a disc and get a DISC header (multi-disc albums
+/// only; a missing disc number counts as disc 1).
+pub(crate) fn disc_headers(tracks: &[Track]) -> Vec<bool> {
+    let disc = |t: &Track| t.disc.max(1);
+    let mut d: Vec<u32> = tracks.iter().map(disc).collect();
+    d.sort_unstable();
+    d.dedup();
+    if d.len() < 2 {
+        return vec![false; tracks.len()];
+    }
+    tracks.iter().enumerate().map(|(i, t)| i == 0 || disc(&tracks[i - 1]) != disc(t)).collect()
+}
 
 fn words(s: &str) -> Vec<String> {
     s.split(|c: char| c.is_whitespace() || matches!(c, ',' | '/' | '-' | '(' | ')' | '[' | ']' | '&' | '+'))

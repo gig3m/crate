@@ -12,6 +12,8 @@ use crate::{Crate, View};
 /// scroll's children being header, actions, body in that order.
 const TRACK_HEAD_H: f32 = 25.0;
 const TRACK_ROW_H: f32 = 52.0;
+/// A DISC header row on multi-disc album pages (album.rs).
+pub(crate) const DISC_HEAD_H: f32 = 36.0;
 
 impl Crate {
     /// Length of the list the cursor moves through on this view.
@@ -40,7 +42,9 @@ impl Crate {
             View::Album { .. } => {
                 let (Some(body), view) = (self.album_scroll.bounds_for_item(2), self.album_scroll.bounds()) else { return 0 };
                 let above: f32 = (view.top() - body.top()).into();
-                ((above - TRACK_HEAD_H) / TRACK_ROW_H - 0.01).ceil().max(0.0) as usize
+                // The first row whose top is on screen.
+                let n = self.album_tracks().map(|t| t.len()).unwrap_or(0);
+                (0..n).find(|&i| self.track_y(i) >= above - 0.5).unwrap_or(n.saturating_sub(1))
             }
             _ => 0,
         }
@@ -70,11 +74,19 @@ impl Crate {
         cx.notify();
     }
 
+    /// Track row `i`'s top below the album body's top, counting the DISC
+    /// headers above it.
+    fn track_y(&self, i: usize) -> f32 {
+        let headers = self.album_tracks().map(|t| crate::album::disc_headers(&t)).unwrap_or_default();
+        let above = headers.iter().take(i + 1).filter(|h| **h).count();
+        TRACK_HEAD_H + TRACK_ROW_H * i as f32 + DISC_HEAD_H * above as f32
+    }
+
     /// Keep track row `i` inside the album view's viewport.
     fn reveal_track(&self, i: usize) {
         // Children of the album scroll: header, actions, body (table + aside).
         let (Some(body), view) = (self.album_scroll.bounds_for_item(2), self.album_scroll.bounds()) else { return };
-        let top = body.top() + px(TRACK_HEAD_H + TRACK_ROW_H * i as f32);
+        let top = body.top() + px(self.track_y(i));
         let bottom = top + px(TRACK_ROW_H);
         let mut off = self.album_scroll.offset();
         let margin = px(12.0);
