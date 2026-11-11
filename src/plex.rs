@@ -1601,15 +1601,33 @@ pub fn audio_cache_dir() -> std::path::PathBuf {
     .clone()
 }
 
-/// Most the streamed-track cache may hold before the least recently played
+/// Most (10 GiB) the streamed-track cache may hold before the least recently played
 /// tracks go.
 pub const AUDIO_CACHE_MAX: u64 = 10 << 30;
 
-/// Delete cached tracks (`part-*`, finished files only), least recently
-/// played first, until the cache is under `max` bytes. Files used in the
-/// last hour stay: one may be about to open. Returns (files, bytes) removed.
+/// Delete cached tracks (`part-*`), least recently played first, until the
+/// cache is under `max` bytes. Files used in the last hour stay. (An open
+/// that races a delete re-downloads: see `open_cached`.) Downloads left
+/// behind by a process that died (`part-<id>.part.<pid>.<n>`, pid gone, or
+/// over a day old) go first. Returns (files, bytes) removed.
 pub fn prune_audio_cache(dir: &std::path::Path, max: u64) -> (usize, u64) {
     let now = std::time::SystemTime::now();
+    let age = |m: &std::fs::Metadata| m.modified().ok().and_then(|t| now.duration_since(t).ok()).unwrap_or_default();
+    let (mut n, mut freed) = (0, 0);
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some((_, rest)) = name.split_once(".part.") else { continue };
+        let Some(m) = e.metadata().ok().filter(|m| m.is_file()) else { continue };
+        let pid = rest.split('.').next().unwrap_or_default();
+        let dead = pid.parse::<u32>().is_ok_and(|p| !std::path::Path::new(&format!("/proc/{p}")).exists());
+        let old = age(&m) > std::time::Duration::from_secs(86400);
+        // A dead pid's file could belong to a live download only if the
+        // pid was reused; the 10-minute floor covers a fresh one.
+        if ((dead && age(&m) > std::time::Duration::from_secs(600)) || old) && std::fs::remove_file(e.path()).is_ok() {
+            n += 1;
+            freed += m.len();
+        }
+    }
     let mut files: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -1626,7 +1644,6 @@ pub fn prune_audio_cache(dir: &std::path::Path, max: u64) -> (usize, u64) {
         .collect();
     let mut total: u64 = files.iter().map(|f| f.1).sum();
     files.sort_by_key(|f| f.0);
-    let (mut n, mut freed) = (0, 0);
     for (when, len, path) in files {
         if total <= max {
             break;
@@ -1660,9 +1677,10 @@ mod audio_cache_tests {
         }
         // 300 bytes of finished parts, cap 150: the oldest goes, then the
         // next; the fresh one stays even though still over.
-        assert_eq!(super::prune_audio_cache(&dir, 150), (2, 200));
+        // part-4 is an old leftover download: it goes too.
+        assert_eq!(super::prune_audio_cache(&dir, 150), (3, 300));
         let left: std::collections::BTreeSet<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into()).collect();
-        assert_eq!(left, ["art-1.jpg", "part-3.flac", "part-4.part.9.0"].into_iter().map(String::from).collect());
+        assert_eq!(left, ["art-1.jpg", "part-3.flac"].into_iter().map(String::from).collect());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

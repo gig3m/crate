@@ -2687,7 +2687,7 @@ fn main() {
             loop {
                 let (n, bytes) = plex::prune_audio_cache(&dir, plex::AUDIO_CACHE_MAX);
                 if n > 0 {
-                    eprintln!("[crate] cache: removed {n} tracks ({:.1} GB)", bytes as f64 / 1e9);
+                    eprintln!("[crate] cache: removed {n} files ({:.1} GiB)", bytes as f64 / (1u64 << 30) as f64);
                 }
                 std::thread::sleep(std::time::Duration::from_secs(1800));
             }

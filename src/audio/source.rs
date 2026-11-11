@@ -56,6 +56,14 @@ impl Source {
     /// Open for decoding. For HTTP, a complete cached copy is used if present.
     /// `stop` aborts a read that is waiting on the network.
     pub fn open(&self, stop: Arc<AtomicBool>) -> anyhow::Result<Box<dyn MediaSource>> {
+        // A complete cached copy, opened once: a prune that removes it after
+        // this still leaves the open file readable; one that removed it
+        // before (NotFound) means download it again.
+        if let Source::Http { cache, prepare, .. } = self
+            && let Some(f) = open_cached(cache)?
+        {
+            return Ok(if prepare.is_some() { Box::new(NoLength(f)) } else { Box::new(f) });
+        }
         match self {
             Source::File(p) => Ok(Box::new(File::open(p)?)),
             // Plex's transcoded MP3 is VBR without a Xing header: symphonia
@@ -63,8 +71,6 @@ impl Source {
             // decoded audio and refuse seeks past that guess. Unseekable
             // with no length, it estimates nothing; seeks scan forward from
             // the start, which is fine since every seek reopens the source.
-            Source::Http { cache, prepare: Some(_), .. } if cache.exists() => Ok(Box::new(NoLength(open_cached(cache)?))),
-            Source::Http { cache, .. } if cache.exists() => Ok(Box::new(open_cached(cache)?)),
             Source::Http { url, token, cache, prepare: None, .. } => Ok(Box::new(Progressive::start(url, token, CLIENT, cache, stop)?)),
             Source::Http { url, token, cache, prepare: Some(prepare), .. } => {
                 // One transcode session per open, so a reopen (seek, restart)
@@ -216,13 +222,24 @@ impl Drop for Progressive {
 
 static ATTEMPT: AtomicU64 = AtomicU64::new(0);
 
-/// Open a cached track and mark it just played, so the cache's pruning
-/// (oldest modified first) keeps what's in use.
-fn open_cached(path: &std::path::Path) -> std::io::Result<File> {
-    if let Ok(f) = File::options().write(true).open(path) {
-        let _ = f.set_modified(std::time::SystemTime::now());
+/// Open a cached track (None when there isn't one) and mark it just played
+/// through the same descriptor, so the cache's pruning (oldest modified
+/// first) keeps what's in use. Read-only when it can't be written (then
+/// it isn't marked, and ages from its download).
+fn open_cached(path: &std::path::Path) -> std::io::Result<Option<File>> {
+    use std::io::ErrorKind::NotFound;
+    match File::options().read(true).write(true).open(path) {
+        Ok(f) => {
+            let _ = f.set_modified(std::time::SystemTime::now());
+            Ok(Some(f))
+        }
+        Err(e) if e.kind() == NotFound => Ok(None),
+        Err(_) => match File::open(path) {
+            Ok(f) => Ok(Some(f)),
+            Err(e) if e.kind() == NotFound => Ok(None),
+            Err(e) => Err(e),
+        },
     }
-    File::open(path)
 }
 
 impl Progressive {
