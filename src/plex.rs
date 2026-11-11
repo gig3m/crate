@@ -252,6 +252,8 @@ pub struct ArtistInfo {
     pub similar: Vec<String>,
     pub blur: Option<[u32; 4]>,
     pub plays: u64,
+    /// Albums by other artists with tracks credited to this one (album keys).
+    pub appears_on: Vec<String>,
 }
 
 pub struct ArtistRequest {
@@ -1183,7 +1185,10 @@ impl Client {
                 Some((t.into_track()?, key, title, plays))
             })
             .collect();
+        let name = m["title"].as_str().unwrap_or_default().to_string();
+        let appears_on = self.appears_on(key, &name, section).await.unwrap_or_default();
         Ok(ArtistInfo {
+            appears_on,
             title: m["title"].as_str().unwrap_or_default().to_string(),
             summary: m["summary"].as_str().unwrap_or_default().replace("\\&", "&"),
             thumb: m["thumb"].as_str().unwrap_or_default().to_string(),
@@ -1193,6 +1198,62 @@ impl Client {
             blur: (|| Some([hex("topLeft")?, hex("topRight")?, hex("bottomRight")?, hex("bottomLeft")?]))(),
             plays: m["viewCount"].as_u64().unwrap_or(0),
         })
+    }
+
+    /// Albums by other artists where this artist is credited on a track (the
+    /// track artist, or "feat. <name>" in the title). Plex has no hub for
+    /// this, so it comes from search: best effort, up to 50 track matches.
+    async fn appears_on(&self, key: &str, name: &str, section: &str) -> anyhow::Result<Vec<String>> {
+        if name.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let v: serde_json::Value =
+            self.get(&format!("/hubs/search?query={}&sectionId={section}&limit=50", urlencode(name))).await?.json().await.context("appears on")?;
+        let lname = name.to_lowercase();
+        let mut out: Vec<String> = Vec::new();
+        for hub in v["MediaContainer"]["Hub"].as_array().into_iter().flatten().filter(|h| h["type"] == "track") {
+            for t in hub["Metadata"].as_array().into_iter().flatten() {
+                if t["grandparentRatingKey"].as_str() == Some(key) {
+                    continue;
+                }
+                let credited = t["originalTitle"].as_str().is_some_and(|o| o.to_lowercase().contains(&lname))
+                    || t["title"].as_str().is_some_and(|s| {
+                        let s = s.to_lowercase();
+                        ["feat. ", "feat ", "ft. ", "featuring ", "with "].iter().any(|f| s.contains(&format!("{f}{lname}")))
+                    });
+                if credited
+                    && let Some(album) = t["parentRatingKey"].as_str()
+                    && !out.iter().any(|a| a == album)
+                {
+                    out.push(album.to_string());
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Mix builder: each artist's most-played tracks, interleaved
+    /// (this artist, then each similar one in turn).
+    pub async fn artist_mix(&self, section: &str, keys: Vec<String>, per: usize) -> anyhow::Result<Vec<Track>> {
+        let mut lists = Vec::new();
+        for k in &keys {
+            let env: Envelope = self
+                .get(&format!("/library/sections/{section}/all?type=10&artist.id={k}&sort=viewCount:desc&X-Plex-Container-Start=0&X-Plex-Container-Size={per}"))
+                .await?
+                .json()
+                .await
+                .context("artist mix")?;
+            lists.push(env.mc.metadata.into_iter().filter_map(Meta::into_track).take(per).collect::<Vec<_>>());
+        }
+        let mut out = Vec::new();
+        for i in 0..per {
+            for l in &lists {
+                if let Some(t) = l.get(i) {
+                    out.push(t.clone());
+                }
+            }
+        }
+        Ok(out)
     }
 
     pub async fn art(&self, thumb: &str) -> anyhow::Result<Vec<u8>> {

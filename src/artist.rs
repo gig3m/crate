@@ -126,6 +126,7 @@ impl Crate {
         let all: Vec<_> = info.map(|i| i.popular.iter().map(|p| p.0.clone()).collect()).unwrap_or_default();
         let (all1, all2) = (all.clone(), all);
         let (n1, n2, n3, k3) = (name.clone(), name.clone(), name.clone(), key.to_string());
+        let (n4, k4) = (name.clone(), key.to_string());
         let actions = div()
             .px(px(PAD_X))
             .pt(px(16.0))
@@ -160,7 +161,8 @@ impl Crate {
             })))
             .child(pill("artist-radio", "Artist radio").on_click(cx.listener(move |this, _, _, cx| {
                 this.play_radio(&k3, format!("{n3} radio"), cx);
-            })));
+            })))
+            .child(pill("artist-mix", "Mix builder").on_click(cx.listener(move |this, _, _, cx| this.build_artist_mix(k4.clone(), n4.clone(), cx))));
 
         // Popular in your library: top five with a play-count bar.
         let top = info.map(|i| i.popular.iter().take(5).cloned().collect::<Vec<_>>()).unwrap_or_default();
@@ -348,6 +350,10 @@ impl Crate {
                     .on_click(cx.listener(move |this, _, _, cx| this.open_artist(k.clone(), n2.clone(), cx)))
             })
             .collect();
+        // Appears on (canvas): albums by others with tracks credited to this artist.
+        let appears: Vec<(usize, Album)> = info
+            .map(|i| i.appears_on.iter().filter_map(|k| self.albums.iter().position(|a| a.rating_key == *k).map(|ix| (ix, self.albums[ix].clone()))).take(6).collect())
+            .unwrap_or_default();
         let aside = div()
             .w(px(340.0))
             .flex_none()
@@ -362,6 +368,36 @@ impl Crate {
                         .gap(px(14.0))
                         .child(label(if sonic_label { "SONICALLY SIMILAR ARTISTS" } else { "SIMILAR ARTISTS IN YOUR LIBRARY" }, t.discovery))
                         .child(div().flex().flex_wrap().gap(px(14.0)).children(sim_cards)),
+                )
+            })
+            .when(!appears.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .child(label("APPEARS ON", t.muted))
+                        .children(appears.into_iter().map(|(i, a)| {
+                            div()
+                                .id(("appears", i))
+                                .flex()
+                                .items_center()
+                                .gap(px(12.0))
+                                .cursor_pointer()
+                                .rounded(px(8.0))
+                                .hover(|d| d.bg(rgb(t.raised)))
+                                .child(self.cover_or_mark(&a.thumb, &a.rating_key, 44.0, 4.0))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(div().text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.text_strong)).truncate().child(a.title.clone()))
+                                        .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(if a.year.is_empty() { a.artist.clone() } else { format!("{} · {}", a.artist, a.year) })),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| this.open_album(i, cx)))
+                        })),
                 )
             })
             .when_some(info.filter(|i| !i.summary.is_empty()), |d, i| {
@@ -395,10 +431,48 @@ impl Crate {
             .into_any_element()
     }
 
+    /// Mix builder (canvas): this artist's most-played tracks interleaved with
+    /// those of the three most sonically similar artists in the library.
+    pub(crate) fn build_artist_mix(&mut self, key: String, name: String, cx: &mut Context<Self>) {
+        let mut keys = vec![key.clone()];
+        if let Some(Some(sim)) = self.sonic_artists.get(&key) {
+            keys.extend(sim.iter().take(3).map(|s| s.0.clone()));
+        }
+        let with_others = keys.len() > 1;
+        self.play_intent += 1;
+        let intent = self.play_intent;
+        self.say(format!("Building {name} mix…"));
+        cx.notify();
+        let section = crate::section();
+        let rx = crate::plex_call(move |c| async move { c.artist_mix(&section, keys, 8).await });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                if this.play_intent != intent {
+                    return;
+                }
+                match res {
+                    Ok(Ok(tracks)) if !tracks.is_empty() => {
+                        let title = if with_others { format!("{name} + similar mix") } else { format!("{name} mix") };
+                        this.start_queue(title, None, tracks, 0, cx);
+                    }
+                    Ok(Ok(_)) => this.say(format!("{name}: nothing to mix")),
+                    Ok(Err(e)) => this.say(format!("Mix builder: {e:#}")),
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Art the artist page needs once its info arrives.
     pub(crate) fn request_artist_art(&mut self, info: &ArtistInfo) {
         self.request_thumb(&info.thumb.clone());
-        let thumbs: Vec<String> = info.popular.iter().take(5).map(|p| p.0.thumb.clone()).collect();
+        let mut thumbs: Vec<String> = info.popular.iter().take(5).map(|p| p.0.thumb.clone()).collect();
+        // Appears-on album covers.
+        thumbs.extend(info.appears_on.iter().filter_map(|k| self.albums.iter().find(|a| a.rating_key == *k)).take(6).map(|a| a.thumb.clone()));
         for th in thumbs {
             self.request_thumb(&th);
         }

@@ -55,6 +55,9 @@ use plex::{Album, ArtRequest, ArtResult, ArtistInfo, ArtistRequest, HubsRequest,
 gpui::actions!(crate_app, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch, ToggleNowPlaying, PaletteRadio, Rate1, Rate2, Rate3, Rate4, Rate5, GoHome, GoStations, ShowLyrics, ShowQueue, VolumeUp, VolumeDown, CursorNext, CursorPrev, ActivateCursor, MarkCursor, RadioFromSelection]);
 
 #[derive(Clone)]
+// One View at a time (plus the back/forward stacks): the Artist variant's
+// size doesn't matter here.
+#[allow(clippy::large_enum_variant)]
 enum View {
     Home,
     Library,
@@ -1972,6 +1975,12 @@ impl Render for Crate {
                             "x" => this.toggle_cursor_mark(cx),
                             "r" => this.radio_from_selection(cx),
                             "reroll" => this.reroll_sonic_path(cx),
+                            "mix" => {
+                                if let View::Artist { key, name, .. } = &this.view {
+                                    let (k, n) = (key.clone(), name.clone());
+                                    this.build_artist_mix(k, n, cx);
+                                }
+                            }
                             "bottom" => {
                                 this.album_scroll.scroll_to_bottom();
                                 this.settings_scroll.scroll_to_bottom();
