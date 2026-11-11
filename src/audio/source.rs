@@ -89,8 +89,14 @@ impl Source {
                     mc["generalDecisionText"].as_str().or(mc["transcodeDecisionText"].as_str()).unwrap_or("no decision")
                 );
                 let base = prepare.split("/music/").next().unwrap_or_default();
-                let p = Progressive::start(&url.replace("{session}", &session), token, TRANSCODE_CLIENT, cache, stop)?;
-                Ok(Box::new(Transcode { p, stop_url: format!("{base}/video/:/transcode/universal/stop?session={session}"), token: token.clone() }))
+                let stop_url = format!("{base}/video/:/transcode/universal/stop?session={session}");
+                match Progressive::start(&url.replace("{session}", &session), token, TRANSCODE_CLIENT, cache, stop) {
+                    Ok(p) => Ok(Box::new(Transcode { p, stop_url, token: token.clone() })),
+                    Err(e) => {
+                        stop_transcode(stop_url, token.clone());
+                        Err(e)
+                    }
+                }
             }
         }
     }
@@ -138,16 +144,20 @@ impl Drop for Transcode {
         }
         // Cancel first, so the stream the stop closes is never published.
         self.p.cancel.store(true, Ordering::Release);
-        let (url, token) = (std::mem::take(&mut self.stop_url), std::mem::take(&mut self.token));
-        let _ = std::thread::Builder::new().name("transcode-stop".into()).spawn(move || {
-            let _ = reqwest::blocking::Client::new()
-                .get(url)
-                .header("X-Plex-Token", token)
-                .header("X-Plex-Client-Identifier", TRANSCODE_CLIENT)
-                .timeout(Duration::from_secs(5))
-                .send();
-        });
+        stop_transcode(std::mem::take(&mut self.stop_url), std::mem::take(&mut self.token));
     }
+}
+
+/// Ask Plex to end a transcode session, off-thread.
+fn stop_transcode(url: String, token: String) {
+    let _ = std::thread::Builder::new().name("transcode-stop".into()).spawn(move || {
+        let _ = reqwest::blocking::Client::new()
+            .get(url)
+            .header("X-Plex-Token", token)
+            .header("X-Plex-Client-Identifier", TRANSCODE_CLIENT)
+            .timeout(Duration::from_secs(5))
+            .send();
+    });
 }
 
 impl Read for Transcode {
