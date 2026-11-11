@@ -368,7 +368,39 @@ impl Crate {
             .flex_col()
             .gap(px(36.0));
         let Some(home) = self.home.as_ref() else {
-            return col.child(div().text_color(rgb(t.muted)).child("Loading…")).into_any_element();
+            let Some(err) = self.home_error.clone() else {
+                return col.child(div().text_color(rgb(t.muted)).child("Loading…")).into_any_element();
+            };
+            // Couldn't reach the server: say so, keep retrying, offer Retry now.
+            return col
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        .child(div().text_size(px(20.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child("Couldn't load Home"))
+                        .child(div().text_size(px(13.0)).text_color(rgb(t.text2)).child(err))
+                        .child(div().text_size(px(13.0)).text_color(rgb(t.muted)).child(if self.home_loading { "Trying again…" } else { "Crate keeps trying in the background." }))
+                        .child(
+                            div()
+                                .id("home-retry")
+                                .w(px(96.0))
+                                .h(px(34.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(8.0))
+                                .border_1()
+                                .border_color(rgb(t.line))
+                                .text_size(px(13.0))
+                                .text_color(rgb(t.text))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgb(t.raised)))
+                                .child("Retry")
+                                .on_click(cx.listener(|this, _, _, cx| this.load_home(cx))),
+                        ),
+                )
+                .into_any_element();
         };
 
         // Hero + the two radio cards.

@@ -180,6 +180,13 @@ struct Crate {
     view_size: (f32, f32),
     /// Now Playing shows lyrics when the track has them (saved).
     np_lyrics: bool,
+    /// Home: the request channel, a load in flight, the last error (retried
+    /// with backoff), attempts since the last success, and when it loaded.
+    hubs_tx: mpsc::UnboundedSender<HubsRequest>,
+    pub(crate) home_loading: bool,
+    pub(crate) home_error: Option<String>,
+    home_attempts: u32,
+    home_at: Option<Instant>,
     /// The next play_from starts its engine paused (a seek while paused).
     pub(crate) start_paused: bool,
     /// Whether the last track shown in Now Playing had lyrics (layout while the next loads).
@@ -347,101 +354,7 @@ impl Crate {
         hubs_tx: mpsc::UnboundedSender<HubsRequest>,
         artist_tx: mpsc::UnboundedSender<ArtistRequest>,
     ) -> Self {
-        {
-            let (reply, rx) = tokio::sync::oneshot::channel();
-            let _ = hubs_tx.send(HubsRequest { reply });
-            cx.spawn(async move |this, cx| match rx.await {
-                Ok(Ok(home)) => {
-                    this.update(cx, |this, cx| {
-                        let thumbs = home.rows.iter().flat_map(|r| r.items.iter().map(|i| i.thumb.clone()));
-                        let thumbs: Vec<String> = thumbs
-                            .chain(home.playlists.iter().take(8).map(|p| p.thumb.clone()))
-                            .chain(home.last_played.iter().map(|(a, _)| a.thumb.clone()))
-                            .collect();
-                        for th in thumbs {
-                            if !th.is_empty() && this.requested.insert(th.clone()) {
-                                let _ = this.art_tx.send(ArtRequest { thumb: th });
-                            }
-                        }
-                        // Test hook: start the Nth station.
-                        if let Some(n) = std::env::var("CRATE_STATION").ok().and_then(|v| v.parse::<usize>().ok())
-                            && let Some(st) = home.rows.iter().filter(|r| r.kind == "station").flat_map(|r| r.items.iter()).nth(n)
-                        {
-                            this.play_station(st.key.clone(), st.title.clone(), cx);
-                        }
-                        if let Some(n) = std::env::var("CRATE_PLAYLIST").ok().and_then(|v| v.parse::<usize>().ok())
-                            && let Some(p) = home.playlists.get(n)
-                        {
-                            this.play_playlist(p.rating_key.clone(), p.title.clone(), cx);
-                        }
-                        if let Some(n) = std::env::var("CRATE_OPEN_PLAYLIST").ok().and_then(|v| v.parse::<usize>().ok())
-                            && let Some(p) = home.playlists.get(n)
-                        {
-                            this.open_playlist(p.rating_key.clone(), p.title.clone(), cx);
-                        }
-                        // Recently Added format labels follow in a second pass, so
-                        // Home shows without waiting on them.
-                        let keys: Vec<String> = home
-                            .rows
-                            .iter()
-                            .filter(|r| r.kind == "album" && r.id.starts_with("music.recent.added"))
-                            .flat_map(|r| r.items.iter().map(|i| i.rating_key.clone()))
-                            .collect();
-                        // Mixes for you: similar artists (subtitle, covers), art, and the
-                        // mood mixes' covers in a second pass (Home doesn't wait on them).
-                        for (k, _) in Crate::mix_artists(&home) {
-                            this.request_sonic_artists(k, cx);
-                        }
-                        let filters: Vec<String> = home.mixes.iter().map(|m| m.2.clone()).collect();
-                        this.home = Some(home);
-                        this.request_mix_art();
-                        if !filters.is_empty() {
-                            let section = crate::section();
-                            let rx = plex_call(move |c| async move { c.mix_covers(&section, filters).await });
-                            cx.spawn(async move |this, cx| {
-                                if let Ok(Ok(covers)) = rx.await {
-                                    this.update(cx, |this, cx| {
-                                        if let Some(h) = this.home.as_mut() {
-                                            for (m, c) in h.mixes.iter_mut().zip(covers) {
-                                                m.3 = c;
-                                            }
-                                        }
-                                        this.request_mix_art();
-                                        cx.notify();
-                                    })
-                                    .ok();
-                                }
-                            })
-                            .detach();
-                        }
-                        if !keys.is_empty() {
-                            let rx = plex_call(move |c| async move { c.album_formats(keys).await });
-                            cx.spawn(async move |this, cx| {
-                                if let Ok(Ok(found)) = rx.await {
-                                    this.update(cx, |this, cx| {
-                                        let Some(home) = this.home.as_mut() else { return };
-                                        let rows = home.rows.iter_mut().filter(|r| r.kind == "album" && r.id.starts_with("music.recent.added"));
-                                        for it in rows.flat_map(|r| r.items.iter_mut()) {
-                                            if let Some((_, f)) = found.iter().find(|(k, _)| *k == it.rating_key) {
-                                                it.format = f.clone();
-                                            }
-                                        }
-                                        cx.notify();
-                                    })
-                                    .ok();
-                                }
-                            })
-                            .detach();
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-                }
-                Ok(Err(e)) => eprintln!("[crate] hubs: {e:#}"),
-                Err(_) => {}
-            })
-            .detach();
-        }
+        let hubs_tx_keep = hubs_tx.clone();
         // MPRIS commands arrive from the mpris thread.
         cx.spawn(async move |this, cx| {
             while let Some(t) = transport_rx.recv().await {
@@ -807,6 +720,11 @@ impl Crate {
             content_w: 1000.0,
             view_size: (1280.0, 800.0),
             np_lyrics: theme::saved_lyrics(),
+            hubs_tx: hubs_tx_keep,
+            home_loading: false,
+            home_error: None,
+            home_attempts: 0,
+            home_at: None,
             start_paused: false,
             np_had_lyrics: std::cell::Cell::new(false),
             detail_failed: Default::default(),
@@ -1109,6 +1027,146 @@ impl Crate {
             self.reload_view(cx);
             cx.notify();
         }
+    }
+
+    /// Fetch Home (hubs, playlists, stations). A failure retries with
+    /// backoff; a successful load is refreshed when the window comes back
+    /// after a while.
+    pub(crate) fn load_home(&mut self, cx: &mut Context<Self>) {
+        if self.home_loading {
+            return;
+        }
+        self.home_loading = true;
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        let _ = self.hubs_tx.send(HubsRequest { reply });
+        cx.spawn(async move |this, cx| {
+            let mut res = rx.await;
+            this.update(cx, |this, cx| {
+                this.home_loading = false;
+                // Test hook: fail the first N loads.
+                if std::env::var("CRATE_HOME_FAIL").ok().and_then(|v| v.parse::<u32>().ok()).is_some_and(|n| this.home_attempts < n) {
+                    res = Ok(Err(anyhow::anyhow!("test: hubs failed")));
+                }
+                match res {
+                    Ok(Ok(home)) => {
+                        this.home_error = None;
+                        this.home_attempts = 0;
+                        this.home_at = Some(Instant::now());
+                        this.home_loaded(home, cx);
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("[crate] hubs: {e:#}");
+                        this.home_error = Some(format!("{e:#}"));
+                        this.home_attempts += 1;
+                        // 5 s, 15 s, 30 s, then every minute.
+                        let wait = [5u64, 15, 30, 60][(this.home_attempts as usize - 1).min(3)];
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(Duration::from_secs(wait)).await;
+                            this.update(cx, |this, cx| {
+                                if this.home_error.is_some() {
+                                    this.load_home(cx);
+                                }
+                            })
+                            .ok();
+                        })
+                        .detach();
+                        cx.notify();
+                    }
+                    Err(_) => {}
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn home_loaded(&mut self, home: plex::Home, cx: &mut Context<Self>) {
+        let first = self.home.is_none();
+        let thumbs = home.rows.iter().flat_map(|r| r.items.iter().map(|i| i.thumb.clone()));
+        let thumbs: Vec<String> = thumbs
+            .chain(home.playlists.iter().take(8).map(|p| p.thumb.clone()))
+            .chain(home.last_played.iter().map(|(a, _)| a.thumb.clone()))
+            .collect();
+        for th in thumbs {
+            if !th.is_empty() && self.requested.insert(th.clone()) {
+                let _ = self.art_tx.send(ArtRequest { thumb: th });
+            }
+        }
+        // Test hooks (first load only): start the Nth station.
+        if first
+            && let Some(n) = std::env::var("CRATE_STATION").ok().and_then(|v| v.parse::<usize>().ok())
+            && let Some(st) = home.rows.iter().filter(|r| r.kind == "station").flat_map(|r| r.items.iter()).nth(n)
+        {
+            self.play_station(st.key.clone(), st.title.clone(), cx);
+        }
+        if first
+            && let Some(n) = std::env::var("CRATE_PLAYLIST").ok().and_then(|v| v.parse::<usize>().ok())
+            && let Some(p) = home.playlists.get(n)
+        {
+            self.play_playlist(p.rating_key.clone(), p.title.clone(), cx);
+        }
+        if first
+            && let Some(n) = std::env::var("CRATE_OPEN_PLAYLIST").ok().and_then(|v| v.parse::<usize>().ok())
+            && let Some(p) = home.playlists.get(n)
+        {
+            self.open_playlist(p.rating_key.clone(), p.title.clone(), cx);
+        }
+        // Recently Added format labels follow in a second pass, so
+        // Home shows without waiting on them.
+        let keys: Vec<String> = home
+            .rows
+            .iter()
+            .filter(|r| r.kind == "album" && r.id.starts_with("music.recent.added"))
+            .flat_map(|r| r.items.iter().map(|i| i.rating_key.clone()))
+            .collect();
+        // Mixes for you: similar artists (subtitle, covers), art, and the
+        // mood mixes' covers in a second pass (Home doesn't wait on them).
+        for (k, _) in Crate::mix_artists(&home) {
+            self.request_sonic_artists(k, cx);
+        }
+        let filters: Vec<String> = home.mixes.iter().map(|m| m.2.clone()).collect();
+        self.home = Some(home);
+        self.request_mix_art();
+        if !filters.is_empty() {
+            let section = crate::section();
+            let rx = plex_call(move |c| async move { c.mix_covers(&section, filters).await });
+            cx.spawn(async move |this, cx| {
+                if let Ok(Ok(covers)) = rx.await {
+                    this.update(cx, |this, cx| {
+                        if let Some(h) = this.home.as_mut() {
+                            for (m, c) in h.mixes.iter_mut().zip(covers) {
+                                m.3 = c;
+                            }
+                        }
+                        this.request_mix_art();
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            })
+            .detach();
+        }
+        if !keys.is_empty() {
+            let rx = plex_call(move |c| async move { c.album_formats(keys).await });
+            cx.spawn(async move |this, cx| {
+                if let Ok(Ok(found)) = rx.await {
+                    this.update(cx, |this, cx| {
+                        let Some(home) = this.home.as_mut() else { return };
+                        let rows = home.rows.iter_mut().filter(|r| r.kind == "album" && r.id.starts_with("music.recent.added"));
+                        for it in rows.flat_map(|r| r.items.iter_mut()) {
+                            if let Some((_, f)) = found.iter().find(|(k, _)| *k == it.rating_key) {
+                                it.format = f.clone();
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            })
+            .detach();
+        }
+        cx.notify();
     }
 
     /// A view restored from history may still be waiting on data whose reply
@@ -2989,6 +3047,15 @@ fn main() {
                 let view = cx.new(|cx| {
                     let mut c = Crate::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds, transport_rx, mpris_tx, search_tx, hubs_tx, artist_tx);
                     c.check_saved_output(cx);
+                    c.load_home(cx);
+                    // Home goes stale in a long session: refresh it when the
+                    // window comes back after ten minutes or more.
+                    cx.observe_window_activation(window, |this: &mut Crate, window, cx| {
+                        if window.is_window_active() && this.home_at.is_some_and(|t| t.elapsed() > Duration::from_secs(600)) {
+                            this.load_home(cx);
+                        }
+                    })
+                    .detach();
                     c
                 });
                 cx.new(|cx| gpui_component::Root::new(view, window, cx))

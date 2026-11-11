@@ -412,8 +412,11 @@ impl Meta {
 
 impl Client {
     pub fn new(base: String, token: String) -> Self {
+        // A server that's asleep or a tailnet path that's down must fail,
+        // not hang: requests without their own timeout get these.
         let http = reqwest::Client::builder()
             .pool_max_idle_per_host(16)
+            .connect_timeout(std::time::Duration::from_secs(5))
             .build()
             .unwrap();
         Self { base, token, http }
@@ -427,6 +430,8 @@ impl Client {
             .header("X-Plex-Token", &self.token)
             .header("X-Plex-Product", "Crate")
             .header("X-Plex-Client-Identifier", client_id())
+            // Covers the whole response, the library listing included.
+            .timeout(std::time::Duration::from_secs(45))
             .send()
             .await?;
         anyhow::ensure!(res.status().is_success(), "{} -> {}", path, res.status());
@@ -1774,8 +1779,12 @@ pub async fn run(
         let client = client.clone();
         let section = section.clone();
         tokio::spawn(async move {
+            // Each request on its own task: a slow one doesn't hold up the rest.
             while let Some(req) = artist_rx.recv().await {
-                let _ = req.reply.send(client.artist(&req.key, &section).await);
+                let (client, section) = (client.clone(), section.clone());
+                tokio::spawn(async move {
+                    let _ = req.reply.send(client.artist(&req.key, &section).await);
+                });
             }
         });
     }
@@ -1784,7 +1793,10 @@ pub async fn run(
         let section = section.clone();
         tokio::spawn(async move {
             while let Some(req) = hubs_rx.recv().await {
-                let _ = req.reply.send(client.home(&section).await);
+                let (client, section) = (client.clone(), section.clone());
+                tokio::spawn(async move {
+                    let _ = req.reply.send(client.home(&section).await);
+                });
             }
         });
     }
@@ -1793,7 +1805,10 @@ pub async fn run(
         let section = section.clone();
         tokio::spawn(async move {
             while let Some(req) = search_rx.recv().await {
-                let _ = req.reply.send(client.search(&req.query, &section).await);
+                let (client, section) = (client.clone(), section.clone());
+                tokio::spawn(async move {
+                    let _ = req.reply.send(client.search(&req.query, &section).await);
+                });
             }
         });
     }
@@ -1801,7 +1816,10 @@ pub async fn run(
         let client = client.clone();
         tokio::spawn(async move {
             while let Some(req) = tracks_rx.recv().await {
-                let _ = req.reply.send(client.tracks(&req.album_key).await);
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let _ = req.reply.send(client.tracks(&req.album_key).await);
+                });
             }
         });
     }
