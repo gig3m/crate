@@ -12,8 +12,18 @@ pub struct Theme {
     pub border: u32,
     pub text: u32,
     pub text_strong: u32,
+    /// Artists and metadata (canvas: color7).
+    pub text2: u32,
     pub muted: u32,
     pub accent: u32,
+    /// Sonic features, similar, Guest DJ (canvas: color5).
+    pub discovery: u32,
+    /// Bit-perfect, server online (canvas: color2).
+    pub healthy: u32,
+    /// Player bar: a step below base.
+    pub deep: u32,
+    /// Inner borders on raised items.
+    pub line: u32,
 }
 
 fn state_dir() -> PathBuf {
@@ -35,7 +45,7 @@ fn hex(s: &str) -> Option<u32> {
     u32::from_str_radix(s.trim().trim_start_matches('#'), 16).ok()
 }
 
-fn mix(a: u32, b: u32, t: f32) -> u32 {
+pub fn mix(a: u32, b: u32, t: f32) -> u32 {
     let ch = |c: u32, s: u32| ((c >> s) & 0xff) as f32;
     let m = |s| ((ch(a, s) * (1.0 - t) + ch(b, s) * t).round() as u32) << s;
     m(16) | m(8) | m(0)
@@ -55,10 +65,15 @@ impl Theme {
             surface: bg,
             raised: get("lighter_background").unwrap_or(mix(bg, fg, 0.12)),
             border: mix(bg, fg, 0.14),
-            text: get("dark_foreground").unwrap_or(fg),
-            text_strong: get("bright_foreground").unwrap_or(fg),
+            text: fg,
+            text_strong: get("bright_foreground").unwrap_or(mix(fg, 0xffffff, 0.5)),
+            text2: get("dark_foreground").or_else(|| get("color7")).unwrap_or(mix(bg, fg, 0.8)),
             muted: mix(bg, fg, 0.55),
             accent: get("accent").or_else(|| get("blue")).unwrap_or(0x7aa2f7),
+            discovery: get("magenta").or_else(|| get("color5")).unwrap_or(0xbb9af7),
+            healthy: get("green").or_else(|| get("color2")).unwrap_or(0x9ece6a),
+            deep: get("darker_background").unwrap_or(mix(bg, 0x000000, 0.28)),
+            line: mix(bg, fg, 0.2),
         };
         (t, gen_id)
     }

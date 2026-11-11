@@ -109,8 +109,30 @@ pub struct HubRow {
     pub items: Vec<HubItem>,
 }
 
+#[derive(Clone, Debug)]
+pub struct Playlist {
+    pub rating_key: String,
+    pub title: String,
+    pub smart: bool,
+    pub count: u64,
+    pub thumb: String,
+}
+
+/// Everything the shell and Home need at startup.
+#[derive(Clone, Debug, Default)]
+pub struct Home {
+    pub rows: Vec<HubRow>,
+    pub playlists: Vec<Playlist>,
+    pub server: String,
+    /// Most recently played album and when (unix seconds).
+    pub last_played: Option<(Album, i64)>,
+    /// (filter value, label) for the mood and decade chips.
+    pub moods: Vec<(String, String)>,
+    pub decades: Vec<(String, String)>,
+}
+
 pub struct HubsRequest {
-    pub reply: oneshot::Sender<anyhow::Result<Vec<HubRow>>>,
+    pub reply: oneshot::Sender<anyhow::Result<Home>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -149,6 +171,8 @@ struct Envelope {
 struct Container {
     #[serde(rename = "Metadata", default)]
     metadata: Vec<Meta>,
+    #[serde(rename = "playQueueID", default)]
+    id: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -169,6 +193,10 @@ pub struct Track {
     pub artist: String,
     pub duration_ms: u64,
     pub part_key: String,
+    pub album_key: String,
+    pub album_title: String,
+    /// Album cover path (same key as `Album::thumb`).
+    pub thumb: String,
 }
 
 #[derive(Deserialize)]
@@ -194,6 +222,37 @@ struct Meta {
     year: Option<u32>,
     #[serde(default)]
     thumb: Option<String>,
+    #[serde(rename = "parentThumb", default)]
+    parent_thumb: Option<String>,
+    #[serde(rename = "lastViewedAt", default)]
+    last_viewed_at: Option<i64>,
+}
+
+impl Meta {
+    fn into_album(self) -> Album {
+        Album {
+            artist_key: self.parent_rating_key,
+            rating_key: self.rating_key,
+            title: self.title,
+            artist: self.parent_title,
+            year: self.year.map(|y| y.to_string()).unwrap_or_default(),
+            thumb: self.thumb.unwrap_or_default(),
+        }
+    }
+
+    fn into_track(self) -> Option<Track> {
+        let part_key = self.media.first()?.part.first()?.key.clone();
+        Some(Track {
+            rating_key: self.rating_key,
+            title: self.title,
+            artist: self.grandparent_title,
+            duration_ms: self.duration.unwrap_or(0),
+            part_key,
+            album_key: self.parent_rating_key,
+            album_title: self.parent_title,
+            thumb: self.parent_thumb.unwrap_or_default(),
+        })
+    }
 }
 
 impl Client {
@@ -230,15 +289,41 @@ impl Client {
             .mc
             .metadata
             .into_iter()
-            .map(|m| Album {
-                artist_key: m.parent_rating_key,
-                rating_key: m.rating_key,
-                title: m.title,
-                artist: m.parent_title,
-                year: m.year.map(|y| y.to_string()).unwrap_or_default(),
-                thumb: m.thumb.unwrap_or_default(),
-            })
+            .map(Meta::into_album)
             .collect())
+    }
+
+    /// Album rating keys matching a library filter, e.g. `decade=1990` or `mood=17889`.
+    pub async fn album_keys_where(&self, section: &str, filter: &str) -> anyhow::Result<Vec<String>> {
+        let env: Envelope =
+            self.get(&format!("/library/sections/{section}/all?type=9&{filter}")).await?.json().await.context("filter")?;
+        Ok(env.mc.metadata.into_iter().map(|m| m.rating_key).collect())
+    }
+
+    async fn last_played(&self, section: &str) -> anyhow::Result<Option<(Album, i64)>> {
+        let env: Envelope = self
+            .get(&format!("/library/sections/{section}/all?type=9&sort=lastViewedAt:desc&X-Plex-Container-Start=0&X-Plex-Container-Size=1"))
+            .await?
+            .json()
+            .await
+            .context("last played")?;
+        Ok(env.mc.metadata.into_iter().next().and_then(|m| {
+            let at = m.last_viewed_at?;
+            Some((m.into_album(), at))
+        }))
+    }
+
+    /// (key, title) directory entries such as `/library/sections/5/mood`.
+    async fn directory(&self, path: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let v: serde_json::Value = self.get(path).await?.json().await.context("directory")?;
+        Ok(v["MediaContainer"]["Directory"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|d| Some((d["key"].as_str()?.to_string(), d["title"].as_str()?.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     pub async fn tracks(&self, album_key: &str) -> anyhow::Result<Vec<Track>> {
@@ -252,16 +337,7 @@ impl Client {
             .mc
             .metadata
             .into_iter()
-            .filter_map(|m| {
-                let part_key = m.media.first()?.part.first()?.key.clone();
-                Some(Track {
-                    rating_key: m.rating_key,
-                    title: m.title,
-                    artist: m.grandparent_title,
-                    duration_ms: m.duration.unwrap_or(0),
-                    part_key,
-                })
-            })
+            .filter_map(Meta::into_track)
             .collect())
     }
 
@@ -339,6 +415,117 @@ impl Client {
             .collect())
     }
 
+    /// Start a station (or any library URI) as a Plex play queue. Creates a
+    /// temporary queue on the server; it doesn't touch play counts.
+    /// Returns (queue id, first window of tracks).
+    pub async fn play_queue(&self, key: &str) -> anyhow::Result<(u64, Vec<Track>)> {
+        let root: serde_json::Value = self.get("/").await?.json().await.context("server")?;
+        let mid = root["MediaContainer"]["machineIdentifier"].as_str().unwrap_or_default();
+        let uri = urlencode(&format!("server://{mid}/com.plexapp.plugins.library{key}"));
+        let res = self
+            .http
+            .post(format!("{}/playQueues?type=audio&uri={uri}&repeat=0&own=1&includeChapters=0", self.base))
+            .header("Accept", "application/json")
+            .header("X-Plex-Token", &self.token)
+            .header("X-Plex-Product", "Aulos")
+            .header("X-Plex-Client-Identifier", "aulos-spike")
+            .send()
+            .await?;
+        anyhow::ensure!(res.status().is_success(), "playQueues -> {}", res.status());
+        let env: Envelope = res.json().await.context("play queue")?;
+        Ok((env.mc.id.unwrap_or(0), env.mc.metadata.into_iter().filter_map(Meta::into_track).collect()))
+    }
+
+    /// The first `limit` tracks of a playlist.
+    pub async fn playlist_tracks(&self, rating_key: &str, limit: usize) -> anyhow::Result<Vec<Track>> {
+        let res = self
+            .http
+            .get(format!("{}/playlists/{rating_key}/items", self.base))
+            .header("Accept", "application/json")
+            .header("X-Plex-Token", &self.token)
+            .header("X-Plex-Container-Start", "0")
+            .header("X-Plex-Container-Size", limit.to_string())
+            .send()
+            .await?;
+        anyhow::ensure!(res.status().is_success(), "playlist {rating_key} -> {}", res.status());
+        let env: Envelope = res.json().await.context("playlist")?;
+        Ok(env.mc.metadata.into_iter().filter_map(Meta::into_track).collect())
+    }
+
+    /// Loudness envelope for a track, normalized to 0..1 over `points` samples.
+    /// Empty when the server hasn't analyzed loudness for it.
+    pub async fn levels(&self, rating_key: &str, points: usize) -> anyhow::Result<Vec<f32>> {
+        let v: serde_json::Value = self.get(&format!("/library/metadata/{rating_key}")).await?.json().await.context("track")?;
+        let streams = v["MediaContainer"]["Metadata"][0]["Media"][0]["Part"][0]["Stream"].as_array().cloned().unwrap_or_default();
+        let Some(id) = streams.iter().find(|s| s["streamType"].as_i64() == Some(2)).and_then(|s| s["id"].as_i64()) else {
+            return Ok(vec![]);
+        };
+        let l: serde_json::Value =
+            self.get(&format!("/library/streams/{id}/levels?subsample={points}")).await?.json().await.context("levels")?;
+        let db: Vec<f64> = l["MediaContainer"]["Level"].as_array().map(|a| a.iter().filter_map(|x| x["v"].as_f64()).collect()).unwrap_or_default();
+        let Some(max) = db.iter().cloned().reduce(f64::max) else { return Ok(vec![]) };
+        // Show the top 24 dB of the track's own range.
+        let floor = max - 24.0;
+        Ok(db.iter().map(|&d| (((d - floor) / (max - floor)).clamp(0.0, 1.0)) as f32).collect())
+    }
+
+    /// Audio playlists, most recently played first.
+    pub async fn playlists(&self) -> anyhow::Result<Vec<Playlist>> {
+        let v: serde_json::Value =
+            self.get("/playlists?playlistType=audio&sort=lastViewedAt:desc").await?.json().await.context("playlists")?;
+        let items = v["MediaContainer"]["Metadata"].as_array().cloned().unwrap_or_default();
+        Ok(items
+            .iter()
+            .map(|m| Playlist {
+                rating_key: m["ratingKey"].as_str().unwrap_or_default().to_string(),
+                title: m["title"].as_str().unwrap_or_default().to_string(),
+                smart: m["smart"].as_bool().unwrap_or(false),
+                count: m["leafCount"].as_u64().unwrap_or(0),
+                thumb: m["composite"].as_str().unwrap_or_default().to_string(),
+            })
+            .collect())
+    }
+
+    pub async fn server_name(&self) -> anyhow::Result<String> {
+        let v: serde_json::Value = self.get("/").await?.json().await.context("server")?;
+        Ok(v["MediaContainer"]["friendlyName"].as_str().unwrap_or("Plex").to_string())
+    }
+
+    pub async fn home(&self, section: &str) -> anyhow::Result<Home> {
+        let (mood_path, decade_path) = (format!("/library/sections/{section}/mood"), format!("/library/sections/{section}/decade"));
+        let (rows, playlists, server, last, moods, decades) = tokio::join!(
+            self.home_hubs(section),
+            self.playlists(),
+            self.server_name(),
+            self.last_played(section),
+            self.directory(&mood_path),
+            self.directory(&decade_path),
+        );
+        // The canvas's six moods, when the library has them.
+        const MOODS: &[&str] = &["Wistful", "Brooding", "Confident", "Playful", "Cathartic", "Swaggering"];
+        let moods = moods.unwrap_or_default();
+        let moods = MOODS
+            .iter()
+            .filter_map(|w| moods.iter().find(|(_, t)| t == w))
+            .map(|(k, t)| (format!("mood={k}"), t.clone()))
+            .collect();
+        let mut decades: Vec<(String, String)> = decades
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(k, _)| k.parse::<u32>().is_ok_and(|y| y >= 1960))
+            .map(|(k, t)| (format!("decade={k}"), t.get(2..).unwrap_or(&t).to_string()))
+            .collect();
+        decades.sort();
+        Ok(Home {
+            rows: rows?,
+            playlists: playlists.unwrap_or_default(),
+            server: server.unwrap_or_else(|_| "Plex".into()),
+            last_played: last.ok().flatten(),
+            moods,
+            decades,
+        })
+    }
+
     pub async fn artist(&self, key: &str, section: &str) -> anyhow::Result<ArtistInfo> {
         let meta: Envelope = self.get(&format!("/library/metadata/{key}")).await?.json().await.context("artist")?;
         let m = meta.mc.metadata.into_iter().next().ok_or_else(|| anyhow::anyhow!("no such artist"))?;
@@ -355,20 +542,9 @@ impl Client {
             .metadata
             .into_iter()
             .filter_map(|t| {
-                let part_key = t.media.first()?.part.first()?.key.clone();
                 let plays = t.view_count.unwrap_or(0);
-                Some((
-                    Track {
-                        rating_key: t.rating_key,
-                        title: t.title,
-                        artist: t.grandparent_title,
-                        duration_ms: t.duration.unwrap_or(0),
-                        part_key,
-                    },
-                    t.parent_rating_key,
-                    t.parent_title,
-                    plays,
-                ))
+                let (key, title) = (t.parent_rating_key.clone(), t.parent_title.clone());
+                Some((t.into_track()?, key, title, plays))
             })
             .collect();
         Ok(ArtistInfo { title: m.title, summary: m.summary, thumb: m.thumb.unwrap_or_default(), popular })
@@ -446,7 +622,7 @@ pub async fn run(
         let section = section.clone();
         tokio::spawn(async move {
             while let Some(req) = hubs_rx.recv().await {
-                let _ = req.reply.send(client.home_hubs(&section).await);
+                let _ = req.reply.send(client.home(&section).await);
             }
         });
     }
