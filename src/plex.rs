@@ -551,6 +551,61 @@ impl Client {
         Ok(())
     }
 
+    /// Download a part (original file) to `dest` via a temp file, counting
+    /// bytes into `progress`. Stops early (Err) when `cancel` is set.
+    pub async fn download(
+        &self,
+        part_key: &str,
+        dest: &std::path::Path,
+        progress: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> anyhow::Result<u64> {
+        use std::sync::atomic::Ordering;
+        use tokio::io::AsyncWriteExt;
+        let mut res = self
+            .http
+            .get(format!("{}{part_key}", self.base))
+            .header("X-Plex-Token", &self.token)
+            .header("X-Plex-Client-Identifier", client_id())
+            .send()
+            .await?
+            .error_for_status()?;
+        if let Some(dir) = dest.parent() {
+            tokio::fs::create_dir_all(dir).await?;
+        }
+        // Read before the body: reqwest reports what's left once chunks are consumed.
+        let expected = res.content_length();
+        let tmp = dest.with_extension("part");
+        let mut f = tokio::fs::File::create(&tmp).await?;
+        let mut n = 0u64;
+        let r: anyhow::Result<()> = async {
+            while let Some(chunk) = res.chunk().await? {
+                anyhow::ensure!(!cancel.load(Ordering::Relaxed), "cancelled");
+                f.write_all(&chunk).await?;
+                n += chunk.len() as u64;
+                progress.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            }
+            if let Some(len) = expected {
+                anyhow::ensure!(n == len, "short download ({n} of {len} bytes)");
+            }
+            f.flush().await?;
+            f.sync_all().await?;
+            Ok(())
+        }
+        .await;
+        drop(f);
+        match r {
+            Ok(()) => {
+                tokio::fs::rename(&tmp, dest).await?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                Err(e)
+            }
+        }
+    }
+
     /// `n` random tracks matching a filter (`genre=..`, `mood=..`, `album.decade=..`).
     pub async fn random_tracks(&self, section: &str, filter: &str, n: usize) -> anyhow::Result<Vec<Track>> {
         let res = self

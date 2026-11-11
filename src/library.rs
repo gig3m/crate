@@ -315,7 +315,24 @@ impl Crate {
                     .flex_col()
                     .gap(px(7.0))
                     .cursor_pointer()
-                    .child(cover)
+                    .child({
+                        let kept = self.offline.index.get(&a.rating_key).is_some_and(|k| k.complete);
+                        div().relative().child(cover).when(kept, |d| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .right(px(8.0))
+                                    .bottom(px(8.0))
+                                    .size(px(22.0))
+                                    .rounded(px(11.0))
+                                    .bg(gpui::hsla(240.0 / 360.0, 0.15, 0.08, 0.85))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(crate::icons::icon("offline", 12.0, t.healthy)),
+                            )
+                        })
+                    })
                     .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).truncate().child(a.title.clone()))
                     .child(
                         div()

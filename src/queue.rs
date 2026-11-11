@@ -20,6 +20,11 @@ impl Crate {
         tracks
             .iter()
             .map(|t| {
+                // Kept offline: play the local copy.
+                let kept = crate::offline::file_for(&t.part_key);
+                if kept.exists() {
+                    return Source::File(kept);
+                }
                 let id = t.part_key.split('/').nth(3).unwrap_or("x").to_string();
                 let ext = t.part_key.rsplit('.').next().unwrap_or("bin").to_string();
                 Source::Http {

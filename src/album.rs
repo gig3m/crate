@@ -217,6 +217,41 @@ impl Crate {
                     this.start_queue(format!("{} (shuffled)", a2.title), None, tr, 0, cx);
                 }
             })))
+            .child({
+                // Keep offline: green when kept, progress while downloading.
+                let kept = self.offline.index.get(&album.rating_key).cloned();
+                let job = self.offline.job.as_ref().filter(|j| j.key == album.rating_key);
+                let color = match &kept {
+                    Some(k) if k.complete => t.healthy,
+                    Some(_) => t.accent,
+                    None => t.text,
+                };
+                let a3 = album.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(circle("album-offline", "offline", color).on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(tr) = this.album_tracks() {
+                            this.toggle_offline(a3.clone(), tr, cx);
+                        }
+                    })))
+                    .when_some(job.map(|j| (j.done_tracks, j.total_tracks, j.bytes.load(std::sync::atomic::Ordering::Relaxed))), |d, (dn, tot, b)| {
+                        d.child(
+                            div()
+                                .font_family(MONO)
+                                .text_size(px(12.0))
+                                .text_color(rgb(t.muted))
+                                .child(format!("{dn}/{tot} · {}", crate::offline::fmt_bytes(b))),
+                        )
+                    })
+                    .when(job.is_none() && kept.as_ref().is_some_and(|k| !k.complete), |d| {
+                        d.child(div().font_family(MONO).text_size(px(12.0)).text_color(rgb(t.muted)).child("queued"))
+                    })
+                    .when(kept.as_ref().is_some_and(|k| k.complete), |d| {
+                        d.child(div().font_family(MONO).text_size(px(12.0)).text_color(rgb(t.healthy)).child("offline"))
+                    })
+            })
             .child(div().flex_1())
             .when(detail.is_some(), |d| d.child({
                 let k = album.rating_key.clone();

@@ -278,6 +278,89 @@ impl Crate {
             .into_any_element()
     }
 
+    pub(crate) fn offline_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::offline::{album_bytes, fmt_bytes};
+        let albums = self.offline.index.albums.clone();
+        let sizes: Vec<u64> = albums.iter().map(album_bytes).collect();
+        let total: u64 = sizes.iter().sum();
+        let rows: Vec<_> = albums
+            .into_iter()
+            .zip(sizes)
+            .enumerate()
+            .map(|(i, (a, size))| {
+                let job = self.offline.job.as_ref().filter(|j| j.key == a.key);
+                let state = match job {
+                    Some(j) => format!("downloading {}/{}", j.done_tracks, j.total_tracks),
+                    None if a.complete => format!("{} tracks · {}", a.tracks.len(), fmt_bytes(size)),
+                    None => "queued".into(),
+                };
+                let ix = self.albums.iter().position(|x| x.rating_key == a.key);
+                let key = a.key.clone();
+                div()
+                    .id(("kept", i))
+                    .h(px(64.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(14.0))
+                    .rounded(px(8.0))
+                    .hover(|d| d.bg(rgb(t.raised)))
+                    .child(self.cover_or_mark(&a.thumb, &a.key, 48.0, 4.0))
+                    .child(
+                        div()
+                            .id(("kept-open", i))
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .cursor_pointer()
+                            .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.text_strong)).truncate().child(a.title.clone()))
+                            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(a.artist.clone()))
+                            .when_some(ix, |d, ix| d.on_click(cx.listener(move |this, _, _, cx| this.open_album(ix, cx)))),
+                    )
+                    .child(div().font_family(MONO).text_size(px(12.0)).text_color(rgb(if a.complete { t.healthy } else { t.muted })).child(state))
+                    .child(
+                        div()
+                            .id(("kept-rm", i))
+                            .px(px(10.0))
+                            .h(px(28.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(14.0))
+                            .border_1()
+                            .border_color(rgb(t.line))
+                            .text_size(px(12.0))
+                            .text_color(rgb(t.text2))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgb(t.raised)))
+                            .child("Remove")
+                            .on_click(cx.listener(move |this, _, _, cx| this.remove_offline(&key, cx))),
+                    )
+            })
+            .collect();
+        let n = self.offline.index.albums.len();
+        div()
+            .id("offline")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .child(title("Offline", format!("{n} albums · {} on disk", fmt_bytes(total)), t))
+            .when(n == 0, |d| {
+                d.child(
+                    div()
+                        .px(px(PAD_X))
+                        .text_size(px(14.0))
+                        .text_color(rgb(t.muted))
+                        .child("Albums you keep offline play from this computer, even without the server. Use the download button on an album page."),
+                )
+            })
+            .child(div().px(px(PAD_X)).pb(px(40.0)).flex().flex_col().children(rows))
+            .into_any_element()
+    }
+
     pub(crate) fn genres_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let home = self.home.as_ref();
         let section = |label: &'static str, kind: &'static str, items: Vec<(String, String)>, cx: &mut Context<Self>| {

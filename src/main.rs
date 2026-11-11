@@ -22,6 +22,7 @@ mod palette;
 mod queue;
 mod mpris;
 mod now_playing;
+mod offline;
 mod tile;
 mod player_bar;
 mod settings;
@@ -147,6 +148,8 @@ struct Crate {
     prompt_copied: bool,
     /// Another launch (or MPRIS Raise) asked for the window.
     raise_requested: bool,
+    /// Albums kept offline, and the download in progress.
+    offline: offline::Offline,
     history: Option<Vec<plex::HistoryItem>>,
     top_tracks: Option<Vec<(Track, u64)>>,
     /// Artists derived from the album list: (key, name, album count).
@@ -354,6 +357,13 @@ impl Crate {
                             cx.notify();
                             return;
                         }
+                        this.pump_offline(cx);
+                        // Test hook: keep this album offline.
+                        if let Ok(key) = std::env::var("CRATE_KEEP_OFFLINE")
+                            && let Some(album) = this.albums.iter().find(|a| a.rating_key == key).cloned()
+                        {
+                            this.with_tracks(album, cx, |this, album, tracks, cx| this.toggle_offline(album, tracks, cx));
+                        }
                         // Test hooks: CRATE_SORT=artist|title|year|plays, CRATE_FILTER=Decade:1990s:decade=1990
                         if let Ok(v) = std::env::var("CRATE_SORT") {
                             this.lib_sort = library::LibSort::ALL
@@ -536,6 +546,12 @@ impl Crate {
             audio_info: None,
             prompt_copied: false,
             raise_requested: false,
+            offline: {
+                let index = offline::load();
+                // Albums left half-downloaded last time pick up where they stopped.
+                let queue = index.albums.iter().filter(|a| !a.complete).map(|a| a.key.clone()).collect();
+                offline::Offline { index, job: None, queue }
+            },
             history: None,
             top_tracks: None,
             artist_cache: Vec::new(),
@@ -1544,6 +1560,7 @@ impl Render for Crate {
             View::Soon("history") => self.history_view(&t, cx),
             View::Soon("playlists") => self.playlists_view(&t, cx),
             View::Soon("genres") => self.genres_view(&t, cx),
+            View::Soon("offline") => self.offline_view(&t, cx),
             View::Soon(name) => self.soon_view(name, &t),
             View::Album { ix, tracks } => {
                 let (ix, tracks) = (*ix, tracks.clone());
