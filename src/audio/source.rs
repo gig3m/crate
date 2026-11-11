@@ -65,25 +65,55 @@ impl Source {
     /// wait on the network (the decoder opens the next track only when it
     /// reaches it). A no-op for local files and tracks already cached; `stop`
     /// (the engine's) abandons it.
-    pub fn prefetch(&self, stop: Arc<AtomicBool>) {
-        let Source::Http { cache, .. } = self else { return };
+    /// Returns the prefetch's own stop flag (set it to abandon it).
+    pub fn prefetch(&self) -> Option<Arc<AtomicBool>> {
+        let Source::Http { cache, .. } = self else { return None };
         if cache.exists() {
-            return;
+            return None;
         }
-        let src = self.clone();
-        let _ = std::thread::Builder::new().name("prefetch".into()).spawn(move || match src.open(stop) {
-            // Reading to the end waits for the download, which publishes
-            // the cache file when complete.
-            Ok(mut s) => {
-                let _ = std::io::copy(&mut s, &mut std::io::sink());
+        let stop = Arc::new(AtomicBool::new(false));
+        {
+            let mut inflight = INFLIGHT.lock().unwrap();
+            if inflight.contains_key(cache) {
+                return None;
             }
-            Err(e) => eprintln!("[prefetch] {}: {e:#}", src.label()),
+            inflight.insert(cache.clone(), stop.clone());
+        }
+        let (src, flag, path) = (self.clone(), stop.clone(), cache.clone());
+        let _ = std::thread::Builder::new().name("prefetch".into()).spawn(move || {
+            match src.open_as(flag.clone(), true) {
+                // Reading to the end waits for the download, which publishes
+                // the cache file when complete.
+                Ok(mut s) => {
+                    let _ = std::io::copy(&mut s, &mut std::io::sink());
+                }
+                Err(e) if !flag.load(Ordering::Acquire) => eprintln!("[prefetch] {}: {e:#}", src.label()),
+                Err(_) => {}
+            }
+            let mut inflight = INFLIGHT.lock().unwrap();
+            if inflight.get(&path).is_some_and(|f| Arc::ptr_eq(f, &flag)) {
+                inflight.remove(&path);
+            }
         });
+        Some(stop)
     }
 
     /// Open for decoding. For HTTP, a complete cached copy is used if present.
     /// `stop` aborts a read that is waiting on the network.
     pub fn open(&self, stop: Arc<AtomicBool>) -> anyhow::Result<Box<dyn MediaSource>> {
+        self.open_as(stop, false)
+    }
+
+    fn open_as(&self, stop: Arc<AtomicBool>, prefetch: bool) -> anyhow::Result<Box<dyn MediaSource>> {
+        // Playback reaching a track whose prefetch hasn't finished: stop
+        // that one rather than downloading (or transcoding) it twice.
+        if !prefetch
+            && let Source::Http { cache, .. } = self
+            && let Some(flag) = INFLIGHT.lock().unwrap().remove(cache)
+        {
+            flag.store(true, Ordering::Release);
+        }
+        anyhow::ensure!(!stop.load(Ordering::Acquire), "stopped");
         // A complete cached copy, opened once: a prune that removes it after
         // this still leaves the open file readable; one that removed it
         // before (NotFound) means download it again.
@@ -113,6 +143,7 @@ impl Source {
                     .send()?
                     .error_for_status()?
                     .json()?;
+                anyhow::ensure!(!stop.load(Ordering::Acquire), "stopped");
                 // Without an accepted transcode decision, start ignores the
                 // bitrate (or fails): say what Plex said instead.
                 let mc = &d["MediaContainer"];
@@ -255,6 +286,28 @@ impl Drop for Progressive {
 }
 
 static ATTEMPT: AtomicU64 = AtomicU64::new(0);
+
+/// Prefetches in flight, by cache path, with their stop flags.
+static INFLIGHT: std::sync::LazyLock<Mutex<std::collections::HashMap<std::path::PathBuf, Arc<AtomicBool>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Stops the prefetches an engine started when it goes away.
+#[derive(Default)]
+pub struct Prefetches(Vec<Arc<AtomicBool>>);
+
+impl Prefetches {
+    pub fn add(&mut self, flag: Option<Arc<AtomicBool>>) {
+        self.0.extend(flag);
+    }
+}
+
+impl Drop for Prefetches {
+    fn drop(&mut self) {
+        for f in &self.0 {
+            f.store(true, Ordering::Release);
+        }
+    }
+}
 
 /// Open a cached track (None when there isn't one) and mark it just played
 /// through the same descriptor, so the cache's pruning (oldest modified

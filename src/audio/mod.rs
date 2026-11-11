@@ -438,6 +438,8 @@ fn decoder_thread(
     let mut queued_us = 0u64;
     let mut queued_rem = 0u64;
     let mut scratch: Vec<f32> = Vec::new();
+    // Prefetches this engine started: stopped when it exits, however it exits.
+    let mut prefetches = source::Prefetches::default();
     // A non-stereo track's interleaved frames before the mix to stereo.
     let mut wide: Vec<f32> = Vec::new();
     // Crossfades: the current track's held-back end (only while the next
@@ -683,10 +685,6 @@ fn decoder_thread(
             }
             cur_rate = rate;
         }
-        // Start fetching the next track now, while this one plays.
-        if let Some(next) = queue.lock().unwrap().items.front() {
-            next.src.prefetch(stats.stop.clone());
-        }
         let _ = ev.send(Event::TrackStarted {
             index,
             label: src.label(),
@@ -732,6 +730,12 @@ fn decoder_thread(
         let limit_frames = track_limit.map(|s| (s * rate as f64) as u64);
         let mut track_frames = 0u64;
         let mut bad_packets = 0u32;
+        // Fetch the next track once this one is 10 s in (halfway, if
+        // shorter): late enough that a seek or skip right after a start
+        // doesn't throw it away, and this track's own download has a head
+        // start on the connection.
+        let prefetch_at = num_frames.map(|n| (n / 2).min(10 * rate as u64)).unwrap_or(10 * rate as u64);
+        let mut prefetched = false;
         // Symphonia's Ogg reader returns UnexpectedEof, not Ok(None), when the
         // last page isn't flagged end-of-stream, and Plex never flags it.
         // Where decoded output starts on the track (the pre-roll is dropped).
@@ -813,6 +817,13 @@ fn decoder_thread(
                 }
             }
             track_frames += (scratch.len() / CHANNELS) as u64;
+            if !prefetched && track_frames >= prefetch_at {
+                prefetched = true;
+                let next = queue.lock().unwrap().items.front().map(|n| n.src.clone());
+                if let Some(next) = next {
+                    prefetches.add(next.prefetch());
+                }
+            }
             // The previous track's end fades out under this one's start.
             if !fading.is_empty() {
                 fade_done += mix_fade(&mut scratch, &mut fading, fade_done, fade_total);

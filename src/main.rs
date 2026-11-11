@@ -936,6 +936,10 @@ impl Crate {
         if self.server_down_until.is_some_and(|t| Instant::now() < t)
             && let Some(tracks) = self.offline_tracks(&album.rating_key)
         {
+            let kept = self.offline.index.get(&album.rating_key).map(|k| k.tracks.len()).unwrap_or(0);
+            if tracks.len() < kept {
+                self.say(format!("Offline: {} of {kept} tracks of {} are kept so far", tracks.len(), album.title));
+            }
             f(self, album, tracks, cx);
             return;
         }

@@ -32,6 +32,10 @@ pub struct KeptTrack {
     pub track_no: u32,
     #[serde(default)]
     pub disc: u32,
+    /// The file this track had before the server replaced it: still played
+    /// offline until the new one is kept, then deleted.
+    #[serde(default)]
+    pub prev_part: Option<String>,
 }
 
 impl KeptTrack {
@@ -44,6 +48,7 @@ impl KeptTrack {
             duration_ms: t.duration_ms,
             track_no: t.track_no,
             disc: t.disc,
+            prev_part: None,
         }
     }
 }
@@ -127,7 +132,7 @@ impl Offline {
     }
 
     fn reindex(&mut self) {
-        self.kept_parts = self.index.albums.iter().flat_map(|a| a.tracks.iter().map(|t| t.part_key.clone())).collect();
+        self.kept_parts = self.index.albums.iter().flat_map(|a| a.tracks.iter().flat_map(|t| std::iter::once(t.part_key.clone()).chain(t.prev_part.clone()))).collect();
     }
 
     /// The local copy of a kept track, if it's on disk.
@@ -304,7 +309,18 @@ impl Crate {
     /// server (None when nothing is).
     pub(crate) fn offline_tracks(&self, album_key: &str) -> Option<Vec<Track>> {
         let kept = self.offline.index.get(album_key)?;
-        let on_disk: Vec<Track> = kept.to_tracks().into_iter().filter(|t| self.offline.local(&t.part_key).is_some()).collect();
+        // A track whose replacement isn't kept yet plays its previous file.
+        let on_disk: Vec<Track> = kept
+            .to_tracks()
+            .into_iter()
+            .zip(&kept.tracks)
+            .filter_map(|(mut t, k)| {
+                if self.offline.local(&t.part_key).is_none() {
+                    t.part_key = k.prev_part.clone().filter(|p| self.offline.local(p).is_some())?;
+                }
+                Some(t)
+            })
+            .collect();
         (!on_disk.is_empty()).then_some(on_disk)
     }
 
@@ -318,6 +334,10 @@ impl Crate {
         for k in &mut a.tracks {
             if let Some(t) = tracks.iter().find(|t| t.rating_key == k.rating_key) {
                 if t.part_key != k.part_key && file_for(&t.part_key).is_some() {
+                    // Keep the old file playable until the new one lands.
+                    if k.prev_part.is_none() && file_for(&k.part_key).is_some_and(|p| p.exists()) {
+                        k.prev_part = Some(k.part_key.clone());
+                    }
                     k.part_key = t.part_key.clone();
                     k.title = t.title.clone();
                     refetch = true;
@@ -352,12 +372,19 @@ impl Crate {
 
     /// Fill in details for kept albums whose index entries predate them
     /// (once, when the library has loaded from the server).
+    /// Quietly, off the ordered track-list queue (so it never delays a
+    /// click), and failures just leave the entry for next time.
     pub(crate) fn backfill_kept(&mut self, cx: &mut Context<Self>) {
         let stale: Vec<String> = self.offline.index.albums.iter().filter(|a| a.tracks.iter().any(|t| t.duration_ms == 0)).map(|a| a.key.clone()).collect();
         for key in stale {
-            if let Some(album) = self.albums.iter().find(|a| a.rating_key == key).cloned() {
-                self.with_tracks(album, cx, |_, _, _, _| {});
-            }
+            let k = key.clone();
+            let rx = crate::plex_call(move |c| async move { c.tracks(&k).await });
+            cx.spawn(async move |this, cx| {
+                if let Ok(Ok(tracks)) = rx.await {
+                    this.update(cx, |this, cx| this.refresh_kept_details(&key, &tracks, cx)).ok();
+                }
+            })
+            .detach();
         }
     }
 
@@ -454,6 +481,16 @@ impl Crate {
                 let failed = failed.filter(|_| !cancelled);
                 if let Some(a) = this.offline.index.albums.iter_mut().find(|a| a.key == key) {
                     a.complete = !a.tracks.is_empty() && a.tracks.iter().all(|t| file_for(&t.part_key).is_some_and(|p| p.exists()));
+                    // Replaced files are no longer needed once their new
+                    // ones are kept.
+                    for t in a.tracks.iter_mut() {
+                        if t.prev_part.is_some()
+                            && file_for(&t.part_key).is_some_and(|p| p.exists())
+                            && let Some(old) = t.prev_part.take().and_then(|p| file_for(&p))
+                        {
+                            let _ = std::fs::remove_file(old);
+                        }
+                    }
                     a.bytes = album_bytes(a);
                     a.failed = if a.complete { None } else { failed.clone() };
                 }
