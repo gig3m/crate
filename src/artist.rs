@@ -31,7 +31,7 @@ impl Crate {
         let on_field = mix(t.text_strong, c1, 0.12);
         let photo = match info.and_then(|i| self.art.get(&i.thumb).cloned()) {
             Some(i) => img(i).size(px(160.0)).rounded(px(80.0)).object_fit(ObjectFit::Cover).into_any_element(),
-            None => div().size(px(160.0)).rounded(px(80.0)).bg(rgb(t.raised)).into_any_element(),
+            None => gpui::img(self.mark(crate::art::placeholder_for(&name))).size(px(160.0)).rounded(px(80.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
         };
         let kicker = std::iter::once("ARTIST".to_string())
             .chain(info.map(|i| i.genres.iter().take(2).map(|g| g.to_uppercase()).collect::<Vec<_>>()).unwrap_or_default())
@@ -144,7 +144,7 @@ impl Crate {
                 let tk = tr.rating_key.clone();
                 let cover = match self.art.get(&tr.thumb).cloned() {
                     Some(i) => img(i).size(px(44.0)).flex_none().rounded(px(4.0)).object_fit(ObjectFit::Cover).into_any_element(),
-                    None => div().size(px(44.0)).flex_none().rounded(px(4.0)).bg(rgb(t.raised)).into_any_element(),
+                    None => gpui::img(self.mark(crate::art::placeholder_for(&tr.thumb))).size(px(44.0)).flex_none().rounded(px(4.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
                 };
                 div()
                     .id(("pop", n))
@@ -191,7 +191,7 @@ impl Crate {
                 let ix = *ix;
                 let cover = match self.art.get(&a.thumb).cloned() {
                     Some(i) => img(i).size(px(card_w)).rounded(px(8.0)).object_fit(ObjectFit::Cover).into_any_element(),
-                    None => div().size(px(card_w)).rounded(px(8.0)).bg(rgb(t.raised)).into_any_element(),
+                    None => gpui::img(self.mark(crate::art::placeholder_for(&a.thumb))).size(px(card_w)).rounded(px(8.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
                 };
                 div()
                     .id(("aa", ix))
@@ -234,7 +234,7 @@ impl Crate {
                 let thumb = format!("/library/metadata/{k}/thumb");
                 let face = match self.art.get(&thumb).cloned() {
                     Some(im) => img(im).size(px(92.0)).rounded(px(46.0)).object_fit(ObjectFit::Cover).into_any_element(),
-                    None => div().size(px(92.0)).rounded(px(46.0)).bg(rgb(t.raised)).into_any_element(),
+                    None => gpui::img(self.mark(crate::art::placeholder_for(&thumb))).size(px(92.0)).rounded(px(46.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
                 };
                 let n2 = n.clone();
                 div()

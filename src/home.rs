@@ -1,7 +1,7 @@
 //! Home from the design canvas (Main.dc.html): jump-back-in hero, radio
 //! cards, stations, mood/decade chips, then the server's album hubs.
 
-use gpui::{Context, FontWeight, ObjectFit, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb};
+use gpui::{Context, FontWeight, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb};
 
 use crate::{Crate, PAD_X, View, icons, plex::Album, shell::MONO, theme::{Theme, mix}};
 
@@ -80,11 +80,8 @@ impl Crate {
         self.add_filter(crate::library::LibFilter { kind, label, query: filter }, cx);
     }
 
-    fn cover(&self, thumb: &str, size: f32, round: f32, t: &Theme) -> gpui::AnyElement {
-        match self.art.get(thumb).cloned() {
-            Some(i) => img(i).size(px(size)).flex_none().rounded(px(round)).object_fit(ObjectFit::Cover).into_any_element(),
-            None => div().size(px(size)).flex_none().rounded(px(round)).bg(rgb(t.raised)).into_any_element(),
-        }
+    fn cover(&self, thumb: &str, size: f32, round: f32, _t: &Theme) -> gpui::AnyElement {
+        self.cover_or_mark(thumb, thumb, size, round)
     }
 
     fn pill(id: &'static str, label: &'static str, t: &Theme) -> gpui::Stateful<gpui::Div> {
@@ -306,7 +303,6 @@ impl Crate {
         let top = div().flex().gap(px(16.0)).child(self.hero(t, cx)).child(right);
 
         // Stations.
-        let swatches = [t.accent, t.discovery, t.healthy, t.text2];
         let stations: Vec<_> = home
             .rows
             .iter()
@@ -316,7 +312,6 @@ impl Crate {
             .enumerate()
             .map(|(i, s)| {
                 let (key, title) = (s.key.clone(), s.title.clone());
-                let c = swatches[i % swatches.len()];
                 div()
                     .id(("station", i))
                     .flex_1()
@@ -332,17 +327,7 @@ impl Crate {
                     .bg(rgb(t.surface))
                     .cursor_pointer()
                     .hover(|d| d.bg(rgb(t.raised)))
-                    .child(
-                        div()
-                            .size(px(44.0))
-                            .flex_none()
-                            .rounded(px(22.0))
-                            .bg(linear_gradient(135.0, linear_color_stop(rgb(c), 0.0), linear_color_stop(rgb(mix(c, t.base, 0.7)), 1.0)))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icons::icon("stations", 18.0, t.base)),
-                    )
+                    .child(img(self.mark(crate::art::station_motif(&s.title))).size(px(44.0)).flex_none().rounded(px(22.0)))
                     .child(
                         div()
                             .min_w_0()

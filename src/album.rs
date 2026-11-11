@@ -113,7 +113,7 @@ impl Crate {
         };
         let cover = match self.art.get(&album.thumb).cloned() {
             Some(i) => img(i).size(px(232.0)).rounded(px(8.0)).object_fit(ObjectFit::Cover).into_any_element(),
-            None => div().size(px(232.0)).rounded(px(8.0)).bg(rgb(t.raised)).into_any_element(),
+            None => gpui::img(self.mark(crate::art::placeholder_for(&album.thumb))).size(px(232.0)).rounded(px(8.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
         };
         let (ak, an) = (album.artist_key.clone(), album.artist.clone());
         let header = div()

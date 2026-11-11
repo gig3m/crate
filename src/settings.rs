@@ -68,6 +68,78 @@ Trade-off to mention to me: while a file plays at, say, 44.1 kHz, other apps tha
 }
 
 impl Crate {
+    /// Theme: Crate's own palette, or follow Omarchy.
+    fn theme_section(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::theme::{Mode, Theme as Th};
+        let option = |id: &'static str, mode: Mode, title: &'static str, blurb: &'static str, preview: Th, cx: &mut Context<Self>| {
+            let on = self.theme_mode == mode;
+            let dots = [preview.surface, preview.raised, preview.text_strong, preview.accent, preview.discovery, preview.healthy, preview.yellow, preview.red];
+            div()
+                .id(id)
+                .flex_1()
+                .min_w_0()
+                .p(px(16.0))
+                .rounded(px(12.0))
+                .border_1()
+                .border_color(rgb(if on { t.accent } else { t.border }))
+                .bg(rgb(if on { t.raised } else { t.surface }))
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(t.raised)))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .size(px(18.0))
+                                .flex_none()
+                                .rounded(px(9.0))
+                                .border_2()
+                                .border_color(rgb(if on { t.accent } else { t.line }))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(on, |d| d.child(div().size(px(8.0)).rounded(px(4.0)).bg(rgb(t.accent)))),
+                        )
+                        .child(div().text_size(px(15.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child(title)),
+                )
+                .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(blurb))
+                .child(div().flex().gap(px(6.0)).children(dots.into_iter().map(|c| div().size(px(18.0)).rounded(px(5.0)).bg(rgb(c)).border_1().border_color(rgb(t.line)))))
+                .on_click(cx.listener(move |this, _, _, cx| this.set_theme_mode(mode, cx)))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(div().text_size(px(20.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child("Theme"))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(16.0))
+                    .child(option(
+                        "theme-crate",
+                        Mode::Crate,
+                        "Crate",
+                        "The app's own palette from its design: deep blue-grey layers, white titles, blue, purple and green.",
+                        Th::load(Mode::Crate).0,
+                        cx,
+                    ))
+                    .child(option(
+                        "theme-omarchy",
+                        Mode::Omarchy,
+                        "Follow Omarchy",
+                        "Colors from your current Omarchy theme, updating live when you switch themes.",
+                        Th::load(Mode::Omarchy).0,
+                        cx,
+                    )),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn open_audio_settings(&mut self, cx: &mut Context<Self>) {
         self.go(crate::View::Soon("audio"));
         let task = cx.background_spawn(async { read_audio_info() });
@@ -234,7 +306,9 @@ impl Crate {
             .flex()
             .flex_col()
             .gap(px(26.0))
-            .child(div().text_size(px(28.0)).font_weight(FontWeight::BOLD).text_color(rgb(t.text_strong)).child("Audio"))
+            .child(div().text_size(px(28.0)).font_weight(FontWeight::BOLD).text_color(rgb(t.text_strong)).child("Settings"))
+            .child(self.theme_section(t, cx))
+            .child(div().text_size(px(20.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child("Audio"))
             .child(
                 div()
                     .flex()

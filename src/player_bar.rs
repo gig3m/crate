@@ -23,7 +23,8 @@ impl Crate {
         // Left: cover, title, artist · album.
         let cover = match track.and_then(|tr| self.art.get(&tr.thumb).cloned()) {
             Some(i) => img(i).size(px(56.0)).flex_none().rounded(px(6.0)).object_fit(ObjectFit::Cover).into_any_element(),
-            None => div().size(px(56.0)).flex_none().rounded(px(6.0)).bg(rgb(t.raised)).into_any_element(),
+            None if track.is_none() => div().size(px(56.0)).flex_none().rounded(px(6.0)).bg(rgb(t.raised)).into_any_element(),
+            None => gpui::img(self.mark(crate::art::placeholder_for(track.map(|tr| tr.thumb.as_str()).unwrap_or("")))).size(px(56.0)).flex_none().rounded(px(6.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
         };
         let (title, sub): (SharedString, SharedString) = match (now, track) {
             (Some(_), Some(tr)) => (tr.title.clone().into(), format!("{} · {}", tr.artist, tr.album_title).into()),

@@ -21,7 +21,7 @@ impl Crate {
 
         let cover = match self.art.get(&tr.thumb).cloned() {
             Some(i) => img(i).size(px(side)).rounded(px(10.0)).object_fit(ObjectFit::Cover).into_any_element(),
-            None => div().size(px(side)).rounded(px(10.0)).bg(white(0.08)).into_any_element(),
+            None => gpui::img(self.mark(crate::art::placeholder_for(&tr.thumb))).size(px(side)).rounded(px(10.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
         };
         let len = tr.duration_ms;
         let frac = if len > 0 { (n.elapsed_ms as f32 / len as f32).min(1.0) } else { 0.0 };
@@ -68,7 +68,7 @@ impl Crate {
             .map(|(i, q)| {
                 let art = match self.art.get(&q.thumb).cloned() {
                     Some(im) => img(im).size(px(36.0)).flex_none().rounded(px(4.0)).object_fit(ObjectFit::Cover).into_any_element(),
-                    None => div().size(px(36.0)).flex_none().rounded(px(4.0)).bg(white(0.08)).into_any_element(),
+                    None => gpui::img(self.mark(crate::art::placeholder_for(&q.thumb))).size(px(36.0)).flex_none().rounded(px(4.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
                 };
                 div()
                     .id(("tq", i))

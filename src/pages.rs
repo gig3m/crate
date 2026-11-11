@@ -108,7 +108,7 @@ impl Crate {
                                 this.request_thumb(&thumb);
                                 let face = match this.art.get(&thumb).cloned() {
                                     Some(im) => img(im).size(px(w)).rounded(px(w / 2.0)).object_fit(ObjectFit::Cover).into_any_element(),
-                                    None => div().size(px(w)).rounded(px(w / 2.0)).bg(rgb(t.raised)).into_any_element(),
+                                    None => gpui::img(this.mark(crate::art::placeholder_for(&thumb))).size(px(w)).rounded(px(w / 2.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
                                 };
                                 let (k2, n2) = (key.clone(), name.clone());
                                 div()
@@ -145,7 +145,7 @@ impl Crate {
     fn track_row(&self, i: usize, tr: &Track, right: String, t: &Theme) -> gpui::Stateful<gpui::Div> {
         let art = match self.art.get(&tr.thumb).cloned() {
             Some(im) => img(im).size(px(40.0)).flex_none().rounded(px(4.0)).object_fit(ObjectFit::Cover).into_any_element(),
-            None => div().size(px(40.0)).flex_none().rounded(px(4.0)).bg(rgb(t.raised)).into_any_element(),
+            None => gpui::img(self.mark(crate::art::placeholder_for(&tr.thumb))).size(px(40.0)).flex_none().rounded(px(4.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
         };
         let playing = self.now.as_ref().is_some_and(|n| n.tracks.get(n.idx).is_some_and(|x| x.rating_key == tr.rating_key));
         div()
@@ -244,7 +244,7 @@ impl Crate {
             .map(|(i, p)| {
                 let cover = match self.art.get(&p.thumb).cloned() {
                     Some(im) => img(im).size(px(w)).rounded(px(8.0)).object_fit(ObjectFit::Cover).into_any_element(),
-                    None => div().size(px(w)).rounded(px(8.0)).bg(rgb(t.raised)).into_any_element(),
+                    None => gpui::img(self.mark(crate::art::placeholder_for(&p.thumb))).size(px(w)).rounded(px(8.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
                 };
                 let (k, n) = (p.rating_key.clone(), p.title.clone());
                 div()

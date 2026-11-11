@@ -241,7 +241,7 @@ impl Crate {
                     .into_any_element(),
                 _ => match self.art.get(&thumb).cloned() {
                     Some(im) => img(im).size(px(size)).flex_none().rounded(px(round.min(size / 2.0))).object_fit(ObjectFit::Cover).into_any_element(),
-                    None => div().size(px(size)).flex_none().rounded(px(round.min(size / 2.0))).bg(rgb(t.raised)).into_any_element(),
+                    None => gpui::img(self.mark(crate::art::placeholder_for(&thumb))).size(px(size)).flex_none().rounded(px(round.min(size / 2.0))).object_fit(gpui::ObjectFit::Cover).into_any_element(),
                 },
             };
             body = body.child(

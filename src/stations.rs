@@ -92,12 +92,19 @@ impl Crate {
                     .border_color(rgb(t.border))
                     .bg(rgb(t.surface))
                     .flex()
-                    .flex_col()
-                    .gap(px(4.0))
+                    .items_center()
+                    .gap(px(14.0))
                     .cursor_pointer()
                     .hover(|d| d.bg(rgb(t.raised)))
-                    .child(div().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child(s.title.clone()))
-                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(crate::home::station_blurb(&s.title)))
+                    .child(gpui::img(self.mark(crate::art::station_motif(&s.title))).size(px(44.0)).flex_none().rounded(px(22.0)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(div().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child(s.title.clone()))
+                            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(crate::home::station_blurb(&s.title))),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| this.play_station(key.clone(), title.clone(), cx)))
             })
             .collect();

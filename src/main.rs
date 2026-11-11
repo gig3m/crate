@@ -9,6 +9,7 @@
 //!   CRATE_BENCH   (set: auto-scroll, print frame stats, quit)
 
 mod album;
+mod art;
 mod artist;
 mod home;
 mod icons;
@@ -63,6 +64,10 @@ pub(crate) const PAD_X: f32 = 36.0;
 struct Crate {
     theme: Theme,
     theme_gen: String,
+    /// Crate's palette (default) or the active Omarchy theme.
+    theme_mode: theme::Mode,
+    /// Generated station marks and cover placeholders for the current theme.
+    marks: std::cell::RefCell<art::Marks>,
     albums: Vec<Album>,
     total: usize,
     status: SharedString,
@@ -265,7 +270,8 @@ impl Crate {
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let (theme, theme_gen) = Theme::load();
+        let theme_mode = theme::saved_mode();
+        let (theme, theme_gen) = Theme::load(theme_mode);
         apply_component_theme(&theme, Some(window), cx);
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search, play, or run a command"));
         cx.subscribe(&search, |this, input, ev: &gpui_component::input::InputEvent, cx| {
@@ -427,7 +433,13 @@ impl Crate {
                 let ok = this
                     .update(cx, |this, cx| {
                         if gen_now != this.theme_gen {
-                            let (t, g) = Theme::load();
+                            this.theme_gen = gen_now.clone();
+                            // Crate's own palette doesn't follow Omarchy switches.
+                            if this.theme_mode == theme::Mode::Crate {
+                                return;
+                            }
+                            let (t, g) = Theme::load(theme::Mode::Omarchy);
+                            this.marks.borrow_mut().clear();
                             eprintln!("[crate] theme changed -> accent {:06x}", t.accent);
                             apply_component_theme(&t, None, cx);
                             this.theme = t;
@@ -460,6 +472,8 @@ impl Crate {
         Self {
             theme,
             theme_gen,
+            theme_mode,
+            marks: std::cell::RefCell::new(art::Marks::default()),
             albums: Vec::new(),
             total,
             status: "Loading library…".into(),
@@ -1135,6 +1149,31 @@ impl Crate {
             send_timeline(tr.rating_key.clone(), "stopped", at, tr.duration_ms);
             n.rep_state = "stopped";
         }
+    }
+
+    /// A generated mark (station art, placeholder) in the current theme.
+    pub(crate) fn mark(&self, m: art::Motif) -> Arc<Image> {
+        self.marks.borrow_mut().get(m, &self.theme)
+    }
+
+    /// Cover art, or the item's stable generated placeholder while it loads.
+    pub(crate) fn cover_or_mark(&self, thumb: &str, key: &str, size: f32, round: f32) -> gpui::AnyElement {
+        use gpui::ObjectFit;
+        let image = self.art.get(thumb).cloned().unwrap_or_else(|| self.mark(art::placeholder_for(if key.is_empty() { thumb } else { key })));
+        gpui::img(image).size(px(size)).flex_none().rounded(px(round)).object_fit(ObjectFit::Cover).into_any_element()
+    }
+
+    pub(crate) fn set_theme_mode(&mut self, mode: theme::Mode, cx: &mut Context<Self>) {
+        self.theme_mode = mode;
+        if let Err(e) = theme::save_mode(mode) {
+            self.status = format!("Couldn't save the theme choice: {e}").into();
+        }
+        let (t, g) = Theme::load(mode);
+        apply_component_theme(&t, None, cx);
+        self.theme = t;
+        self.theme_gen = g;
+        self.marks.borrow_mut().clear();
+        cx.notify();
     }
 
     /// Full Now Playing (lyrics are its middle column), optionally on a panel tab.

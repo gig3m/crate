@@ -96,7 +96,7 @@ impl Crate {
                 .text_color(rgb(t.muted))
                 .child(label.to_uppercase())
         };
-        let swatch = [t.accent, t.healthy, t.discovery, t.text2];
+        let swatch = [t.yellow, t.green, t.cyan, t.magenta, t.red, t.orange];
         let playlists = self.home.as_ref().map(|h| h.playlists.iter().take(6).cloned().collect::<Vec<_>>()).unwrap_or_default();
         let pinned: Vec<_> = playlists
             .into_iter()
@@ -179,6 +179,10 @@ impl Crate {
         .child(div().flex_1())
         .child(
             div()
+                .id("server-card")
+                .cursor_pointer()
+                .hover(|d| d.border_color(rgb(t.line)))
+                .on_click(cx.listener(|this, _, _, cx| this.open_audio_settings(cx)))
                 .flex()
                 .items_center()
                 .gap(px(10.0))

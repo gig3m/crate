@@ -305,7 +305,7 @@ impl Crate {
             }
             let cover = match art {
                 Some(image) => img(image).size(px(w)).rounded(px(8.0)).object_fit(ObjectFit::Cover).into_any_element(),
-                None => div().size(px(w)).rounded(px(8.0)).bg(rgb(t.raised)).into_any_element(),
+                None => gpui::img(self.mark(crate::art::placeholder_for(&a.thumb))).size(px(w)).rounded(px(8.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
             };
             cards.push(
                 div()
