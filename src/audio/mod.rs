@@ -651,7 +651,9 @@ fn decoder_thread(
         let ogg_opus = params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS && src.ext().as_deref() == Some("ogg");
         let preroll_ms = if ogg_opus && index == 0 { start_ms.min(80) } else { 0 };
         let mut preroll_frames = (preroll_ms * rate as u64 / 1000) as usize;
-        if index == 0 && start_ms > 0 {
+        // Seeking to (or pre-rolling back to) 0 is just playing from the start.
+        let seeked = index == 0 && start_ms > preroll_ms;
+        if seeked {
             use symphonia::core::formats::{SeekMode, SeekTo};
             use symphonia::core::units::Time;
             let time = Time::try_from_secs_f64((start_ms - preroll_ms) as f64 / 1000.0).unwrap_or_default();
@@ -667,8 +669,7 @@ fn decoder_thread(
         tail_rate = rate;
         let mut dec = opus::codecs()
             .make_audio_decoder(params, &AudioDecoderOptions::default().gapless(true))?;
-        let seeked = index == 0 && start_ms > 0;
-        if seeked {
+        if seeked && ogg_opus {
             // The decoder starts mid-stream: no start-of-stream trims (Opus
             // pre-skip) on the first packets it sees.
             dec.reset();
@@ -676,28 +677,29 @@ fn decoder_thread(
         let limit_frames = track_limit.map(|s| (s * rate as f64) as u64);
         let mut track_frames = 0u64;
         // Symphonia's Ogg reader returns UnexpectedEof, not Ok(None), when the
-        // last page isn't flagged end-of-stream, and Plex never flags it. So
-        // for Opus an EOF is the end only once the track's known length has
-        // played (within half a second); short of that it's a cut-off stream.
-        let start_frames = if seeked { start_ms * rate as u64 / 1000 } else { 0 };
+        // last page isn't flagged end-of-stream, and Plex never flags it.
+        // Where decoded output starts on the track (the pre-roll is dropped).
+        let start_frames = if index == 0 { start_ms * rate as u64 / 1000 } else { 0 };
         loop {
             let packet = match fmt.next_packet() {
                 Ok(Some(p)) => p,
                 Ok(None) => break,
-                Err(symphonia::core::errors::Error::IoError(e))
-                    if ogg_opus
-                        && e.kind() == std::io::ErrorKind::UnexpectedEof
-                        && num_frames.is_some_and(|n| start_frames + track_frames + rate as u64 / 2 >= n) =>
-                {
-                    break;
-                }
                 Err(symphonia::core::errors::Error::IoError(e)) if ogg_opus && e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    // Cut off: don't keep a cached copy that would fail the
-                    // same way next time (a live download isn't cached yet).
-                    if let Some(p) = src.cache_path() {
-                        let _ = std::fs::remove_file(p);
+                    // Plex's Ogg has no end-of-stream flag, so a cut-off stream
+                    // ends the same way: compare with the known length (2 s +
+                    // 1% slack: Plex's durations can run a little long). Short:
+                    // say so and drop a cached copy that would end early every
+                    // time, but carry on with the queue like any track end.
+                    let at = start_frames + track_frames;
+                    if let Some(n) = num_frames
+                        && at + 2 * rate as u64 + n / 100 < n
+                    {
+                        eprintln!("[engine] {} ended early at {:.1} of {:.1} s", src.label(), at as f64 / rate as f64, n as f64 / rate as f64);
+                        if let Some(p) = src.cache_path() {
+                            let _ = std::fs::remove_file(p);
+                        }
                     }
-                    anyhow::bail!("stream ended early at {:.1} s", (start_frames + track_frames) as f64 / rate as f64);
+                    break;
                 }
                 Err(e) => return Err(e.into()),
             };
