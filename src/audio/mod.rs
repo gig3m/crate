@@ -683,6 +683,10 @@ fn decoder_thread(
             }
             cur_rate = rate;
         }
+        // Start fetching the next track now, while this one plays.
+        if let Some(next) = queue.lock().unwrap().items.front() {
+            next.src.prefetch(stats.stop.clone());
+        }
         let _ = ev.send(Event::TrackStarted {
             index,
             label: src.label(),

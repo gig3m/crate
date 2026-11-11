@@ -61,6 +61,26 @@ impl Source {
         p.extension().map(|e| e.to_string_lossy().into_owned())
     }
 
+    /// Download into the cache ahead of time, so this track's start doesn't
+    /// wait on the network (the decoder opens the next track only when it
+    /// reaches it). A no-op for local files and tracks already cached; `stop`
+    /// (the engine's) abandons it.
+    pub fn prefetch(&self, stop: Arc<AtomicBool>) {
+        let Source::Http { cache, .. } = self else { return };
+        if cache.exists() {
+            return;
+        }
+        let src = self.clone();
+        let _ = std::thread::Builder::new().name("prefetch".into()).spawn(move || match src.open(stop) {
+            // Reading to the end waits for the download, which publishes
+            // the cache file when complete.
+            Ok(mut s) => {
+                let _ = std::io::copy(&mut s, &mut std::io::sink());
+            }
+            Err(e) => eprintln!("[prefetch] {}: {e:#}", src.label()),
+        });
+    }
+
     /// Open for decoding. For HTTP, a complete cached copy is used if present.
     /// `stop` aborts a read that is waiting on the network.
     pub fn open(&self, stop: Arc<AtomicBool>) -> anyhow::Result<Box<dyn MediaSource>> {
