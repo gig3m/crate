@@ -13,6 +13,72 @@ pub(crate) enum Item {
     Playlist(Playlist),
     /// Plex radio seeded from an artist or album: (key, label).
     Radio(String, String),
+    /// `#` scope: filter Albums by a genre, mood or decade.
+    Filter { kind: &'static str, label: String, query: String },
+    /// `>` scope: an app command.
+    Command(PalCmd),
+}
+
+/// `>` commands (canvas: "> commands").
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum PalCmd {
+    Nav(&'static str, &'static str),
+    NowPlaying,
+    Lyrics,
+    Queue,
+    Shuffle,
+    Repeat,
+    Settings,
+    SonicAdventure,
+    ThemeCrate,
+    ThemeOmarchy,
+}
+
+impl PalCmd {
+    const ALL: [PalCmd; 19] = [
+        PalCmd::Nav("home", "Go to Home"),
+        PalCmd::Nav("albums", "Go to Albums"),
+        PalCmd::Nav("artists", "Go to Artists"),
+        PalCmd::Nav("tracks", "Go to Tracks"),
+        PalCmd::Nav("playlists", "Go to Playlists"),
+        PalCmd::Nav("genres", "Go to Genres & Moods"),
+        PalCmd::Nav("history", "Go to History"),
+        PalCmd::Nav("offline", "Go to Offline"),
+        PalCmd::Nav("stations", "Go to Stations"),
+        PalCmd::SonicAdventure,
+        PalCmd::NowPlaying,
+        PalCmd::Lyrics,
+        PalCmd::Queue,
+        PalCmd::Shuffle,
+        PalCmd::Repeat,
+        PalCmd::Settings,
+        PalCmd::ThemeCrate,
+        PalCmd::ThemeOmarchy,
+        PalCmd::Nav("search", "Search"),
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            PalCmd::Nav(_, l) => l,
+            PalCmd::NowPlaying => "Open Now Playing",
+            PalCmd::Lyrics => "Show lyrics",
+            PalCmd::Queue => "Show the queue",
+            PalCmd::Shuffle => "Toggle shuffle",
+            PalCmd::Repeat => "Cycle repeat",
+            PalCmd::Settings => "Open settings",
+            PalCmd::SonicAdventure => "Sonic Adventure",
+            PalCmd::ThemeCrate => "Theme: Crate",
+            PalCmd::ThemeOmarchy => "Theme: Follow Omarchy",
+        }
+    }
+}
+
+/// A leading `@`, `#` or `>` picks a scope (canvas); returns it and the rest.
+pub(crate) fn split_prefix(q: &str) -> (Option<char>, &str) {
+    match q.chars().next() {
+        Some(c @ ('@' | '#' | '>')) => (Some(c), q[1..].trim_start()),
+        _ => (None, q),
+    }
 }
 
 impl Crate {
@@ -32,14 +98,33 @@ impl Crate {
 
     /// The selectable rows, in display order: top result first.
     pub(crate) fn palette_items(&self) -> Vec<(&'static str, Item)> {
-        let want = match self.pal_scope {
+        let (prefix, rest) = split_prefix(&self.search_query);
+        let rest = rest.to_lowercase();
+        match prefix {
+            Some('#') => {
+                let mut out = Vec::new();
+                if let Some(h) = &self.home {
+                    for (kind, group, items) in [("Genre", "Genres", &h.genres), ("Mood", "Moods", &h.moods), ("Decade", "Decades", &h.decades)] {
+                        for (q, l) in items.iter().filter(|(_, l)| l.to_lowercase().contains(&rest)).take(12) {
+                            out.push((group, Item::Filter { kind, label: l.clone(), query: q.clone() }));
+                        }
+                    }
+                }
+                return out;
+            }
+            Some('>') => {
+                return PalCmd::ALL.into_iter().filter(|c| c.label().to_lowercase().contains(&rest)).map(|c| ("Commands", Item::Command(c))).collect();
+            }
+            _ => {}
+        }
+        let want = match if prefix == Some('@') { 1 } else { self.pal_scope } {
             1 => Some("artist"),
             2 => Some("album"),
             3 => Some("track"),
             _ => None,
         };
         let mut out: Vec<(&'static str, Item)> = Vec::new();
-        if self.pal_scope != 4 {
+        if self.pal_scope != 4 || prefix == Some('@') {
             let hits: Vec<&SearchHit> = self.hits.iter().filter(|h| want.is_none_or(|w| h.kind == w)).collect();
             if let Some(top) = hits.first() {
                 out.push(("Top result", Item::Hit((*top).clone())));
@@ -51,7 +136,7 @@ impl Crate {
                 }
             }
         }
-        if self.pal_scope == 0 || self.pal_scope == 4 {
+        if prefix.is_none() && (self.pal_scope == 0 || self.pal_scope == 4) {
             let q = self.search_query.to_lowercase();
             if !q.is_empty()
                 && let Some(h) = &self.home
@@ -95,6 +180,36 @@ impl Crate {
                 self.play_radio(&key, title, cx);
                 self.close_palette(window, cx);
             }
+            Item::Filter { kind, label, query } => {
+                self.close_palette(window, cx);
+                self.add_filter(crate::library::LibFilter { kind, label, query }, cx);
+            }
+            Item::Command(c) => {
+                self.close_palette(window, cx);
+                self.run_command(c, window, cx);
+            }
+        }
+    }
+
+    fn run_command(&mut self, c: PalCmd, window: &mut Window, cx: &mut Context<Self>) {
+        match c {
+            PalCmd::Nav(id, _) => {
+                self.now_playing = false;
+                self.nav_to(id, window, cx);
+            }
+            PalCmd::NowPlaying => self.open_now_playing(None, cx),
+            PalCmd::Lyrics => self.open_now_playing(None, cx),
+            PalCmd::Queue => self.open_now_playing(Some(0), cx),
+            PalCmd::Shuffle => self.toggle_shuffle(cx),
+            PalCmd::Repeat => self.cycle_repeat(cx),
+            PalCmd::Settings => self.open_audio_settings(cx),
+            PalCmd::SonicAdventure => self.open_sonic(cx),
+            PalCmd::ThemeCrate => self.set_theme_mode(crate::theme::Mode::Crate, cx),
+            PalCmd::ThemeOmarchy => self.set_theme_mode(crate::theme::Mode::Omarchy, cx),
+        }
+        if self.now.is_none() && matches!(c, PalCmd::NowPlaying | PalCmd::Lyrics | PalCmd::Queue | PalCmd::Shuffle | PalCmd::Repeat) {
+            self.status = "Nothing is playing".into();
+            cx.notify();
         }
     }
 
@@ -190,7 +305,12 @@ impl Crate {
         let items = self.palette_items();
         let sel = self.pal_sel.min(items.len().saturating_sub(1));
         let scopes = div().flex().gap(px(6.0)).children(SCOPES.iter().enumerate().map(|(i, s)| {
-            let on = i == self.pal_scope;
+            // A typed `@` shows as the Artists scope.
+            let on = match split_prefix(&self.search_query).0 {
+                Some('@') => i == 1,
+                Some(_) => false,
+                None => i == self.pal_scope,
+            };
             div()
                 .id(("scope", i))
                 .h(px(26.0))
@@ -272,10 +392,18 @@ impl Crate {
                 }
                 Item::Playlist(p) => (p.thumb.clone(), 4.0, p.title.clone(), format!("Playlist · {} tracks", p.count), String::new()),
                 Item::Radio(_, label) => (String::new(), 8.0, label.clone(), String::new(), "Tab".into()),
+                Item::Filter { kind, label, .. } => (String::new(), 8.0, label.clone(), format!("{kind} · filter your albums"), String::new()),
+                Item::Command(c) => (String::new(), 8.0, c.label().into(), String::new(), "Enter".into()),
             };
             let size = if top { 52.0 } else { 36.0 };
-            let lead = match &item {
-                Item::Radio(..) => div()
+            let icon_of = |item: &Item| match item {
+                Item::Radio(..) => Some(("stations", t.accent)),
+                Item::Filter { .. } => Some(("genres", t.discovery)),
+                Item::Command(_) => Some(("settings", t.text2)),
+                _ => None,
+            };
+            let lead = match icon_of(&item) {
+                Some((ic, color)) => div()
                     .size(px(36.0))
                     .flex_none()
                     .rounded(px(8.0))
@@ -285,9 +413,9 @@ impl Crate {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(icons::icon("stations", 17.0, t.accent))
+                    .child(icons::icon(ic, 17.0, color))
                     .into_any_element(),
-                _ => match self.art.get(&thumb).cloned() {
+                None => match self.art.get(&thumb).cloned() {
                     Some(im) => img(im).size(px(size)).flex_none().rounded(px(round.min(size / 2.0))).object_fit(ObjectFit::Cover).into_any_element(),
                     None => gpui::img(self.mark(crate::art::placeholder_for(&thumb))).size(px(size)).flex_none().rounded(px(round.min(size / 2.0))).object_fit(gpui::ObjectFit::Cover).into_any_element(),
                 },
@@ -345,6 +473,7 @@ impl Crate {
             .child("Ctrl+Enter queue")
             .child("Tab radio")
             .child("→ open")
+            .child("@ artists  # genres  > commands")
             .child(div().flex_1())
             .child("Esc");
 

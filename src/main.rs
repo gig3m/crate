@@ -734,7 +734,14 @@ impl Crate {
             cx.notify();
             return;
         }
-        let query = self.search_query.clone();
+        // `#` (genres) and `>` (commands) are local; `@` searches artists.
+        let (prefix, rest) = palette::split_prefix(&self.search_query);
+        if matches!(prefix, Some('#' | '>')) || rest.is_empty() {
+            self.hits.clear();
+            cx.notify();
+            return;
+        }
+        let query = rest.to_string();
         let tx = self.search_tx.clone();
         cx.spawn(async move |this, cx| {
             // Debounce: only the latest keystroke after 120 ms queries Plex.
