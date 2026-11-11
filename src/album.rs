@@ -190,6 +190,7 @@ impl Crate {
             .pt(px(8.0))
             .pb(px(20.0))
             .flex()
+            .flex_wrap()
             .items_center()
             .gap(px(12.0))
             .child(
@@ -409,7 +410,7 @@ impl Crate {
                         .flex()
                         .flex_col()
                         .gap(px(6.0))
-                        .cursor_pointer()
+                        .when(ix.is_some(), |d| d.cursor_pointer())
                         .child(self.cover_or_mark(&a.thumb, &a.rating_key, 104.0, 6.0))
                         .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).truncate().child(a.title.clone()))
                         .child(div().text_size(px(11.0)).text_color(rgb(t.muted)).truncate().child(a.artist.clone()))

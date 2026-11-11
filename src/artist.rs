@@ -219,6 +219,8 @@ impl Crate {
         // Aside: similar artists you have, biography.
         // Sonically similar artists when the server has them, else Plex's
         // metadata "similar" tags that match artists in the library.
+        let sonic_thumbs: std::collections::HashMap<String, String> =
+            self.sonic_artists.get(key).cloned().flatten().unwrap_or_default().into_iter().map(|(k, _, th)| (k, th)).collect();
         let sonic: Vec<(String, String)> =
             self.sonic_artists.get(key).cloned().flatten().unwrap_or_default().into_iter().map(|(k, n, _)| (k, n)).collect();
         let sonic_label = !sonic.is_empty();
@@ -237,7 +239,7 @@ impl Crate {
             .into_iter()
             .enumerate()
             .map(|(i, (k, n))| {
-                let thumb = format!("/library/metadata/{k}/thumb");
+                let thumb = sonic_thumbs.get(&k).filter(|t| !t.is_empty()).cloned().unwrap_or_else(|| format!("/library/metadata/{k}/thumb"));
                 let face = match self.art.get(&thumb).cloned() {
                     Some(im) => img(im).size(px(92.0)).rounded(px(46.0)).object_fit(ObjectFit::Cover).into_any_element(),
                     None => gpui::img(self.mark(crate::art::placeholder_for(&thumb))).size(px(92.0)).rounded(px(46.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),

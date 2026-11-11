@@ -142,6 +142,7 @@ impl Crate {
                             div()
                                 .mt(px(8.0))
                                 .flex()
+                                .flex_wrap()
                                 .gap(px(10.0))
                                 .child(
                                     div()

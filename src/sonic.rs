@@ -16,17 +16,21 @@ impl Crate {
         let k = key.clone();
         let rx = crate::plex_call(move |c| async move { c.nearest_albums(&k, 12).await });
         cx.spawn(async move |this, cx| {
-            if let Ok(res) = rx.await {
-                this.update(cx, |this, cx| {
-                    let list = res.unwrap_or_default();
+            let res = rx.await;
+            this.update(cx, |this, cx| match res {
+                Ok(Ok(list)) => {
                     for a in &list {
                         this.request_thumb(&a.thumb.clone());
                     }
                     this.sonic_albums.insert(key, Some(list));
                     cx.notify();
-                })
-                .ok();
-            }
+                }
+                // Not cached: the next visit asks again.
+                _ => {
+                    this.sonic_albums.remove(&key);
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -37,19 +41,24 @@ impl Crate {
         }
         self.sonic_artists.insert(key.clone(), None);
         let k = key.clone();
-        let rx = crate::plex_call(move |c| async move { c.nearest_artists(&k, 6).await });
+        let rx = crate::plex_call(move |c| async move { c.nearest_artists(&k, 7).await });
         cx.spawn(async move |this, cx| {
-            if let Ok(res) = rx.await {
-                this.update(cx, |this, cx| {
-                    let list = res.unwrap_or_default();
+            let res = rx.await;
+            this.update(cx, |this, cx| match res {
+                Ok(Ok(list)) => {
+                    // Not the artist itself; photos by the thumb the cards look up.
+                    let list: Vec<ArtistRef> = list.into_iter().filter(|(k, _, _)| *k != key).take(6).collect();
                     for (_, _, th) in &list {
                         this.request_thumb(&th.clone());
                     }
                     this.sonic_artists.insert(key, Some(list));
                     cx.notify();
-                })
-                .ok();
-            }
+                }
+                _ => {
+                    this.sonic_artists.remove(&key);
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -66,6 +75,10 @@ impl Crate {
             let res = rx.await;
             this.update(cx, |this, cx| match res {
                 _ if this.play_intent != intent => {}
+                Ok(Ok(near)) if near.is_empty() => {
+                    this.status = format!("{} hasn't been sonically analyzed yet", seed.title).into();
+                    cx.notify();
+                }
                 Ok(Ok(near)) => {
                     let seed_key = seed.rating_key.clone();
                     let mut q = vec![seed];
@@ -82,9 +95,17 @@ impl Crate {
 
     /// Sonic radio seeded from an album's first track.
     pub(crate) fn play_album_sonic_radio(&mut self, album: Album, cx: &mut Context<Self>) {
-        self.with_tracks(album, cx, |this, _album, tracks, cx| {
-            if let Some(first) = tracks.into_iter().next() {
-                this.play_sonic_radio(first, cx);
+        self.play_intent += 1;
+        let intent = self.play_intent;
+        self.status = format!("Finding music that sounds like {}…", album.title).into();
+        cx.notify();
+        self.with_tracks(album, cx, move |this, _album, tracks, cx| {
+            if this.play_intent != intent {
+                return;
+            }
+            match tracks.into_iter().next() {
+                Some(first) => this.play_sonic_radio(first, cx),
+                None => this.status = "That album has no tracks to start from".into(),
             }
         });
     }
@@ -115,18 +136,27 @@ impl Crate {
                 return;
             }
             let rx = crate::plex_call(move |c| async move { c.search(&q, &section).await });
-            if let Ok(Ok(hits)) = rx.await {
-                this.update(cx, |this, cx| {
-                    if this.sonic.query_gen == gen_id {
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                if this.sonic.query_gen != gen_id {
+                    return;
+                }
+                match res {
+                    Ok(Ok(hits)) => {
                         this.sonic.hits = hits.into_iter().filter(|h| h.kind == "track").take(8).collect();
                         for h in this.sonic.hits.clone() {
                             this.request_thumb(&h.thumb);
                         }
-                        cx.notify();
                     }
-                })
-                .ok();
-            }
+                    // Never leave the previous query's tracks under the new text.
+                    _ => {
+                        this.sonic.hits.clear();
+                        this.status = "Track search failed".into();
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -367,7 +397,7 @@ impl Crate {
                             }),
                     )
                     .child(div().font_family(MONO).text_size(px(12.0)).text_color(rgb(t.muted)).child(status))
-                    .when(!path_cards.is_empty(), |d| d.child(div().id("path").overflow_x_scroll().flex().gap(px(10.0)).pb(px(4.0)).children(path_cards))),
+                    .when(!path_cards.is_empty(), |d| d.child(div().flex().flex_wrap().gap(px(10.0)).children(path_cards))),
             )
             .child(
                 div()
