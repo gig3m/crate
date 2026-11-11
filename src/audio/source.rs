@@ -224,6 +224,13 @@ impl Progressive {
         let http = reqwest::blocking::Client::new();
         let mut resp = http.get(url).header("X-Plex-Token", token).header("X-Plex-Client-Identifier", client).send()?.error_for_status()?;
         let (url, token, client) = (url.to_string(), token.to_string(), client.to_string());
+        // What a resume must still be: the same file (If-Range answers the
+        // whole thing, not 206, if it changed). No validator, no resume.
+        // Transcodes never resume: a new request is a new encode.
+        let validator = ["etag", "last-modified"]
+            .iter()
+            .find_map(|h| resp.headers().get(*h).and_then(|v| v.to_str().ok()).map(String::from))
+            .filter(|_| client == CLIENT);
         let n = ATTEMPT.fetch_add(1, Ordering::Relaxed);
         let part = cache.with_extension(format!("part.{}.{n}", std::process::id()));
         let writer = File::create(&part)?;
@@ -258,7 +265,7 @@ impl Progressive {
                             // length is known and the server does ranges.
                             let (got, total) = (st2.written.load(Ordering::Acquire), st2.total.load(Ordering::Acquire));
                             let mut resumed = None;
-                            while resumed.is_none() && resumes < 5 && total > 0 && got < total {
+                            while resumed.is_none() && resumes < 5 && total > 0 && got < total && let Some(validator) = validator.as_deref() {
                                 std::thread::sleep(Duration::from_millis(500 << resumes));
                                 resumes += 1;
                                 if cancel2.load(Ordering::Acquire) {
@@ -269,9 +276,26 @@ impl Progressive {
                                     .header("X-Plex-Token", &token)
                                     .header("X-Plex-Client-Identifier", &client)
                                     .header("Range", format!("bytes={got}-"))
+                                    .header("If-Range", validator)
                                     .send();
+                                // Only exactly the missing bytes, of a file the same size.
+                                let want = format!("bytes {got}-{}/{total}", total - 1);
                                 match r {
-                                    Ok(r) if r.status() == reqwest::StatusCode::PARTIAL_CONTENT => resumed = Some(r),
+                                    Ok(r)
+                                        if r.status() == reqwest::StatusCode::PARTIAL_CONTENT
+                                            && r.headers().get("content-range").and_then(|v| v.to_str().ok()) == Some(want.as_str()) =>
+                                    {
+                                        resumed = Some(r)
+                                    }
+                                    Ok(r) if r.status() == reqwest::StatusCode::PARTIAL_CONTENT => {
+                                        eprintln!("[download] resume at {got}: unexpected range {:?}", r.headers().get("content-range"));
+                                        break;
+                                    }
+                                    // 200 to an If-Range: the file changed; don't splice.
+                                    Ok(r) if r.status() == reqwest::StatusCode::OK => {
+                                        eprintln!("[download] resume at {got}: the file changed on the server");
+                                        break;
+                                    }
                                     Ok(r) => eprintln!("[download] resume at {got}: {}", r.status()),
                                     Err(e) => eprintln!("[download] resume at {got}: {e}"),
                                 }
