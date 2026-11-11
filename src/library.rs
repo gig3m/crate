@@ -219,8 +219,8 @@ impl Crate {
             .collect();
 
         let count = match &self.lib_view {
-            Some(v) if !self.lib_filters.is_empty() => format!("{} of {} match", v.len(), self.albums.len()),
-            _ => format!("{} albums", self.albums.len()),
+            Some(v) if !self.lib_filters.is_empty() => format!("{} of {} match", thousands(v.len()), thousands(self.albums.len())),
+            _ => format!("{} albums", thousands(self.albums.len())),
         };
         div()
             .px(px(PAD_X))
@@ -658,4 +658,17 @@ impl Crate {
         self.selection.clear();
         cx.notify();
     }
+}
+
+/// 1240 -> "1,240" (canvas counts).
+pub(crate) fn thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }

@@ -185,6 +185,8 @@ struct Crate {
     offline: offline::Offline,
     /// Sonic analysis results: similar albums / artists per key (None while loading).
     sonic_albums: HashMap<String, Option<Vec<Album>>>,
+    /// Card formats of other editions shown on album pages, by album key.
+    edition_formats: HashMap<String, (u32, String)>,
     sonic_artists: HashMap<String, Option<Vec<sonic::ArtistRef>>>,
     sonic: sonic::SonicState,
     /// Artist key -> (singles & EPs, live) album keys; and the open tab.
@@ -701,6 +703,7 @@ impl Crate {
             // Albums left half-downloaded last time pick up where they stopped.
             offline: offline::Offline::new(),
             sonic_albums: HashMap::new(),
+            edition_formats: HashMap::new(),
             sonic_artists: HashMap::new(),
             sonic: sonic::SonicState::default(),
             artist_kinds: HashMap::new(),
@@ -991,6 +994,7 @@ impl Crate {
         self.go(View::Album { ix, tracks: None });
         self.request_album_detail(album.rating_key.clone(), cx);
         self.request_sonic_albums(album.rating_key.clone(), cx);
+        self.request_edition_formats(&album, cx);
         self.album_scroll = gpui::ScrollHandle::new();
         self.cursor = None;
         cx.notify();
@@ -1940,6 +1944,11 @@ impl Render for Crate {
                             "x" => this.toggle_cursor_mark(cx),
                             "r" => this.radio_from_selection(cx),
                             "reroll" => this.reroll_sonic_path(cx),
+                            "bottom" => {
+                                this.album_scroll.scroll_to_bottom();
+                                this.settings_scroll.scroll_to_bottom();
+                                cx.notify();
+                            }
                             k if k.starts_with("next:") || k.starts_with("queue:") => {
                                 let (next, key) = k.split_once(':').map(|(a, b)| (a == "next", b.to_string())).unwrap_or((false, String::new()));
                                 if let Some(album) = this.albums.iter().find(|a| a.rating_key == key).cloned() {

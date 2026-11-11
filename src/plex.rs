@@ -528,6 +528,20 @@ impl Client {
             .collect())
     }
 
+    /// Edition facts for album pages: (album key, track count, card format).
+    /// Track counts come only with per-album metadata (not the library list).
+    pub async fn edition_info(&self, keys: Vec<String>) -> anyhow::Result<Vec<(String, u32, String)>> {
+        let v: serde_json::Value = self.get(&format!("/library/metadata/{}", keys.join(","))).await?.json().await.context("editions")?;
+        let counts: std::collections::HashMap<String, u32> = v["MediaContainer"]["Metadata"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| Some((m["ratingKey"].as_str()?.to_string(), m["leafCount"].as_u64().unwrap_or(0) as u32)))
+            .collect();
+        let formats: std::collections::HashMap<String, String> = self.album_formats(keys.clone()).await.unwrap_or_default().into_iter().collect();
+        Ok(keys.into_iter().map(|k| (k.clone(), counts.get(&k).copied().unwrap_or(0), formats.get(&k).cloned().unwrap_or_default())).collect())
+    }
+
     /// Card formats for these albums, as (album key, format), fetched
     /// concurrently after Home is up. Albums that don't answer within 10 s
     /// (or fail) are left out.

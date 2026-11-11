@@ -51,6 +51,62 @@ fn month_year(ts: i64) -> String {
 }
 
 impl Crate {
+    /// Other editions of `album` in the library: same artist, same title once
+    /// bracketed suffixes ("(Deluxe Edition)", "[Remastered]") are dropped.
+    /// (index, label) with "Original" for the plain title; empty unless 2+.
+    pub(crate) fn editions(&self, album: &crate::plex::Album) -> Vec<(usize, String)> {
+        let base = edition_base(&album.title);
+        if base.is_empty() || album.artist_key.is_empty() {
+            return Vec::new();
+        }
+        let mut out: Vec<(usize, String)> = self
+            .albums
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.artist_key == album.artist_key && edition_base(&a.title) == base)
+            .map(|(i, a)| (i, edition_label(&a.title)))
+            .collect();
+        if out.len() < 2 {
+            return Vec::new();
+        }
+        // Same title twice (e.g. two "Nine Lives"): tell them apart by year,
+        // when the years differ (track counts show beside them anyway).
+        let snapshot: Vec<(String, String)> = out.iter().map(|(i, l)| (l.clone(), self.albums.get(*i).map(|a| a.year.clone()).unwrap_or_default())).collect();
+        for (i, l) in out.iter_mut() {
+            let years: std::collections::HashSet<&String> = snapshot.iter().filter(|(x, _)| x == l).map(|(_, y)| y).collect();
+            if years.len() > 1
+                && let Some(y) = self.albums.get(*i).map(|a| a.year.clone()).filter(|y| !y.is_empty())
+            {
+                *l = format!("{l} · {y}");
+            }
+        }
+        out.sort_by(|a, b| (a.1 != "Original").cmp(&(b.1 != "Original")).then(a.1.cmp(&b.1)));
+        out
+    }
+
+    /// Card formats for the editions of `album` not fetched yet.
+    pub(crate) fn request_edition_formats(&mut self, album: &crate::plex::Album, cx: &mut Context<Self>) {
+        let keys: Vec<String> =
+            self.editions(album).iter().filter_map(|(i, _)| self.albums.get(*i)).map(|a| a.rating_key.clone()).filter(|k| !self.edition_formats.contains_key(k)).collect();
+        if keys.is_empty() {
+            return;
+        }
+        for k in &keys {
+            self.edition_formats.insert(k.clone(), (0, String::new()));
+        }
+        let rx = crate::plex_call(move |c| async move { c.edition_info(keys).await });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(found)) = rx.await {
+                this.update(cx, |this, cx| {
+                    this.edition_formats.extend(found.into_iter().map(|(k, n, f)| (k, (n, f))));
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn request_album_detail(&mut self, key: String, cx: &mut Context<Self>) {
         if key.is_empty() || self.album_detail.contains_key(&key) {
             return;
@@ -420,6 +476,42 @@ impl Crate {
                         .when_some(ix, |d, ix| d.on_click(cx.listener(move |this, _, _, cx| this.open_album(ix, cx))))
                 })))
         });
+        // Editions in your library (canvas): the other versions of this album.
+        let editions = self.editions(&album);
+        let editions_el = (!editions.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(div().font_family(MONO).font_weight(FontWeight::MEDIUM).text_size(px(11.0)).text_color(rgb(t.muted)).child("EDITIONS IN YOUR LIBRARY"))
+                .children(editions.into_iter().map(|(i, label)| {
+                    let a = self.albums.get(i).cloned();
+                    let here = i == ix;
+                    let (tracks, fmt) = a.as_ref().and_then(|a| self.edition_formats.get(&a.rating_key)).cloned().unwrap_or_default();
+                    let text = match tracks {
+                        0 => label,
+                        1 => format!("{label} · 1 track"),
+                        n => format!("{label} · {n} tracks"),
+                    };
+                    div()
+                        .id(("edition", i))
+                        .h(px(34.0))
+                        .px(px(12.0))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(10.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(rgb(if here { t.accent } else { t.raised }))
+                        .when(here, |d| d.bg(rgb(t.raised)))
+                        .text_size(px(13.0))
+                        .text_color(rgb(if here { t.text_strong } else { t.text }))
+                        .when(!here, |d| d.cursor_pointer().hover(|d| d.bg(rgb(t.raised))).on_click(cx.listener(move |this, _, _, cx| this.open_album(i, cx))))
+                        .child(div().min_w_0().truncate().child(text))
+                        .when(!fmt.is_empty(), |d| d.child(div().flex_none().font_family(MONO).text_size(px(11.0)).text_color(rgb(t.muted)).child(fmt)))
+                }))
+        });
         let aside = detail.as_ref().map(|d| {
             let row = |k: &'static str, v: String| {
                 div()
@@ -456,6 +548,7 @@ impl Crate {
                     el.child(div().text_size(px(13.0)).line_height(px(21.0)).text_color(rgb(t.text2)).line_clamp(8).child(d.summary.clone()))
                 })
                 .child(facts)
+                .children(editions_el)
                 .children(similar_el)
         });
 
@@ -471,5 +564,65 @@ impl Crate {
             .child(actions)
             .child(div().px(px(PAD_X)).pb(px(40.0)).flex().gap(px(36.0)).child(table).children(aside))
             .into_any_element()
+    }
+}
+
+/// An album title without bracketed suffixes, lowercased: "By the Way
+/// (Deluxe Edition)" and "By the Way" share "by the way".
+fn edition_base(title: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0i32;
+    for c in title.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// What makes an edition different: its bracketed suffixes, or "Original".
+fn edition_label(title: &str) -> String {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    for c in title.chars() {
+        match c {
+            '(' | '[' => {
+                if depth > 0 {
+                    cur.push(c);
+                }
+                depth += 1;
+            }
+            ')' | ']' => {
+                depth = (depth - 1).max(0);
+                if depth == 0 {
+                    parts.push(std::mem::take(&mut cur).trim().to_string());
+                } else {
+                    cur.push(c);
+                }
+            }
+            _ if depth > 0 => cur.push(c),
+            _ => {}
+        }
+    }
+    let parts: Vec<String> = parts.into_iter().filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() { "Original".into() } else { parts.join(" · ") }
+}
+
+#[cfg(test)]
+mod edition_tests {
+    use super::{edition_base, edition_label};
+
+    #[test]
+    fn editions() {
+        assert_eq!(edition_base("By the Way (Deluxe Edition)"), "by the way");
+        assert_eq!(edition_base("By  the Way"), "by the way");
+        assert_eq!(edition_label("By the Way (Deluxe Edition)"), "Deluxe Edition");
+        assert_eq!(edition_label("Diorama [Remastered] (U.S. Version)"), "Remastered · U.S. Version");
+        assert_eq!(edition_label("Hoobastank"), "Original");
+        assert_eq!(edition_base("(What's the Story) Morning Glory?"), "morning glory?");
     }
 }
