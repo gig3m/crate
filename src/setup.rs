@@ -24,8 +24,8 @@ pub struct Setup {
     rt: tokio::runtime::Handle,
     http: reqwest::Client,
     step: Step,
-    /// Bumped when the user goes back, so a stale poll stops.
-    run: u64,
+    /// Bumped when the user goes back; a running poll sees it and stops.
+    run: std::sync::Arc<std::sync::atomic::AtomicU64>,
     url_in: Entity<InputState>,
     token_in: Entity<InputState>,
 }
@@ -38,7 +38,7 @@ impl Setup {
             rt,
             http: reqwest::Client::builder().timeout(Duration::from_secs(20)).build().unwrap_or_default(),
             step: Step::Start,
-            run: 0,
+            run: Default::default(),
             url_in: cx.new(|cx| InputState::new(window, cx).placeholder("http://my-server:32400")),
             token_in: cx.new(|cx| InputState::new(window, cx).placeholder("X-Plex-Token").masked(true)),
         }
@@ -72,8 +72,7 @@ impl Setup {
     }
 
     fn sign_in(&mut self, cx: &mut Context<Self>) {
-        self.run += 1;
-        let run = self.run;
+        let run = self.run.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         self.step = Step::Working("Asking Plex for a sign-in code…".into());
         let http = self.http.clone();
         self.call(cx, async move { account::create_pin(&http).await }, move |this, res, cx| match res {
@@ -81,28 +80,44 @@ impl Setup {
                 let url = account::auth_url(&code);
                 let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
                 this.step = Step::Waiting { url };
-                this.poll(id, run, cx);
+                this.poll(id, code, run, cx);
             }
             Err(e) => this.fail(e),
         });
     }
 
-    /// Check the PIN every 2 s (for up to 10 min) until it's approved.
-    fn poll(&mut self, id: u64, run: u64, cx: &mut Context<Self>) {
+    /// Check the PIN every 2 s until it's approved, cancelled (the run counter
+    /// moves on), or 10 minutes pass.
+    fn poll(&mut self, id: u64, code: String, run: u64, cx: &mut Context<Self>) {
         let http = self.http.clone();
+        let current = self.run.clone();
         self.call(
             cx,
             async move {
-                for _ in 0..300 {
-                    if let Some(t) = account::poll_pin(&http, id).await? {
-                        return Ok(Some(t));
+                let deadline = std::time::Instant::now() + Duration::from_secs(600);
+                let mut errors = 0;
+                while std::time::Instant::now() < deadline {
+                    if current.load(std::sync::atomic::Ordering::SeqCst) != run {
+                        return Ok(None);
+                    }
+                    match account::poll_pin(&http, id, &code).await {
+                        Ok(Some(t)) => return Ok(Some(t)),
+                        Ok(None) => errors = 0,
+                        Err(e) if e.is::<account::PinExpired>() => return Ok(None),
+                        // Ride out brief network trouble; give up after a run of failures.
+                        Err(e) => {
+                            errors += 1;
+                            if errors >= 5 {
+                                return Err(e);
+                            }
+                        }
                     }
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
                 Ok(None)
             },
             move |this, res, cx| {
-                if this.run != run {
+                if this.run.load(std::sync::atomic::Ordering::SeqCst) != run {
                     return;
                 }
                 match res {
@@ -131,8 +146,7 @@ impl Setup {
         self.call(
             cx,
             async move {
-                let url = account::pick_connection(&http, &server).await?;
-                let sections = account::music_sections(&http, &url, &server.token).await?;
+                let (url, sections) = account::pick_connection(&http, &server).await?;
                 Ok((url, server, sections))
             },
             |this, res, cx| match res {
@@ -168,14 +182,19 @@ impl Setup {
     /// Save the account and start the app proper.
     fn finish(&mut self, url: String, token: String, server: String, section: String, cx: &mut Context<Self>) {
         let a = account::Account { url, token, section, server };
+        // A different server or library: its caches would show the old one's.
+        let changed = account::stored().is_none_or(|old| old.url != a.url || old.section != a.section);
         if let Err(e) = account::save(&a) {
             self.fail(e);
             return;
         }
-        if let Ok(exe) = std::env::current_exe() {
-            let _ = std::process::Command::new(exe).args(std::env::args().skip(1)).spawn();
+        if changed {
+            account::clear_server_caches();
         }
-        cx.quit();
+        match account::relaunch() {
+            Ok(()) => cx.quit(),
+            Err(e) => self.step = Step::Failed(format!("Signed in, but Crate couldn't restart itself ({e}). Open Crate again.")),
+        }
     }
 
     fn button(id: &'static str, label: &'static str, primary: bool, t: &Theme) -> gpui::Stateful<gpui::Div> {
@@ -233,7 +252,7 @@ impl Render for Setup {
                                 let _ = std::process::Command::new("xdg-open").arg(&url2).spawn();
                             })))
                             .child(Self::button("cancel", "Cancel", false, &t).on_click(cx.listener(|this, _, _, cx| {
-                                this.run += 1;
+                                this.run.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                 this.step = Step::Start;
                                 cx.notify();
                             }))),
@@ -309,7 +328,7 @@ impl Render for Setup {
                 .gap(px(14.0))
                 .child(div().text_size(px(14.0)).text_color(rgb(t.red)).child(msg.clone()))
                 .child(Self::button("retry", "Start over", false, &t).on_click(cx.listener(|this, _, _, cx| {
-                    this.run += 1;
+                    this.run.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     this.step = Step::Start;
                     cx.notify();
                 })))

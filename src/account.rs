@@ -3,7 +3,7 @@
 //! PLEX_SECTION in the environment override the stored values (handy for
 //! testing); without either, Crate shows its sign-in screen.
 
-use std::{os::unix::fs::PermissionsExt, path::PathBuf};
+use std::{io::Write as _, os::unix::fs::OpenOptionsExt, path::PathBuf};
 
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
@@ -27,38 +27,76 @@ fn path() -> PathBuf {
     base.join("crate/account.toml")
 }
 
-/// The stored account with any environment overrides, if complete.
-pub fn load() -> Option<Account> {
-    let mut a: Account = std::fs::read_to_string(path()).ok().and_then(|r| toml::from_str(&r).ok()).unwrap_or_default();
-    if let Ok(v) = std::env::var("PLEX_URL") {
-        a.url = v;
+/// The account from the environment, used only when PLEX_TOKEN, PLEX_URL and
+/// PLEX_SECTION are all set (never mixed with the stored account).
+pub fn from_env() -> Option<Account> {
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let token = env("PLEX_TOKEN")?;
+    match (env("PLEX_URL"), env("PLEX_SECTION")) {
+        (Some(url), Some(section)) => Some(Account { url, token, section, server: String::new() }),
+        _ => {
+            eprintln!("[crate] PLEX_TOKEN is set without PLEX_URL and PLEX_SECTION; ignoring the environment");
+            None
+        }
     }
-    if let Ok(v) = std::env::var("PLEX_TOKEN") {
-        a.token = v;
-    }
-    if let Ok(v) = std::env::var("PLEX_SECTION") {
-        a.section = v;
-    }
-    if a.token.is_empty() {
-        return None;
-    }
-    if a.url.is_empty() {
-        a.url = "http://localhost:32400".into();
-    }
-    if a.section.is_empty() {
-        a.section = "1".into();
-    }
-    Some(a)
 }
 
-/// Save with owner-only permissions (written to a temp file, then renamed).
+/// The account to use: a complete environment override, else the stored one.
+pub fn load() -> Option<Account> {
+    from_env().or_else(|| stored().filter(|a| !a.token.is_empty() && !a.url.is_empty() && !a.section.is_empty()))
+}
+
+/// The saved account alone, without environment overrides.
+pub fn stored() -> Option<Account> {
+    std::fs::read_to_string(path()).ok().and_then(|r| toml::from_str(&r).ok())
+}
+
+/// Save with owner-only permissions: the temp file is created new with mode
+/// 0600 before any bytes are written (no window where the token is
+/// readable), under a unique name, then renamed over the old file.
 pub fn save(a: &Account) -> anyhow::Result<()> {
     let p = path();
-    std::fs::create_dir_all(p.parent().context("config dir")?)?;
-    let tmp = p.with_extension("toml.tmp");
-    std::fs::write(&tmp, toml::to_string(a)?)?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    std::fs::rename(&tmp, &p)?;
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(p.parent().context("config dir")?)?;
+    }
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let tmp = p.with_extension(format!("toml.{}.{nonce}.tmp", std::process::id()));
+    let res = (|| -> anyhow::Result<()> {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        f.write_all(toml::to_string(a)?.as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &p)?;
+        Ok(())
+    })();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
+}
+
+/// Drop caches tied to a server (library list, cover art) when the account
+/// changes, so a new server never shows the old one's library.
+pub fn clear_server_caches() {
+    let dir = crate::plex::cache_dir();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("albums-") && name.ends_with(".json") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir.join("art"));
+}
+
+/// Relaunch Crate as a fresh process that reads the stored account, without
+/// the PLEX_* overrides this process may have been started with.
+pub fn relaunch() -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    // After a reinstall the running binary shows as "<path> (deleted)": start the new one.
+    let exe = std::path::PathBuf::from(exe.to_string_lossy().trim_end_matches(" (deleted)").to_string());
+    std::process::Command::new(exe).env_remove("PLEX_URL").env_remove("PLEX_TOKEN").env_remove("PLEX_SECTION").spawn()?;
     Ok(())
 }
 
@@ -98,14 +136,30 @@ pub fn auth_url(code: &str) -> String {
 }
 
 /// The account token once the user has approved the PIN.
-pub async fn poll_pin(http: &reqwest::Client, id: u64) -> anyhow::Result<Option<String>> {
-    let v: serde_json::Value = tv(http, reqwest::Method::GET, &format!("/pins/{id}")).send().await?.error_for_status()?.json().await?;
+/// Err(PinExpired) once plex.tv no longer knows the PIN.
+pub async fn poll_pin(http: &reqwest::Client, id: u64, code: &str) -> anyhow::Result<Option<String>> {
+    let res = tv(http, reqwest::Method::GET, &format!("/pins/{id}?code={code}")).send().await?;
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(anyhow::Error::new(PinExpired));
+    }
+    let v: serde_json::Value = res.error_for_status()?.json().await?;
     Ok(v["authToken"].as_str().filter(|t| !t.is_empty()).map(String::from))
 }
+
+#[derive(Debug)]
+pub struct PinExpired;
+impl std::fmt::Display for PinExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "the sign-in code expired")
+    }
+}
+impl std::error::Error for PinExpired {}
 
 #[derive(Clone, Debug)]
 pub struct Server {
     pub name: String,
+    /// The server's machine identifier, checked against /identity.
+    pub id: String,
     pub token: String,
     /// (uri, local, relay)
     pub connections: Vec<(String, bool, bool)>,
@@ -124,9 +178,12 @@ pub async fn servers(http: &reqwest::Client, account_token: &str) -> anyhow::Res
         .into_iter()
         .flatten()
         .filter(|r| r["provides"].as_str().unwrap_or_default().split(',').any(|p| p == "server"))
+        // A server without its own access token would be sent the account token.
+        .filter(|r| r["accessToken"].as_str().is_some_and(|t| !t.is_empty()))
         .map(|r| Server {
             name: r["name"].as_str().unwrap_or("Plex").to_string(),
-            token: r["accessToken"].as_str().unwrap_or(account_token).to_string(),
+            id: r["clientIdentifier"].as_str().unwrap_or_default().to_string(),
+            token: r["accessToken"].as_str().unwrap_or_default().to_string(),
             connections: r["connections"]
                 .as_array()
                 .into_iter()
@@ -137,33 +194,68 @@ pub async fn servers(http: &reqwest::Client, account_token: &str) -> anyhow::Res
         .collect())
 }
 
-/// Try every connection at once; return the first that answers, preferring
-/// local over remote over relay.
-pub async fn pick_connection(http: &reqwest::Client, s: &Server) -> anyhow::Result<String> {
+/// Try every connection at once and keep one that is really this server
+/// (its /identity machineIdentifier matches) and lets this token list
+/// libraries; prefer local over remote over relay. Returns (url, music
+/// sections). A local address that belongs to some other host on this
+/// network never wins, and a working remote route is kept as the fallback.
+pub async fn pick_connection(http: &reqwest::Client, s: &Server) -> anyhow::Result<(String, Vec<(String, String)>)> {
     let mut set = tokio::task::JoinSet::new();
     for (uri, local, relay) in s.connections.clone() {
-        let (http, token) = (http.clone(), s.token.clone());
+        let https = uri.starts_with("https://");
+        // Never send the token in cleartext beyond the local network.
+        if !https && !local {
+            continue;
+        }
+        let (http, token, want) = (http.clone(), s.token.clone(), s.id.clone());
         set.spawn(async move {
-            let ok = http
-                .get(format!("{uri}/identity"))
-                .header("X-Plex-Token", token)
-                .timeout(std::time::Duration::from_secs(4))
-                .send()
-                .await
-                .is_ok_and(|r| r.status().is_success());
-            (ok, uri, if local { 0 } else if relay { 2 } else { 1 })
+            // local https, local http, remote https, relay
+            let rank = match (local, https, relay) {
+                (_, _, true) => 3,
+                (true, true, _) => 0,
+                (true, false, _) => 1,
+                _ => 2,
+            };
+            let check = async {
+                let id: serde_json::Value = http
+                    .get(format!("{uri}/identity"))
+                    .header("Accept", "application/json")
+                    .timeout(std::time::Duration::from_secs(4))
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await?; // unauthenticated: the token goes only to a verified server
+                anyhow::ensure!(
+                    want.is_empty() || id["MediaContainer"]["machineIdentifier"].as_str() == Some(want.as_str()),
+                    "a different server answered at {uri}"
+                );
+                music_sections(&http, &uri, &token).await
+            };
+            let res = check.await;
+            (rank, uri, res)
         });
     }
-    let mut best: Option<(u8, String)> = None;
-    while let Some(Ok((ok, uri, rank))) = set.join_next().await {
-        if ok && best.as_ref().is_none_or(|(r, _)| rank < *r) {
-            best = Some((rank, uri));
-            if rank == 0 {
-                break;
+    type Found = (u8, String, Vec<(String, String)>);
+    let mut best: Option<Found> = None;
+    let mut last_err = None;
+    while let Some(Ok((rank, uri, res))) = set.join_next().await {
+        match res {
+            Ok(sections) => {
+                if best.as_ref().is_none_or(|(r, _, _)| rank < *r) {
+                    best = Some((rank, uri, sections));
+                }
+                if rank == 0 {
+                    break;
+                }
             }
+            Err(e) => last_err = Some(e),
         }
     }
-    best.map(|(_, u)| u).context("none of the server's addresses answered")
+    match best {
+        Some((_, uri, sections)) => Ok((uri, sections)),
+        None => Err(last_err.unwrap_or_else(|| anyhow::anyhow!("the server has no addresses")).context("couldn't reach the server")),
+    }
 }
 
 /// Music libraries on a server: (section key, title).

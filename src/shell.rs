@@ -344,11 +344,14 @@ impl Crate {
                 .separator()
                 .item(PopupMenuItem::new("Sign out of Plex").on_click(move |_, _, cx| {
                     // Forget the stored sign-in and relaunch into the sign-in screen.
-                    if crate::account::remove().is_ok() {
-                        if let Ok(exe) = std::env::current_exe() {
-                            let _ = std::process::Command::new(exe).env_remove("PLEX_TOKEN").spawn();
+                    match crate::account::remove() {
+                        Ok(()) => {
+                            if let Err(e) = crate::account::relaunch() {
+                                eprintln!("[crate] signed out, but couldn't restart: {e:#}");
+                            }
+                            cx.quit();
                         }
-                        cx.quit();
+                        Err(e) => eprintln!("[crate] couldn't sign out: {e}"),
                     }
                 }))
             })

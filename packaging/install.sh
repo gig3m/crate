@@ -27,6 +27,10 @@ install -Dm755 target/release/crate "$BIN"
 install -Dm644 assets/crate.svg "$ICON"
 
 mkdir -p "$(dirname "$WRAPPER")"
+if [ -e "$WRAPPER" ] && ! grep -q 'Crate launcher' "$WRAPPER" 2>/dev/null; then
+    echo "$WRAPPER exists and isn't Crate's launcher; not overwriting it" >&2
+    exit 1
+fi
 cat > "$WRAPPER" <<'SH'
 #!/bin/sh
 # Crate launcher. Crate keeps its own Plex sign-in (~/.config/crate/account.toml).
@@ -35,7 +39,11 @@ SH
 chmod 755 "$WRAPPER"
 
 mkdir -p "$(dirname "$DESKTOP")"
-sed "s|^Exec=.*|Exec=$WRAPPER|" packaging/crate.desktop > "$DESKTOP"
+# Desktop-entry Exec: quote the path and escape \ " ` $ (paths with spaces work).
+exec_path=$(printf '%s' "$WRAPPER" | sed -e 's/[\\"`$]/\\&/g')
+grep -v '^Exec=' packaging/crate.desktop > "$DESKTOP.tmp"
+printf 'Exec="%s"\n' "$exec_path" >> "$DESKTOP.tmp"
+mv "$DESKTOP.tmp" "$DESKTOP"
 
 command -v update-desktop-database >/dev/null && update-desktop-database "$HOME/.local/share/applications" || true
 command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q "$HOME/.local/share/icons/hicolor" 2>/dev/null || true

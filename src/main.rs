@@ -1772,6 +1772,9 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--sign-out") {
         match account::remove() {
+            Ok(()) if account::from_env().is_some() => {
+                println!("Removed the saved sign-in, but PLEX_TOKEN/PLEX_URL/PLEX_SECTION in this environment still sign Crate in.")
+            }
             Ok(()) => println!("Signed out: Crate will show its sign-in screen next launch."),
             Err(e) => eprintln!("couldn't remove the account: {e}"),
         }
@@ -1780,16 +1783,38 @@ fn main() {
     if args.iter().any(|a| a == "--import-env") {
         // Save PLEX_URL / PLEX_TOKEN / PLEX_SECTION from the environment as
         // Crate's own sign-in (the token is never printed).
-        match account::load().filter(|_| std::env::var_os("PLEX_TOKEN").is_some()) {
+        match account::from_env() {
             Some(a) => match account::save(&a) {
                 Ok(()) => println!("Saved the Plex sign-in for {} (library {}).", a.url, a.section),
                 Err(e) => eprintln!("couldn't save: {e:#}"),
             },
-            None => eprintln!("--import-env needs PLEX_TOKEN (and PLEX_URL, PLEX_SECTION) in the environment"),
+            None => eprintln!("--import-env needs PLEX_TOKEN, PLEX_URL and PLEX_SECTION in the environment"),
         }
         return;
     }
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    if args.iter().any(|a| a == "--check-servers") {
+        // Diagnostic: what sign-in would pick for the plex.tv token in PLEX_TOKEN (not printed).
+        let Some(token) = std::env::var("PLEX_TOKEN").ok().filter(|t| !t.is_empty()) else {
+            eprintln!("--check-servers needs PLEX_TOKEN");
+            return;
+        };
+        rt.block_on(async {
+            let http = reqwest::Client::new();
+            match account::servers(&http, &token).await {
+                Ok(list) => {
+                    for s in list {
+                        match account::pick_connection(&http, &s).await {
+                            Ok((url, sections)) => println!("{}: {url} music libraries {:?}", s.name, sections),
+                            Err(e) => println!("{}: {e:#}", s.name),
+                        }
+                    }
+                }
+                Err(e) => eprintln!("servers: {e:#}"),
+            }
+        });
+        return;
+    }
     let Some(acct) = account::load() else {
         run_setup(rt);
         return;
