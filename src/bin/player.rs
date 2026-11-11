@@ -17,7 +17,10 @@ fn main() -> anyhow::Result<()> {
     let cache_dir = match std::env::var_os("CRATE_AUDIO_CACHE").filter(|v| !v.is_empty()) {
         Some(d) => PathBuf::from(d),
         None if std::path::Path::new("/scratch/crate-cache").is_dir() => PathBuf::from("/scratch/crate-cache"),
-        None => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/crate/audio"),
+        None => std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache"))
+            .join("crate/audio"),
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {

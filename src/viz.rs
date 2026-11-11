@@ -108,6 +108,10 @@ pub(crate) struct Viz {
     sampled: Option<(std::time::Instant, u64)>,
     /// When the tap's head last moved (new audio played).
     head_moved: Option<std::time::Instant>,
+    /// A right press happened during this drag: on Wayland its release then
+    /// reports no button held though the left still is, so don't take a
+    /// buttonless move as a lost release.
+    right_in_press: bool,
     /// Typical time between the tap's updates (one audio callback), smoothed:
     /// a gap longer than this is silence, shorter is just between callbacks.
     cb_gap: Option<std::time::Duration>,
@@ -121,7 +125,14 @@ impl Viz {
 
     /// Nothing left to fall: the live view shows silence.
     fn at_rest(&self) -> bool {
-        self.buf.is_empty() && self.spectrum.iter().all(|&x| x < 0.005) && self.level.iter().chain(&self.peak).all(|&x| x < 0.005)
+        // Only what the current style draws (and decays).
+        self.buf.is_empty()
+            && match self.style {
+                // A NaN counts as rest, not as forever moving.
+                Style::Spectrum => self.spectrum.iter().all(|&x| x.is_nan() || x < 0.005),
+                Style::Meter => self.level.iter().chain(&self.peak).all(|&x| x.is_nan() || x < 0.005),
+                _ => true,
+            }
     }
 
     fn frac_at(&self, x: Pixels) -> Option<f32> {
@@ -296,6 +307,10 @@ impl Crate {
         let style = {
             let mut v = self.viz.borrow_mut();
             v.style = v.style.next();
+            // The last style's values would otherwise sit frozen.
+            v.spectrum.iter_mut().for_each(|x| *x = 0.0);
+            v.level = Default::default();
+            v.peak = Default::default();
             v.style
         };
         self.save_viz();
@@ -486,6 +501,9 @@ impl Crate {
                                     // No button down but a press is still recorded: its
                                     // release was never seen (it landed where its bar
                                     // wasn't drawn any more). Any bar may forget it.
+                                    // After a right press mid-drag, buttonless moves
+                                        // are still the drag (see `right_in_press`).
+                                    let held = held || (none && v.right_in_press && v.press.is_some());
                                     if !held {
                                         if none && v.press.is_some() {
                                             v.press = None;
@@ -518,6 +536,7 @@ impl Crate {
                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                     let mut v = this.viz.borrow_mut();
                     v.press = Some((id, ev.position.x.into()));
+                    v.right_in_press = false;
                     v.drag = None;
                     cx.notify();
                 }),
@@ -565,7 +584,11 @@ impl Crate {
                 MouseButton::Right,
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
                     // Not in the middle of a drag-to-seek.
-                    if this.viz.borrow().press.is_none() {
+                    let mut v = this.viz.borrow_mut();
+                    if v.press.is_some() {
+                        v.right_in_press = true;
+                    } else {
+                        drop(v);
                         this.cycle_viz_palette(cx);
                     }
                 }),
