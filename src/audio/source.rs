@@ -102,6 +102,12 @@ impl Source {
                     "Plex won't transcode this track: {}",
                     mc["generalDecisionText"].as_str().or(mc["transcodeDecisionText"].as_str()).unwrap_or("no decision")
                 );
+                // Crate asks for Opus in Ogg (gapless); anything else still
+                // plays, without exact track edges.
+                let media = &mc["Metadata"][0]["Media"][0];
+                if (media["container"].as_str(), media["audioCodec"].as_str()) != (Some("ogg"), Some("opus")) {
+                    eprintln!("[transcode] Plex offered {:?}/{:?}, not ogg/opus: no gapless", media["container"].as_str(), media["audioCodec"].as_str());
+                }
                 let base = prepare.split("/music/").next().unwrap_or_default();
                 let stop_url = format!("{base}/video/:/transcode/universal/stop?session={session}");
                 match Progressive::start(&url.replace("{session}", &session), token, TRANSCODE_CLIENT, cache, stop) {

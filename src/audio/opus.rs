@@ -89,6 +89,11 @@ impl OpusDecoder {
 
     fn decode_inner(&mut self, packet: &PacketRef<'_>) -> Result<()> {
         let data = packet.data;
+        // An empty packet would make libopus conceal 120 ms of loss.
+        if data.is_empty() {
+            self.buf.clear();
+            return Ok(());
+        }
         let n = unsafe { opus_decode_float(self.st, data.as_ptr(), data.len() as i32, self.pcm.as_mut_ptr(), MAX_FRAMES as c_int, 0) };
         if n < 0 {
             return decode_error("opus: corrupt packet");

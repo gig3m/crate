@@ -645,10 +645,16 @@ fn decoder_thread(
             at_us: queued_us,
             gain,
         });
+        // Opus in Ogg: the reader lands exactly on the target with no
+        // pre-roll, so seek 80 ms early and drop what that decodes (RFC 7845
+        // §4.6), letting the decoder settle before audio is heard.
+        let ogg_opus = params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS && src.ext().as_deref() == Some("ogg");
+        let preroll_ms = if ogg_opus && index == 0 { start_ms.min(80) } else { 0 };
+        let mut preroll_frames = (preroll_ms * rate as u64 / 1000) as usize;
         if index == 0 && start_ms > 0 {
             use symphonia::core::formats::{SeekMode, SeekTo};
             use symphonia::core::units::Time;
-            let time = Time::try_from_secs_f64(start_ms as f64 / 1000.0).unwrap_or_default();
+            let time = Time::try_from_secs_f64((start_ms - preroll_ms) as f64 / 1000.0).unwrap_or_default();
             fmt.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(track.id) })?;
         }
 
@@ -673,20 +679,19 @@ fn decoder_thread(
         // last page isn't flagged end-of-stream, and Plex never flags it. So
         // for Opus an EOF is the end only once the track's known length has
         // played (within half a second); short of that it's a cut-off stream.
-        let is_opus = params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
         let start_frames = if seeked { start_ms * rate as u64 / 1000 } else { 0 };
         loop {
             let packet = match fmt.next_packet() {
                 Ok(Some(p)) => p,
                 Ok(None) => break,
                 Err(symphonia::core::errors::Error::IoError(e))
-                    if is_opus
+                    if ogg_opus
                         && e.kind() == std::io::ErrorKind::UnexpectedEof
                         && num_frames.is_some_and(|n| start_frames + track_frames + rate as u64 / 2 >= n) =>
                 {
                     break;
                 }
-                Err(symphonia::core::errors::Error::IoError(e)) if is_opus && e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                Err(symphonia::core::errors::Error::IoError(e)) if ogg_opus && e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     // Cut off: don't keep a cached copy that would fail the
                     // same way next time (a live download isn't cached yet).
                     if let Some(p) = src.cache_path() {
@@ -710,6 +715,14 @@ fn decoder_thread(
             anyhow::ensure!(ch == CHANNELS, "only stereo in the spike (got {ch})");
             scratch.resize(buf.frames() * ch, 0.0);
             buf.copy_to_slice_interleaved(&mut scratch[..]);
+            if preroll_frames > 0 {
+                let drop = preroll_frames.min(scratch.len() / CHANNELS);
+                scratch.drain(..drop * CHANNELS);
+                preroll_frames -= drop;
+                if scratch.is_empty() {
+                    continue;
+                }
+            }
             // Loudness leveling. Exactly 1.0 skips the loop, so leveling off
             // stays bit-perfect.
             if gain != 1.0 {
