@@ -7,7 +7,9 @@ use gpui::{Context, point, px};
 
 use crate::{Crate, View};
 
-/// Album track table: header row height and row height (album.rs).
+/// Album track table geometry (album.rs: the `head` row and 52 px track rows).
+/// Keep in step with album_view; reveal_track also relies on the album
+/// scroll's children being header, actions, body in that order.
 const TRACK_HEAD_H: f32 = 25.0;
 const TRACK_ROW_H: f32 = 52.0;
 
@@ -21,8 +23,31 @@ impl Crate {
         }
     }
 
+    /// Now Playing covers the lists (it isn't drawn in the compact layout).
+    fn overlay_shown(&self) -> bool {
+        self.now_playing && self.now.is_some() && !self.compact
+    }
+
+    /// Where the cursor starts: the first row on screen, not the top of the list.
+    fn first_visible(&self) -> usize {
+        match &self.view {
+            View::Library => {
+                let scrolled: f32 = (-self.scroll.0.borrow().base_handle.offset().y).into();
+                let row_h = if self.lib_list { crate::library::LIST_ROW_H } else { self.row_h() };
+                let row = (scrolled / row_h.max(1.0)).ceil().max(0.0) as usize;
+                if self.lib_list { row } else { row * self.cols.max(1) }
+            }
+            View::Album { .. } => {
+                let (Some(body), view) = (self.album_scroll.bounds_for_item(2), self.album_scroll.bounds()) else { return 0 };
+                let above: f32 = (view.top() - body.top()).into();
+                ((above - TRACK_HEAD_H) / TRACK_ROW_H).ceil().max(0.0) as usize
+            }
+            _ => 0,
+        }
+    }
+
     pub(crate) fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if self.now_playing {
+        if self.overlay_shown() {
             return;
         }
         let len = self.cursor_len();
@@ -30,7 +55,7 @@ impl Crate {
             return;
         }
         let next = match self.cursor {
-            None => 0,
+            None => self.first_visible().min(len - 1),
             Some(c) => (c as isize + delta).clamp(0, len as isize - 1) as usize,
         };
         self.cursor = Some(next);
@@ -66,7 +91,7 @@ impl Crate {
     /// Enter: open the album under the cursor, or play the track under it.
     pub(crate) fn activate_cursor(&mut self, cx: &mut Context<Self>) {
         let Some(c) = self.cursor else { return };
-        if self.now_playing {
+        if self.overlay_shown() {
             return;
         }
         match &self.view {
@@ -102,14 +127,15 @@ impl Crate {
 
     /// r: Plex radio from whatever is selected.
     pub(crate) fn radio_from_selection(&mut self, cx: &mut Context<Self>) {
+        let mut note = None;
         let seed: Option<(String, String)> = match &self.view {
-            _ if self.now_playing => None,
+            _ if self.overlay_shown() => None,
             View::Library if !self.selection.is_empty() => {
                 let key = self.selection[0].clone();
                 let title = self.albums.iter().find(|a| a.rating_key == key).map(|a| a.title.clone()).unwrap_or_default();
                 if self.selection.len() > 1 {
                     // Plex radio takes one seed; say which one was used.
-                    self.status = format!("Radio from {title} (the first marked album)").into();
+                    note = Some("radio starts from one album: the first marked".to_string());
                 }
                 self.selection.clear();
                 Some((key, title))
@@ -125,7 +151,11 @@ impl Crate {
         // Nothing picked on screen (or Now Playing is up): the playing track.
         let seed = seed.or_else(|| self.now.as_ref().and_then(|n| n.tracks.get(n.idx)).map(|t| (t.rating_key.clone(), t.title.clone())));
         match seed {
-            Some((key, title)) => self.play_radio(&key, format!("{title} Radio"), cx),
+            Some((key, title)) => {
+                self.play_radio(&key, format!("{title} Radio"), cx);
+                // play_radio bumped play_intent; the note rides on that play's start.
+                self.play_note = note.map(|n| (self.play_intent, n));
+            }
             None => {
                 self.status = "Pick an album or track to start radio from".into();
                 cx.notify();

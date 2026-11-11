@@ -287,7 +287,7 @@ impl Crate {
                 rate_stars(format!("ar-{k}"), detail.as_ref().and_then(|d| d.rating), 18.0, t.accent, t.line, cx, move |this, n, cx| this.rate_album(k.clone(), n, cx))
             }));
 
-        // Track table.
+        // Track table. keys.rs (TRACK_HEAD_H/TRACK_ROW_H) mirrors this geometry.
         let head = div()
             .flex()
             .gap(px(12.0))

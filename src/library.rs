@@ -93,6 +93,8 @@ impl Crate {
                                 this.albums.iter().enumerate().map(|(i, a)| (a.rating_key.as_str(), i)).collect();
                             let view = keys.iter().filter_map(|k| pos.get(k.as_str()).copied()).collect();
                             this.lib_view = Some(view);
+                            // The order changed under the cursor.
+                            this.cursor = None;
                         }
                         Err(e) => this.status = format!("Library: {e:#}").into(),
                     }

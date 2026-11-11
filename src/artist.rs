@@ -10,8 +10,39 @@ fn rgba(c: u32, a: f32) -> gpui::Hsla {
 }
 
 impl Crate {
-    /// Start Plex radio seeded from an artist or album (`/library/metadata/{key}/station/...`).
+    /// Start Plex radio seeded from an artist, track or album. Plex has
+    /// stations for artists and tracks (`/library/metadata/{key}/station/...`)
+    /// but none for albums (an empty queue), so an album seeds from its first track.
     pub(crate) fn play_radio(&mut self, key: &str, title: String, cx: &mut Context<Self>) {
+        if let Some(album) = self.albums.iter().find(|a| a.rating_key == key).cloned() {
+            self.play_intent += 1;
+            let intent = self.play_intent;
+            self.status = format!("Starting {title}…").into();
+            cx.notify();
+            self.with_tracks(album, cx, move |this, _album, tracks, cx| {
+                if this.play_intent != intent {
+                    return;
+                }
+                match tracks.first() {
+                    Some(first) => {
+                        let k = first.rating_key.clone();
+                        // The station is a new play intent: keep a note made for this one.
+                        let note = this.play_note.take().filter(|(i, _)| *i == intent);
+                        this.play_station_key(&k, title, cx);
+                        this.play_note = note.map(|(_, n)| (this.play_intent, n));
+                    }
+                    None => {
+                        this.status = "That album has no tracks to start radio from".into();
+                        cx.notify();
+                    }
+                }
+            });
+            return;
+        }
+        self.play_station_key(key, title, cx);
+    }
+
+    fn play_station_key(&mut self, key: &str, title: String, cx: &mut Context<Self>) {
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_micros()).unwrap_or(0);
         self.play_station(format!("/library/metadata/{key}/station/crate-{nonce:x}?type=10"), title, cx);
     }

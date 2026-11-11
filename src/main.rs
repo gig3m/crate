@@ -78,6 +78,11 @@ struct Crate {
     albums: Vec<Album>,
     total: usize,
     status: SharedString,
+    /// The status last shown as a toast, and until when it stays up.
+    status_seen: SharedString,
+    status_until: Option<Instant>,
+    /// Shown with "Playing …" when play `play_intent` starts.
+    play_note: Option<(u64, String)>,
     art: HashMap<String, Arc<Image>>,
     requested: HashSet<String>,
     art_tx: mpsc::UnboundedSender<ArtRequest>,
@@ -144,6 +149,8 @@ struct Crate {
     test_search: Option<String>,
     /// Keyboard cursor (j/k) in the current list: an Albums cell or a track index.
     cursor: Option<usize>,
+    /// Narrow (Tile) layout, from the last render.
+    compact: bool,
     /// Test hook: canvas key actions to run once the library is in (CRATE_KEYS="j,j,enter").
     test_keys: Option<String>,
     /// Full-window Now Playing, and its panel tab (queue / signal / info).
@@ -582,6 +589,9 @@ impl Crate {
             albums: Vec::new(),
             total,
             status: "Loading library…".into(),
+            status_seen: "Loading library…".into(),
+            status_until: None,
+            play_note: None,
             art: HashMap::new(),
             requested: HashSet::new(),
             art_tx,
@@ -622,6 +632,7 @@ impl Crate {
             pal_scope: 0,
             test_search: std::env::var("CRATE_SEARCH").ok(),
             cursor: None,
+            compact: false,
             test_keys: std::env::var("CRATE_KEYS").ok(),
             now_playing: std::env::var_os("CRATE_NOW_PLAYING").is_some(),
             sonic_progress: None,
@@ -948,7 +959,10 @@ impl Crate {
             return;
         }
         self.queue_seq += 1;
+        // A note made for the play that led here follows it into the queue.
+        let note = self.play_note.take().filter(|(i, _)| *i == self.play_intent);
         self.play_intent += 1;
+        self.play_note = note.map(|(_, n)| (self.play_intent, n));
         self.report_stop();
         let orig_order: Vec<String> = tracks.iter().map(|t| t.rating_key.clone()).collect();
         let mut tracks = tracks;
@@ -1020,7 +1034,11 @@ impl Crate {
                 now.finished = false;
                 now.stopped = false;
                 now.engine_end = range.end;
-                self.status = format!("Playing {}", now.context).into();
+                self.status = match self.play_note.take() {
+                    // A note for the play that just started (e.g. which marked album seeded radio).
+                    Some((intent, note)) if intent == self.play_intent => format!("Playing {} · {note}", now.context).into(),
+                    _ => format!("Playing {}", now.context).into(),
+                };
                 let _ = self.mpris.send(MprisUpdate::Status { playing: true, stopped: false });
                 if ms > 0 {
                     let _ = self.mpris.send(MprisUpdate::Seeked(ms));
@@ -1667,6 +1685,7 @@ impl Render for Crate {
         let vw: f32 = window.viewport_size().width.into();
         // Narrow tiled window: the canvas Tile layout (no sidebar, bottom nav).
         let compact = vw < 720.0;
+        self.compact = compact;
         let side = if compact { 0.0 } else { SIDEBAR_W };
         let usable = (vw - side - PAD_X * 2.0).max(240.0);
         self.content_w = usable;
@@ -1753,6 +1772,7 @@ impl Render for Crate {
         let now_playing = (self.now_playing && self.now.is_some() && !compact)
             .then(|| div().absolute().inset_0().child(self.now_playing_view(&t, cx)));
 
+        let toast = self.status_toast(&t, cx);
         let el = div()
             .key_context("Crate")
             .track_focus(&self.focus)
@@ -1815,10 +1835,60 @@ impl Render for Crate {
             .font_family("Inter")
             .child(main_area)
             .child(player)
+            .children(toast)
             .children(now_playing)
             .children(palette);
         self.last_render_us = t0.elapsed().as_micros();
         el
+    }
+}
+
+impl Crate {
+    /// Status messages (errors, "Starting radio…", skipped albums) as a
+    /// toast above the player bar for a few seconds after each change.
+    fn status_toast(&mut self, t: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        const SHOW: Duration = Duration::from_secs(5);
+        if self.status != self.status_seen {
+            self.status_seen = self.status.clone();
+            if self.status.is_empty() {
+                self.status_until = None;
+            } else {
+                self.status_until = Some(Instant::now() + SHOW);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(SHOW + Duration::from_millis(50)).await;
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                })
+                .detach();
+            }
+        }
+        if self.status_until.is_none_or(|u| Instant::now() >= u) {
+            return None;
+        }
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(104.0))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("status-toast")
+                        .max_w(px(560.0))
+                        .px(px(16.0))
+                        .py(px(9.0))
+                        .rounded(px(10.0))
+                        .bg(rgb(t.raised))
+                        .border_1()
+                        .border_color(rgb(t.line))
+                        .text_size(px(13.0))
+                        .text_color(rgb(t.text))
+                        .shadow_lg()
+                        .child(self.status.clone()),
+                )
+                .into_any_element(),
+        )
     }
 }
 
