@@ -11,6 +11,8 @@ use crate::{Crate, theme::Theme};
 pub(crate) enum NameFor {
     /// A playlist of these albums' tracks.
     Albums(Vec<String>),
+    /// A playlist of these tracks, in this order (a mix or the queue).
+    Tracks(Vec<String>),
     /// A smart playlist from the library's album filter query.
     Smart(String),
     /// A new name for this playlist.
@@ -67,10 +69,15 @@ impl Crate {
         self.refocus = true;
         self.playlist_busy = true;
         let section = crate::section();
+        let smart = matches!(n.what, NameFor::Smart(_));
         let (rx, albums) = match n.what {
             NameFor::Albums(keys) => {
                 let (t, k) = (title.clone(), keys.clone());
                 (crate::plex_call(move |c| async move { c.create_playlist(&t, &k).await }), Some(keys))
+            }
+            NameFor::Tracks(keys) => {
+                let t = title.clone();
+                (crate::plex_call(move |c| async move { c.create_playlist(&t, &keys).await }), None)
             }
             NameFor::Smart(query) => {
                 let t = title.clone();
@@ -94,7 +101,7 @@ impl Crate {
                         if albums.as_ref().is_some_and(|k| *k == this.selection) {
                             this.selection.clear();
                         }
-                        let kind = if albums.is_none() { "Smart playlist" } else { "Playlist" };
+                        let kind = if smart { "Smart playlist" } else { "Playlist" };
                         this.say(format!("{kind} \u{201c}{title}\u{201d} created · {n} track{}", if n == 1 { "" } else { "s" }));
                         this.reload_playlists(cx);
                     }
@@ -240,6 +247,7 @@ impl Crate {
         let what = match n.what {
             NameFor::Albums(ref k) if k.len() == 1 => "New playlist".to_string(),
             NameFor::Albums(ref k) => format!("New playlist · {} albums", k.len()),
+            NameFor::Tracks(ref k) => format!("New playlist · {} tracks", k.len()),
             NameFor::Smart(_) => "New smart playlist · updates as the library changes".to_string(),
             NameFor::Rename(_) => "Rename playlist".to_string(),
         };

@@ -474,43 +474,16 @@ impl Crate {
         }
     }
 
-    /// Mix builder (canvas): this artist's most-played tracks interleaved with
-    /// those of the three most sonically similar artists in the library.
+    /// Mix builder (canvas): a page of this artist's most-played tracks
+    /// interleaved with those of the three most sonically similar artists.
     pub(crate) fn build_artist_mix(&mut self, key: String, name: String, cx: &mut Context<Self>) {
-        let mut keys = vec![key.clone()];
-        if let Some(Some(sim)) = self.sonic_artists.get(&key) {
-            keys.extend(sim.iter().take(3).map(|s| s.0.clone()));
+        let with_others = self.sonic_artists.get(&key).is_some_and(|s| s.as_ref().is_some_and(|s| !s.is_empty()));
+        let (title, desc) = if with_others {
+            (format!("{name} + similar mix"), format!("{name}'s most-played tracks, mixed with similar artists from your library"))
         } else {
-            // Similar artists not loaded (yet, or it failed): ask for next time.
-            self.request_sonic_artists(key.clone(), cx);
-        }
-        let with_others = keys.len() > 1;
-        self.play_intent += 1;
-        let intent = self.play_intent;
-        self.say(format!("Building {name} mix…"));
-        cx.notify();
-        let section = crate::section();
-        let rx = crate::plex_call(move |c| async move { c.artist_mix(&section, keys, 8).await });
-        cx.spawn(async move |this, cx| {
-            let res = rx.await;
-            this.update(cx, |this, cx| {
-                if this.play_intent != intent {
-                    return;
-                }
-                match res {
-                    Ok(Ok(tracks)) if !tracks.is_empty() => {
-                        let title = if with_others { format!("{name} + similar mix") } else { format!("{name} mix") };
-                        this.start_queue(title, None, tracks, 0, cx);
-                    }
-                    Ok(Ok(_)) => this.say(format!("{name}: nothing to mix")),
-                    Ok(Err(e)) => this.say(format!("Mix builder: {e:#}")),
-                    Err(_) => {}
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            (format!("{name} mix"), format!("{name}'s most-played tracks"))
+        };
+        self.open_mix(format!("builder:{key}"), title, desc, crate::mix::MixSource::Builder { key }, cx);
     }
 
     /// Art the artist page needs once its info arrives.

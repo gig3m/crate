@@ -22,7 +22,7 @@ const NAV_LIBRARY: &[(&str, &str, &str, &str)] = &[
 impl Crate {
     fn nav_active(&self) -> &'static str {
         match &self.view {
-            View::Home => "home",
+            View::Home | View::Mix { .. } => "home",
             View::Library | View::Album { .. } => "albums",
             View::Artist { .. } => "artists",
             View::Playlist { .. } => "playlists",

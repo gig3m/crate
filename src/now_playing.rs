@@ -61,8 +61,11 @@ impl Crate {
         };
 
         // Top row.
-        let kind = if n.context_key.as_deref().is_some_and(|k| k.starts_with("playlist:")) {
+        let ck = n.context_key.clone().unwrap_or_default();
+        let kind = if ck.starts_with("playlist:") {
             "PLAYING FROM PLAYLIST"
+        } else if ck.starts_with("mix:") {
+            "PLAYING FROM MIX"
         } else if n.context_key.is_some() {
             "PLAYING FROM ALBUM"
         } else if n.refill.is_some() {
@@ -97,9 +100,58 @@ impl Crate {
                     .flex_col()
                     .gap(px(2.0))
                     .child(div().font_family(MONO).font_weight(FontWeight::MEDIUM).text_size(px(11.0)).text_color(white(0.72)).child(kind))
-                    .child(div().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(white(1.0)).child(n.context.clone())),
+                    .child({
+                        // The source's name opens its page (mix, playlist or album).
+                        let (ck, title) = (ck.clone(), n.context.clone());
+                        let opens = ck.starts_with("mix:") || ck.starts_with("playlist:") || self.albums.iter().any(|a| a.rating_key == ck);
+                        div()
+                            .id("np-context")
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(white(1.0))
+                            .child(n.context.clone())
+                            .when(opens && !ck.is_empty(), |d| {
+                                d.cursor_pointer().hover(|d| d.underline()).on_click(cx.listener(move |this, _, _, cx| {
+                                    this.now_playing = false;
+                                    if let Some(id) = ck.strip_prefix("mix:") {
+                                        if this.mixes.contains_key(id) {
+                                            this.go(crate::View::Mix { id: id.to_string() });
+                                        }
+                                    } else if let Some(key) = ck.strip_prefix("playlist:") {
+                                        this.open_playlist(key.to_string(), title.clone(), cx);
+                                    } else if let Some(ix) = this.albums.iter().position(|a| a.rating_key == ck) {
+                                        this.open_album(ix, cx);
+                                    }
+                                    cx.notify();
+                                }))
+                            })
+                    }),
             )
             .child(div().flex_1())
+            .when(n.context_key.is_none() || ck.starts_with("mix:"), |d| {
+                // Mixes, radio and hand-built queues can be kept as a playlist.
+                let title = n.context.clone();
+                d.child(
+                    div()
+                        .id("np-save")
+                        .h(px(32.0))
+                        .px(px(14.0))
+                        .rounded(px(16.0))
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .bg(white(0.06))
+                        .hover(|d| d.bg(white(0.2)))
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(white(0.8))
+                        .child("Save as playlist")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let tracks = this.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default();
+                            this.save_tracks_as_playlist(&tracks, title.clone(), window, cx);
+                        })),
+                )
+            })
             .when(!lyrics.is_empty(), |d| {
                 let on = self.np_lyrics;
                 d.child(
@@ -312,7 +364,8 @@ impl Crate {
         );
         let panel_body = match self.np_tab {
             0 => {
-                let radio = n.refill.is_some();
+                let in_mix = ck.starts_with("mix:");
+                let radio = n.refill.is_some() && !in_mix;
                 let rows: Vec<_> = n
                     .tracks
                     .iter()
@@ -351,7 +404,7 @@ impl Crate {
                             .on_click(cx.listener(move |this, _, _, cx| this.play_from(i, 0, cx)))
                     })
                     .collect();
-                let label = if radio { "NEXT FROM RADIO" } else { "NEXT UP" };
+                let label = if in_mix { "NEXT IN THIS MIX" } else if radio { "NEXT FROM RADIO" } else { "NEXT UP" };
                 let dj_on = self.guest_dj;
                 // Guest DJ toggle (canvas): not offered on radio, which is sonic already.
                 let dj = (!radio).then(|| {

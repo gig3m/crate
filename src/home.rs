@@ -280,6 +280,7 @@ impl Crate {
                     }
                     Mix::Mood(title, desc, _, covers) => (title.clone(), desc.clone(), covers.clone()),
                 };
+                let desc_c = desc.clone();
                 let mut covers = covers;
                 while covers.len() < 4 {
                     covers.push((String::new(), format!("{title}-{}", covers.len())));
@@ -303,10 +304,14 @@ impl Crate {
                     .cursor_pointer()
                     .child(grid)
                     .child(div().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).truncate().child(title.clone()))
-                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(desc))
+                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(desc.clone()))
                     .on_click(cx.listener(move |this, _, _, cx| match &m {
-                        Mix::Artist(key, _) => this.play_radio(key, title.clone(), cx),
-                        Mix::Mood(_, _, q, _) => this.play_station(format!("query:{q}"), title.clone(), cx),
+                        Mix::Artist(key, _) => {
+                            this.open_mix(format!("artist:{key}"), title.clone(), desc_c.clone(), crate::mix::MixSource::Radio(key.clone()), cx)
+                        }
+                        Mix::Mood(_, _, q, _) => {
+                            this.open_mix(format!("mood:{q}"), title.clone(), desc_c.clone(), crate::mix::MixSource::Station(format!("query:{q}")), cx)
+                        }
                     }))
             })
             .collect();

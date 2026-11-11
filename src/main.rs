@@ -18,6 +18,7 @@ mod home;
 mod icons;
 mod instance;
 mod library;
+mod mix;
 mod pages;
 mod playlist_add;
 mod playlist_view;
@@ -68,6 +69,8 @@ enum View {
     Album { ix: usize, tracks: Option<Vec<Track>> },
     Artist { key: String, name: String, info: Option<ArtistInfo> },
     Playlist { key: String, title: String, detail: Option<std::sync::Arc<plex::PlaylistDetail>> },
+    /// A mix's page (its state is in `mixes`).
+    Mix { id: String },
     /// A canvas page not built yet.
     Soon(&'static str),
 }
@@ -177,6 +180,8 @@ struct Crate {
     view_size: (f32, f32),
     /// Now Playing shows lyrics when the track has them (saved).
     np_lyrics: bool,
+    /// Mix pages by id ("artist:<key>", "mood:<query>", "builder:<key>").
+    mixes: HashMap<String, mix::MixPage>,
     /// Bumped per queue started (Now::queue_id) and per play request, so late
     /// async replies can tell they've been superseded.
     queue_seq: u64,
@@ -796,6 +801,7 @@ impl Crate {
             content_w: 1000.0,
             view_size: (1280.0, 800.0),
             np_lyrics: theme::saved_lyrics(),
+            mixes: HashMap::new(),
             queue_seq: 0,
             play_intent: 0,
             shuffle: false,
@@ -1117,6 +1123,12 @@ impl Crate {
                     self.load_playlist(key, cx);
                 }
             }
+            View::Mix { id } => {
+                let id = id.clone();
+                if self.mixes.get(&id).is_some_and(|p| p.tracks.is_none() && p.error.is_none()) {
+                    self.load_mix(id, cx);
+                }
+            }
             View::Artist { key, info, .. } => {
                 let (key, missing) = (key.clone(), info.is_none());
                 let title = info.as_ref().map(|i| i.title.clone());
@@ -1151,7 +1163,7 @@ impl Crate {
         }
     }
 
-    fn open_album(&mut self, ix: usize, cx: &mut Context<Self>) {
+    pub(crate) fn open_album(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(album) = self.album(ix).cloned() else { return };
         self.request_art(&album);
         self.go(View::Album { ix, tracks: None });
@@ -2223,6 +2235,23 @@ impl Render for Crate {
                                     this.build_artist_mix(k, n, cx);
                                 }
                             }
+                            k if k.starts_with("mixopen:") => {
+                                let key = k[8..].to_string();
+                                this.open_mix(format!("artist:{key}"), "Test Mix".into(), String::new(), mix::MixSource::Radio(key), cx);
+                            }
+                            k if k.starts_with("mixplay:") => {
+                                if let View::Mix { id } = &this.view {
+                                    let id = id.clone();
+                                    this.play_mix_from(&id, k[8..].parse().unwrap_or(0), cx);
+                                }
+                            }
+                            k if k.starts_with("mixsave:") => {
+                                if let View::Mix { id } = &this.view {
+                                    let id = id.clone();
+                                    let tracks = this.mixes.get(&id).and_then(|p| p.tracks.clone()).unwrap_or_default();
+                                    this.save_tracks_as_playlist(&tracks, k[8..].to_string(), window, cx);
+                                }
+                            }
                             "bottom" => {
                                 this.album_scroll.scroll_to_bottom();
                                 this.settings_scroll.scroll_to_bottom();
@@ -2348,6 +2377,10 @@ impl Render for Crate {
             View::Playlist { key, title, detail } => {
                 let (key, title, detail) = (key.clone(), title.clone(), detail.clone());
                 self.playlist_view(&key, &title, detail.as_deref(), &t, cx)
+            }
+            View::Mix { id } => {
+                let id = id.clone();
+                self.mix_view(&id, &t, cx)
             }
         };
         let naming = self.naming_bar(&t, cx);
