@@ -3333,19 +3333,6 @@ fn main() {
 #[allow(dead_code)]
 fn _unused(_: Pixels) {}
 
-#[cfg(test)]
-mod transcode_tests {
-    #[test]
-    fn label_kbps() {
-        assert_eq!(super::transcoded_kbps("plex:part-46213.tx128.mp3"), Some(128));
-        assert_eq!(super::transcoded_kbps("plex:part-46213.tx192.ogg"), Some(192));
-        assert_eq!(super::transcoded_kbps("plex:part-46213.flac"), None);
-        assert_eq!(super::transcoded_kbps("plex:part-46213.mp3"), None);
-        assert_eq!(super::transcoded_kbps("song.txt.mp3"), None);
-        assert_eq!(super::transcoded_kbps("plex:part-46213.tx192.at150.ogg"), Some(192));
-    }
-}
-
 /// The window's content: the app, cached, under the live visualizer layer.
 struct Shell {
     app: Entity<Crate>,
@@ -3361,3 +3348,17 @@ impl Render for Shell {
             .child(self.layer.clone())
     }
 }
+
+#[cfg(test)]
+mod transcode_tests {
+    #[test]
+    fn label_kbps() {
+        assert_eq!(super::transcoded_kbps("plex:part-46213.tx128.mp3"), Some(128));
+        assert_eq!(super::transcoded_kbps("plex:part-46213.tx192.ogg"), Some(192));
+        assert_eq!(super::transcoded_kbps("plex:part-46213.flac"), None);
+        assert_eq!(super::transcoded_kbps("plex:part-46213.mp3"), None);
+        assert_eq!(super::transcoded_kbps("song.txt.mp3"), None);
+        assert_eq!(super::transcoded_kbps("plex:part-46213.tx192.at150.ogg"), Some(192));
+    }
+}
+
