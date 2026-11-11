@@ -449,10 +449,13 @@ impl Crate {
                             .when(ready, |d| {
                                 let p = path.clone().unwrap_or_default();
                                 let (from, to) = (s.from.clone(), s.to.clone());
-                                d.child(pill("sonic-reroll", "Reroll path".into(), false).on_click(cx.listener(|this, _, _, cx| {
-                                    this.reroll_sonic_path(cx);
-                                    cx.notify();
-                                })))
+                                // Rerolling needs a middle to detour around.
+                                d.when(p.len() >= 3, |d| {
+                                    d.child(pill("sonic-reroll", "Reroll path".into(), false).on_click(cx.listener(|this, _, _, cx| {
+                                        this.reroll_sonic_path(cx);
+                                        cx.notify();
+                                    })))
+                                })
                                 .child(pill("sonic-play", "Play adventure".into(), true).on_click(cx.listener(move |this, _, _, cx| {
                                     let name = match (&from, &to) {
                                         (Some(a), Some(b)) => format!("Sonic Adventure: {} → {}", a.title, b.title),
