@@ -197,6 +197,10 @@ struct Crate {
     /// however often the track comes round (Prev, repeat, toggling).
     dj_keys: std::collections::HashSet<(u64, String)>,
     dj_done: std::collections::HashSet<(u64, String)>,
+    /// Picks that failed while their track played: retryable once playback
+    /// moves to another track (not every poll), with the (queue, index) seen last.
+    dj_retry: Vec<(u64, String)>,
+    dj_seen: Option<(u64, usize)>,
     /// Appears on, by artist key: album keys (fetched after the artist page shows).
     appears_on: HashMap<String, Vec<String>>,
     sonic_artists: HashMap<String, Option<Vec<sonic::ArtistRef>>>,
@@ -753,6 +757,8 @@ impl Crate {
             guest_dj: std::env::var_os("CRATE_GUEST_DJ").is_some(),
             dj_keys: std::collections::HashSet::new(),
             dj_done: std::collections::HashSet::new(),
+            dj_retry: Vec::new(),
+            dj_seen: None,
             sonic_artists: HashMap::new(),
             sonic: sonic::SonicState::default(),
             artist_kinds: HashMap::new(),

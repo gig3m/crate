@@ -235,6 +235,13 @@ impl Crate {
         }
         let qid = now.queue_id;
         let at = (qid, now.idx);
+        // Playback moved on: picks that failed earlier may try again.
+        if self.dj_seen != Some(at) {
+            self.dj_seen = Some(at);
+            for k in std::mem::take(&mut self.dj_retry) {
+                self.dj_done.remove(&k);
+            }
+        }
         let key = (qid, now.tracks[now.idx].rating_key.clone());
         // Not after a DJ pick, not when the next track already is one, and once
         // per track per queue (recorded before the fetch, so an in-flight pick
@@ -255,10 +262,15 @@ impl Crate {
                 let live = this.now.as_ref().is_some_and(|n| (n.queue_id, n.idx) == at && !n.finished && !n.stopped);
                 let near = match res {
                     Ok(Ok(near)) if live && this.guest_dj && this.repeat != Repeat::One => near,
-                    // No pick this time (moved on, toggled off, fetch failed): let
-                    // the track try again when it next comes round.
+                    // No pick this time (moved on, toggled off, fetch failed): the
+                    // track tries again when it next comes round, not on every poll
+                    // while it's still playing.
                     _ => {
-                        this.dj_done.remove(&key);
+                        if live {
+                            this.dj_retry.push(key.clone());
+                        } else {
+                            this.dj_done.remove(&key);
+                        }
                         return;
                     }
                 };
