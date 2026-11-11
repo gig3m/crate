@@ -1017,7 +1017,9 @@ impl Crate {
         self.cursor = None;
             if !matches!(self.view, View::Library) {
                 self.selection.clear();
-                self.naming = None;
+                if self.naming.take().is_some() {
+                    self.refocus = true;
+                }
             }
             self.reload_view(cx);
             cx.notify();
@@ -1063,7 +1065,9 @@ impl Crate {
         self.cursor = None;
             if !matches!(self.view, View::Library) {
                 self.selection.clear();
-                self.naming = None;
+                if self.naming.take().is_some() {
+                    self.refocus = true;
+                }
             }
             self.reload_view(cx);
             cx.notify();

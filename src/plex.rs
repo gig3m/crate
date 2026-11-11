@@ -1081,13 +1081,16 @@ impl Client {
     /// `server://<machine id>/com.plexapp.plugins.library<path>`, URL-encoded:
     /// how Plex names library items for playlists and play queues.
     async fn library_uri(&self, path: &str) -> anyhow::Result<String> {
-        let root: serde_json::Value = self.get("/").await?.json().await.context("server")?;
+        let root: serde_json::Value = tokio::time::timeout(std::time::Duration::from_secs(15), async { anyhow::Ok(self.get("/").await?.json().await?) })
+            .await
+            .context("server didn't answer")??;
         let mid = root["MediaContainer"]["machineIdentifier"].as_str().context("no machine id")?;
         Ok(urlencode(&format!("server://{mid}/com.plexapp.plugins.library{path}")))
     }
 
     async fn send_playlist(&self, req: reqwest::RequestBuilder) -> anyhow::Result<serde_json::Value> {
         let res = req
+            .timeout(std::time::Duration::from_secs(30))
             .header("Accept", "application/json")
             .header("X-Plex-Token", &self.token)
             .header("X-Plex-Client-Identifier", client_id())

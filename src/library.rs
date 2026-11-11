@@ -72,7 +72,7 @@ impl Crate {
         // A smart playlist being named was for the filters as they were:
         // close it if they changed (not for a re-sort or a reload).
         if let Some(crate::playlist_add::Naming { what: crate::playlist_add::NameFor::Smart(q), .. }) = &self.naming
-            && *q != self.filter_query()
+            && !same_filters(q, &self.filter_query())
         {
             self.naming = None;
             self.refocus = true;
@@ -732,4 +732,14 @@ pub(crate) fn thousands(n: usize) -> String {
         out.push(c);
     }
     out
+}
+
+/// Two filter queries with the same terms, in any order.
+fn same_filters(a: &str, b: &str) -> bool {
+    fn terms(q: &str) -> Vec<&str> {
+        let mut v: Vec<&str> = q.split('&').filter(|t| !t.is_empty()).collect();
+        v.sort_unstable();
+        v
+    }
+    terms(a) == terms(b)
 }
