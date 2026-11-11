@@ -34,13 +34,13 @@ impl Crate {
             View::Library => {
                 let scrolled: f32 = (-self.scroll.0.borrow().base_handle.offset().y).into();
                 let row_h = if self.lib_list { crate::library::LIST_ROW_H } else { self.row_h() };
-                let row = (scrolled / row_h.max(1.0)).ceil().max(0.0) as usize;
+                let row = (scrolled / row_h.max(1.0) - 0.01).ceil().max(0.0) as usize;
                 if self.lib_list { row } else { row * self.cols.max(1) }
             }
             View::Album { .. } => {
                 let (Some(body), view) = (self.album_scroll.bounds_for_item(2), self.album_scroll.bounds()) else { return 0 };
                 let above: f32 = (view.top() - body.top()).into();
-                ((above - TRACK_HEAD_H) / TRACK_ROW_H).ceil().max(0.0) as usize
+                ((above - TRACK_HEAD_H) / TRACK_ROW_H - 0.01).ceil().max(0.0) as usize
             }
             _ => 0,
         }
@@ -152,9 +152,10 @@ impl Crate {
         let seed = seed.or_else(|| self.now.as_ref().and_then(|n| n.tracks.get(n.idx)).map(|t| (t.rating_key.clone(), t.title.clone())));
         match seed {
             Some((key, title)) => {
-                self.play_radio(&key, format!("{title} Radio"), cx);
-                // play_radio bumped play_intent; the note rides on that play's start.
-                self.play_note = note.map(|n| (self.play_intent, n));
+                let name = format!("{title} Radio");
+                // The note shows when this radio's queue starts; any other queue drops it.
+                self.play_note = note.map(|n| (name.clone(), n));
+                self.play_radio(&key, name, cx);
             }
             None => {
                 self.status = "Pick an album or track to start radio from".into();

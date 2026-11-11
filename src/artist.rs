@@ -26,10 +26,7 @@ impl Crate {
                 match tracks.first() {
                     Some(first) => {
                         let k = first.rating_key.clone();
-                        // The station is a new play intent: keep a note made for this one.
-                        let note = this.play_note.take().filter(|(i, _)| *i == intent);
                         this.play_station_key(&k, title, cx);
-                        this.play_note = note.map(|(_, n)| (this.play_intent, n));
                     }
                     None => {
                         this.status = "That album has no tracks to start radio from".into();

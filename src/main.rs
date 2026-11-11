@@ -81,8 +81,8 @@ struct Crate {
     /// The status last shown as a toast, and until when it stays up.
     status_seen: SharedString,
     status_until: Option<Instant>,
-    /// Shown with "Playing …" when play `play_intent` starts.
-    play_note: Option<(u64, String)>,
+    /// (queue context, note): shown with "Playing …" when that queue starts.
+    play_note: Option<(String, String)>,
     art: HashMap<String, Arc<Image>>,
     requested: HashSet<String>,
     art_tx: mpsc::UnboundedSender<ArtRequest>,
@@ -372,11 +372,14 @@ impl Crate {
                 match res {
                     Ok(albums) => {
                         if !first && albums == this.albums {
-                            this.status = format!("{} albums · up to date", albums.len()).into();
-                            cx.notify();
+                            eprintln!("[crate] {} albums · up to date", albums.len());
                             return;
                         }
-                        this.status = format!("{} albums ({from})", albums.len()).into();
+                        eprintln!("[crate] {} albums ({from})", albums.len());
+                        // Grid cells shift with new albums: the keyboard cursor no longer points where it did.
+                        if matches!(this.view, View::Library) {
+                            this.cursor = None;
+                        }
                         // Album indices (open page, history) point into the old list:
                         // remap them by rating key, dropping albums that vanished.
                         let key_of = |v: &View, albums: &[Album]| match v {
@@ -959,10 +962,11 @@ impl Crate {
             return;
         }
         self.queue_seq += 1;
-        // A note made for the play that led here follows it into the queue.
-        let note = self.play_note.take().filter(|(i, _)| *i == self.play_intent);
         self.play_intent += 1;
-        self.play_note = note.map(|(_, n)| (self.play_intent, n));
+        // A note is for one named play; any other queue drops it.
+        if self.play_note.as_ref().is_some_and(|(ctx, _)| *ctx != context) {
+            self.play_note = None;
+        }
         self.report_stop();
         let orig_order: Vec<String> = tracks.iter().map(|t| t.rating_key.clone()).collect();
         let mut tracks = tracks;
@@ -1034,11 +1038,13 @@ impl Crate {
                 now.finished = false;
                 now.stopped = false;
                 now.engine_end = range.end;
-                self.status = match self.play_note.take() {
-                    // A note for the play that just started (e.g. which marked album seeded radio).
-                    Some((intent, note)) if intent == self.play_intent => format!("Playing {} · {note}", now.context).into(),
-                    _ => format!("Playing {}", now.context).into(),
-                };
+                // A note for the play that just started (e.g. which marked album seeded radio).
+                match self.play_note.take() {
+                    Some((ctx, note)) if ctx == now.context => self.status = format!("Playing {} · {note}", now.context).into(),
+                    // Seeks and resumes (ms > 0) restart the engine too; only a fresh start says so.
+                    _ if ms == 0 => self.status = format!("Playing {}", now.context).into(),
+                    _ => {}
+                }
                 let _ = self.mpris.send(MprisUpdate::Status { playing: true, stopped: false });
                 if ms > 0 {
                     let _ = self.mpris.send(MprisUpdate::Seeked(ms));
@@ -1835,8 +1841,8 @@ impl Render for Crate {
             .font_family("Inter")
             .child(main_area)
             .child(player)
-            .children(toast)
             .children(now_playing)
+            .children(toast)
             .children(palette);
         self.last_render_us = t0.elapsed().as_micros();
         el
@@ -1869,7 +1875,9 @@ impl Crate {
                 .absolute()
                 .left_0()
                 .right_0()
-                .bottom(px(104.0))
+                // Above the player bar, or near the top over Now Playing (its controls sit low).
+                .when(self.now_playing && self.now.is_some() && !self.compact, |d| d.top(px(72.0)))
+                .when(!(self.now_playing && self.now.is_some() && !self.compact), |d| d.bottom(px(104.0)))
                 .flex()
                 .justify_center()
                 .child(
