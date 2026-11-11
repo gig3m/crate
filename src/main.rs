@@ -19,6 +19,7 @@ mod icons;
 mod instance;
 mod library;
 mod mix;
+mod resume;
 mod pages;
 mod playlist_add;
 mod playlist_view;
@@ -292,7 +293,7 @@ struct Crate {
     _on_quit: Option<gpui::Subscription>,
 }
 
-struct Now {
+pub(crate) struct Now {
     /// What started playback: an album title or station name.
     context: String,
     /// Album rating key when an album is the context, or
@@ -338,6 +339,41 @@ struct Now {
     orig_order: Vec<String>,
 }
 
+impl Now {
+    /// A queue brought back from the last session: paused, no engine yet.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn restored(context: String, context_key: Option<String>, tracks: Vec<Track>, idx: usize, elapsed_ms: u64, refill: Option<String>, orig_order: Vec<String>, queue_id: u64) -> Self {
+        Now {
+            context,
+            context_key,
+            tracks,
+            formats: HashMap::new(),
+            transcoded: HashMap::new(),
+            skipped_to: 0,
+            level: HashMap::new(),
+            start_idx: idx,
+            start_ms: elapsed_ms,
+            boundaries: Vec::new(),
+            idx,
+            elapsed_ms,
+            graph_rate: 0,
+            paused: true,
+            finished: false,
+            sent_idx: None,
+            refill,
+            refilling: false,
+            engine_end: 0,
+            queue_id,
+            stopped: false,
+            rep_idx: None,
+            rep_state: "stopped",
+            rep_elapsed: 0,
+            rep_at: Instant::now(),
+            orig_order,
+        }
+    }
+}
+
 struct Bench {
     started: Option<Instant>,
     last: Option<Instant>,
@@ -375,6 +411,7 @@ impl Crate {
         })
         .detach();
         let on_quit = cx.on_app_quit(|this: &mut Self, _cx| {
+            this.save_resume();
             this.report_stop();
             flush_writes(Duration::from_millis(1500));
             async {}
@@ -384,7 +421,11 @@ impl Crate {
         let weak = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
             instance::cleanup();
-            weak.update(cx, |this, _| this.report_stop()).ok();
+            weak.update(cx, |this, _| {
+                this.save_resume();
+                this.report_stop();
+            })
+            .ok();
             flush_writes(Duration::from_millis(1500));
             true
         });
@@ -1730,6 +1771,9 @@ impl Crate {
                     self.pending_start = None;
                 }
                 now.paused = want_pause;
+                if want_pause {
+                    self.save_resume();
+                }
                 if let Some(e) = &self.engine {
                     e.set_active(!want_pause);
                 } else if !want_pause {
@@ -1873,6 +1917,7 @@ impl Crate {
         // announced (it starts), not on every poll.
         if announced {
             self.detail_failed.remove(&rk);
+            self.save_resume();
         }
         self.request_track_detail(rk, cx);
         // Now Playing's ambient field comes from the album's UltraBlur colors.
@@ -3125,6 +3170,7 @@ fn main() {
                     let mut c = Crate::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds, transport_rx, mpris_tx, search_tx, hubs_tx, artist_tx);
                     c.check_saved_output(cx);
                     c.load_home(cx);
+                    c.restore_resume(cx);
                     // Home goes stale in a long session: refresh it when the
                     // window comes back after ten minutes or more.
                     cx.observe_window_activation(window, |this: &mut Crate, window, cx| {

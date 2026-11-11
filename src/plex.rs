@@ -323,7 +323,8 @@ pub struct Gain {
     pub album_peak: Option<f32>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Track {
     pub rating_key: String,
     pub title: String,
