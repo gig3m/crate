@@ -161,6 +161,8 @@ struct Crate {
     palette: bool,
     pal_sel: usize,
     pal_scope: usize,
+    /// The search generation that last finished (so "no results" can show).
+    search_done: u64,
     test_search: Option<String>,
     /// Keyboard cursor (j/k) in the current list: an Albums cell or a track index.
     cursor: Option<usize>,
@@ -685,6 +687,7 @@ impl Crate {
             palette: false,
             pal_sel: 0,
             pal_scope: 0,
+            search_done: 0,
             test_search: std::env::var("CRATE_SEARCH").ok(),
             cursor: None,
             compact: false,
@@ -752,7 +755,18 @@ impl Crate {
             let (reply, rx) = tokio::sync::oneshot::channel();
             let t0 = Instant::now();
             let _ = tx.send(SearchRequest { query: query.clone(), reply });
-            if let Ok(Ok(hits)) = rx.await {
+            let res = rx.await;
+            // Finished with an error (or no reply): the palette stops saying "Searching…".
+            if !matches!(res, Ok(Ok(_))) {
+                this.update(cx, |this, cx| {
+                    if this.search_gen == gen_id {
+                        this.search_done = gen_id;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+            if let Ok(Ok(hits)) = res {
                 eprintln!("[crate] search {query:?}: {} hits in {:?}", hits.len(), t0.elapsed());
                 this.update(cx, |this, cx| {
                     if this.search_gen == gen_id {
@@ -762,6 +776,7 @@ impl Crate {
                             }
                         }
                         this.hits = hits;
+                        this.search_done = gen_id;
                         cx.notify();
                     }
                 })

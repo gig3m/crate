@@ -356,8 +356,10 @@ impl Crate {
         if items.is_empty() {
             let msg = match split_prefix(&self.search_query) {
                 (_, "") => "Type to search artists, albums, tracks and playlists (@ artists, # genres, > commands)",
+                (Some('#'), _) if self.home.is_none() => "Loading genres…",
                 (Some('#'), _) => "No genre, mood or decade matches",
                 (Some('>'), _) => "No command matches",
+                _ if self.search_done == self.search_gen => "No results",
                 _ => "Searching…",
             };
             body = body.child(div().px(px(12.0)).py(px(16.0)).text_size(px(14.0)).text_color(rgb(t.muted)).child(msg));
