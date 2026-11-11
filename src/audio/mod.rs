@@ -882,6 +882,20 @@ fn decoder_thread(
                 }
             }
         }
+        // A transcode started at a seek point is only good for another seek
+        // to that exact second: don't keep it in the cache. And a stream that
+        // ran well past the track's length (Plex ignoring the offset, say)
+        // isn't trusted again either.
+        if let Some(p) = src.cache_path() {
+            let at = start_frames + track_frames;
+            let too_long = ogg_opus && num_frames.is_some_and(|n| at > n + 2 * rate as u64 + n / 100);
+            if too_long {
+                eprintln!("[engine] {} ran past its length ({:.1} s): not keeping it", src.label(), at as f64 / rate as f64);
+            }
+            if too_long || src.start_ms() > 0 {
+                let _ = std::fs::remove_file(p);
+            }
+        }
         tail_track_frames = track_frames as usize;
         // Safety net (a track shorter than its reported length, or the
         // CRATE_TRACK_LIMIT test cap): the rest
