@@ -96,10 +96,11 @@ impl Out<'_> {
 }
 
 /// Two loud tracks at equal-power gains can sum past full scale (up to
-/// ~1.41 mid-fade): pass anything under 0.9 untouched and bend the rest
-/// smoothly toward 1.0 instead of clipping it flat.
+/// ~1.41 mid-fade): pass anything under 0.7 untouched and bend the rest
+/// toward 1.0 (1.0 -> 0.93, 1.41 -> 0.995). mix_fade weights it by the
+/// overlap, so it's off at the fade's edges.
 fn soft_limit(x: f32) -> f32 {
-    const KNEE: f32 = 0.9;
+    const KNEE: f32 = 0.7;
     let m = x.abs();
     if m <= KNEE { x } else { x.signum() * (KNEE + (1.0 - KNEE) * ((m - KNEE) / (1.0 - KNEE)).tanh()) }
 }
@@ -115,9 +116,14 @@ fn mix_fade(into: &mut [f32], from: &mut VecDeque<f32>, done: usize, total: usiz
         }
         let t = ((done + frames) as f32 + 0.5) / total.max(1) as f32;
         let (out_g, in_g) = ((t * std::f32::consts::FRAC_PI_2).cos(), (t * std::f32::consts::FRAC_PI_2).sin());
+        // The limiter fades in and out with the overlap (0 at both edges, so
+        // the fade joins the unfaded audio without a step; full mid-fade,
+        // where the sum can pass full scale).
+        let w = (t * std::f32::consts::PI).sin().clamp(0.0, 1.0);
         for s in fr.iter_mut() {
             let a = from.pop_front().unwrap_or(0.0);
-            *s = soft_limit(a * out_g + *s * in_g);
+            let x = a * out_g + *s * in_g;
+            *s = (x + (soft_limit(x) - x) * w).clamp(-1.0, 1.0);
         }
         frames += 1;
     }
@@ -345,6 +351,8 @@ fn decoder_thread(
     // into the current one's start.
     let mut tail: VecDeque<f32> = VecDeque::new();
     let mut tail_rate = 0u32;
+    // Frames the track that left `tail` played (its whole length).
+    let mut tail_track_frames = 0usize;
     let mut fading: VecDeque<f32> = VecDeque::new();
     let mut fade_total = 0usize;
     let mut fade_done = 0usize;
@@ -439,10 +447,15 @@ fn decoder_thread(
         // The track must be known to outlast the fade twice over, or the fade
         // would run past its end (into the next track); unknown length: gapless.
         let long_enough = track.num_frames.is_some_and(|n| n >= 2 * fade_frames as u64);
+        if fade_frames > 0 && !long_enough && track.num_frames.is_none() {
+            eprintln!("[engine] no fade into {}: its length isn't known", src.label());
+        }
         let crossfade = fade_frames > 0 && long_enough && rate == tail_rate && tail.len() >= CHANNELS && !(index == 0 && start_ms > 0);
         if crossfade {
-            // Fade over the shorter of what's held and what this track asks for.
-            let keep = tail.len().min(fade_frames * CHANNELS);
+            // Fade over the shorter of what's held and what this track asks
+            // for, and at most half the outgoing track, so a short one is
+            // still heard at full level before it fades.
+            let keep = tail.len().min(fade_frames * CHANNELS).min(tail_track_frames / 2 * CHANNELS).max(CHANNELS);
             let lead = tail.len() - keep;
             if lead > 0 {
                 drained.clear();
@@ -589,7 +602,9 @@ fn decoder_thread(
                 }
             }
         }
-        // Safety net (a track that ended early, e.g. a decode stop): the rest
+        tail_track_frames = track_frames as usize;
+        // Safety net (a track shorter than its reported length, or the
+        // CRATE_TRACK_LIMIT test cap): the rest
         // of the previous end fades out on its own, in time order, after this
         // track's samples. They may still be held in `tail`, so it goes there.
         if !fading.is_empty() {
@@ -886,8 +901,8 @@ mod fade_tests {
         let mut into = vec![0.0f32; total * CHANNELS];
         assert_eq!(mix_fade(&mut into, &mut from, 0, total), total);
         assert!(from.is_empty());
-        // (Full scale sits in the soft knee: ~0.976, not clipped.)
-        assert!(into[0] > 0.97 && into[into.len() - 1] < 0.002);
+        // The limiter is off at the edges: full scale passes at the start.
+        assert!(into[0] > 0.999 && into[into.len() - 1] < 0.002);
         assert!(into.windows(2).all(|w| w[1] <= w[0] + 1e-6));
         // Silence into a full-scale track follows sin; split across two calls it lines up.
         let mut from: VecDeque<f32> = std::iter::repeat_n(0.0, total * CHANNELS).collect();
@@ -896,7 +911,7 @@ mod fade_tests {
         let n = mix_fade(&mut a, &mut from, 0, total);
         mix_fade(&mut b, &mut from, n, total);
         let joined: Vec<f32> = a.into_iter().chain(b).collect();
-        assert!(joined[0] < 0.002 && joined[joined.len() - 1] > 0.97);
+        assert!(joined[0] < 0.002 && joined[joined.len() - 1] > 0.999);
         assert!(joined.windows(2).all(|w| w[1] + 1e-6 >= w[0]));
         // Runs out of tail: stops mixing and leaves the rest of `into` as is.
         let mut from: VecDeque<f32> = std::iter::repeat_n(0.5, 10 * CHANNELS).collect();
