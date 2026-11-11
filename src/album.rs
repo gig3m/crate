@@ -386,6 +386,7 @@ impl Crate {
             .child(div().w(px(40.0)).child("#"))
             .child(div().flex_1().child("TITLE"))
             .child(div().w(px(110.0)).child("RATING"))
+            .child(div().w(px(24.0)))
             .child(div().w(px(56.0)).flex().justify_end().child("PLAYS"))
             .child(div().w(px(64.0)).flex().justify_end().child("TIME"));
         let rows: Vec<_> = tracks
@@ -440,6 +441,7 @@ impl Crate {
                                 let k = tr.rating_key.clone();
                                 rate_stars(format!("tr-{k}"), rating, 13.0, t.accent, t.line, cx, move |this, n, cx| this.rate_track(k.clone(), n, cx))
                             }))
+                            .child(self.playlist_menu_icon(("tr-pl", i), vec![tr.rating_key.clone()], tr.title.clone(), t.muted, cx))
                             .child(
                                 div()
                                     .w(px(56.0))

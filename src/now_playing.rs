@@ -95,31 +95,17 @@ impl Crate {
         };
         let len = tr.duration_ms;
         let frac = if len > 0 { (n.elapsed_ms as f32 / len as f32).min(1.0) } else { 0.0 };
-        const BARS: usize = 80;
-        let levels = detail.as_ref().map(|d| d.levels.clone()).unwrap_or_default();
-        let bars: Vec<_> = (0..BARS)
-            .map(|i| {
-                let lv = if levels.is_empty() { None } else { levels.get(i * levels.len() / BARS).copied() };
-                let h = lv.map(|v| (4.0 + 36.0 * v).round()).unwrap_or(4.0);
-                let ms = len * i as u64 / BARS as u64;
-                let played = (i as f32 + 0.5) / BARS as f32 <= frac;
-                div()
-                    .id(("np-seek", i))
-                    .flex_1()
-                    .h(px(40.0))
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .child(div().w_full().h(px(h)).rounded(px(1.0)).bg(if played { white(1.0) } else { white(0.22) }))
-                    .on_click(cx.listener(move |this, _, _, cx| this.transport(Transport::SetPosition(ms), cx)))
-            })
-            .collect();
+        let levels = detail.as_ref().map(|d| d.levels.clone()).filter(|l| !l.is_empty());
+        let bars = self.track_viz("np-bar", 40.0, frac, len, levels.as_ref(), cx);
+        // While dragging to seek, the times show where the drop would land.
+        let shown_ms = self.viz.borrow().drag.map(|f| (f as f64 * len as f64) as u64).unwrap_or(n.elapsed_ms);
         let np_stars = {
             let k = tr.rating_key.clone();
             crate::album::rate_stars(format!("np-{k}"), detail.as_ref().and_then(|d| d.rating), 18.0, t.accent, 0x8a8a8a, cx, move |this, n, cx| {
                 this.rate_track(k.clone(), n, cx)
             })
         };
+        let np_add = self.playlist_menu_icon("np-add", vec![tr.rating_key.clone()], tr.title.clone(), 0xb0b0b0, cx);
         let btn = |id: &'static str, ic: &'static str, size: f32, color: Hsla, tr: Option<Transport>| {
             div()
                 .id(id)
@@ -168,9 +154,9 @@ impl Crate {
                                     }),
                             ),
                     )
-                    .child(div().pt(px(8.0)).child(np_stars)),
+                    .child(div().pt(px(8.0)).flex().items_center().gap(px(6.0)).child(np_stars).child(np_add)),
             )
-            .child(div().flex().gap(px(2.0)).children(bars))
+            .child(div().flex().child(bars))
             .child(
                 div()
                     .mt(px(-10.0))
@@ -179,8 +165,8 @@ impl Crate {
                     .font_family(MONO)
                     .text_size(px(12.0))
                     .text_color(white(0.72))
-                    .child(fmt_ms(n.elapsed_ms))
-                    .child(format!("−{}", fmt_ms(len.saturating_sub(n.elapsed_ms)))),
+                    .child(fmt_ms(shown_ms))
+                    .child(format!("−{}", fmt_ms(len.saturating_sub(shown_ms)))),
             )
             .child(
                 div()

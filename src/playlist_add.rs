@@ -27,6 +27,9 @@ impl Crate {
             self.say("Still saving the last playlist…");
             return;
         }
+        // The bar lives on the page: get Now Playing / the tile out of the way.
+        self.now_playing = false;
+        self.compact_playing = false;
         let input = cx.new(|cx| InputState::new(window, cx).default_value(default));
         cx.subscribe(&input, |this, _, ev: &InputEvent, cx| {
             if let InputEvent::PressEnter { .. } = ev {
@@ -85,7 +88,7 @@ impl Crate {
                             this.selection.clear();
                         }
                         let kind = if albums.is_none() { "Smart playlist" } else { "Playlist" };
-                        this.say(format!("{kind} \u{201c}{title}\u{201d} created · {n} tracks"));
+                        this.say(format!("{kind} \u{201c}{title}\u{201d} created · {n} track{}", if n == 1 { "" } else { "s" }));
                         this.reload_playlists(cx);
                     }
                     Ok(Err(e)) => this.say(format!("Couldn't create \u{201c}{title}\u{201d}: {e:#}")),
@@ -127,7 +130,7 @@ impl Crate {
                 match res {
                     Ok(Ok(0)) => this.say(format!("Already in \u{201c}{title}\u{201d}: Plex skips tracks a playlist has")),
                     Ok(Ok(n)) => {
-                        this.say(format!("Added {n} tracks to \u{201c}{title}\u{201d}"));
+                        this.say(format!("Added {n} track{} to \u{201c}{title}\u{201d}", if n == 1 { "" } else { "s" }));
                         this.reload_playlists(cx);
                     }
                     Ok(Err(e)) => this.say(format!("Couldn't add to \u{201c}{title}\u{201d}: {e:#}")),
@@ -143,14 +146,31 @@ impl Crate {
 
     /// An "+ Playlist" pill: a new playlist of `keys` (named `name` by
     /// default), or add them to one of your playlists.
-    pub(crate) fn playlist_menu(&self, id: &'static str, keys: Vec<String>, name: String, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use gpui_component::{button::{Button, ButtonVariants}, menu::{DropdownMenu, PopupMenuItem}};
+    pub(crate) fn playlist_menu(&self, id: impl Into<gpui::ElementId>, keys: Vec<String>, name: String, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.playlist_menu_with(id, keys, name, None, cx)
+    }
+
+    /// The same menu as a small "+" icon, for track rows: its clicks stay
+    /// out of the row (which plays the track).
+    pub(crate) fn playlist_menu_icon(&self, id: impl Into<gpui::ElementId>, keys: Vec<String>, name: String, color: u32, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let id = id.into();
+        div()
+            .id(gpui::ElementId::Name(format!("{id}-wrap").into()))
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(self.playlist_menu_with(id, keys, name, Some(color), cx))
+            .into_any_element()
+    }
+
+    fn playlist_menu_with(&self, id: impl Into<gpui::ElementId>, keys: Vec<String>, name: String, icon: Option<u32>, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use gpui_component::{Sizable, button::{Button, ButtonVariants}, menu::{DropdownMenu, PopupMenuItem}};
         let this = cx.entity().downgrade();
         let lists: Vec<(String, String)> =
             self.home.as_ref().map(|h| h.playlists.iter().filter(|p| !p.smart).map(|p| (p.rating_key.clone(), p.title.clone())).collect()).unwrap_or_default();
-        Button::new(id)
-            .ghost()
-            .label("+ Playlist")
+        let button = match icon {
+            Some(c) => Button::new(id).ghost().xsmall().tooltip("Add to playlist").child(crate::icons::icon("plus", 14.0, c)),
+            None => Button::new(id).ghost().label("+ Playlist"),
+        };
+        button
             .dropdown_menu(move |mut menu, _, _| {
                 let (t2, k2, n2) = (this.clone(), keys.clone(), name.clone());
                 menu = menu.item(PopupMenuItem::new("New playlist…").on_click(move |_, window, cx| {

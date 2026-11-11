@@ -96,14 +96,18 @@ pub(crate) struct Viz {
     level: [f32; 2],
     peak: [f32; 2],
     peak_at: [Option<std::time::Instant>; 2],
-    /// Pointer x where a left press started, and the drag position (0..1) once it moves.
-    press_x: Option<f32>,
+    /// The bar a left press started on and the pointer x there, and the
+    /// drag position (0..1) once it moves.
+    press: Option<(&'static str, f32)>,
     pub drag: Option<f32>,
-    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Each bar's bounds by id (Now Playing draws over the player bar).
+    bounds: Rc<std::cell::RefCell<std::collections::HashMap<&'static str, Bounds<Pixels>>>>,
     /// When a track bar was last drawn: no bar on screen, no animation.
     drawn: Cell<Option<std::time::Instant>>,
     /// Last live sample: when, and the tap's head then.
     sampled: Option<(std::time::Instant, u64)>,
+    /// When the tap's head last moved (new audio played).
+    head_moved: Option<std::time::Instant>,
 }
 
 impl Viz {
@@ -113,7 +117,8 @@ impl Viz {
     }
 
     fn frac_at(&self, x: Pixels) -> Option<f32> {
-        let b = self.bounds.get()?;
+        let (id, _) = self.press?;
+        let b = *self.bounds.borrow().get(id)?;
         let w: f32 = b.size.width.into();
         (w > 0.0).then(|| ((f32::from(x) - f32::from(b.origin.x)) / w).clamp(0.0, 1.0))
     }
@@ -129,7 +134,13 @@ impl Viz {
         }
         let fresh = self.sampled.is_none_or(|(_, h)| h != head);
         self.sampled = Some((now, head));
-        // Nothing new played (pause, stop, underrun): fall to rest.
+        if fresh {
+            self.head_moved = Some(now);
+        } else if self.head_moved.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(120)) {
+            // A long graph cycle, not silence: keep the last frame.
+            return;
+        }
+        // Nothing new played for a while (pause, stop, underrun): fall to rest.
         let have = fresh && scope.latest(FFT, &mut self.buf);
         if !have {
             self.buf.clear();
@@ -324,7 +335,8 @@ impl Crate {
         {
             v.sample(&e.stats.scope);
         }
-        let shown = v.drag.unwrap_or(frac);
+        // A drag shows on the bar it started on.
+        let shown = v.drag.filter(|_| v.press.is_some_and(|(p, _)| p == id)).unwrap_or(frac);
         let st = stops(v.palette, t);
         let played = |i: usize| (i as f32 + 0.5) / BARS as f32 <= shown;
         let bar = |h: f32, color: u32| div().flex_1().h(px(h.max(1.0))).rounded(px(1.0)).bg(rgb(color));
@@ -414,7 +426,6 @@ impl Crate {
                 .child(div().h_full().w(gpui::relative(shown)).rounded(px(1.0)).bg(rgb(gradient(&st, shown))))
         });
         let bounds = v.bounds.clone();
-        let pressed = v.press_x.is_some();
         drop(v);
         let weak = cx.entity().downgrade();
         div()
@@ -425,19 +436,38 @@ impl Crate {
             .cursor_pointer()
             .child(
                 gpui::canvas(
-                    move |b, _, _| bounds.set(Some(b)),
+                    move |b, _, _| {
+                        bounds.borrow_mut().insert(id, b);
+                    },
                     move |_, _, window, _| {
-                        // While pressed, follow the pointer anywhere in the window,
-                        // so a drag that leaves the thin bar keeps tracking.
-                        if pressed {
+                        // Follow the pointer anywhere in the window while this bar
+                        // is pressed, so a drag that leaves the thin bar keeps
+                        // tracking. Registered every paint: a press triggers no repaint.
+                        {
                             let weak = weak.clone();
                             window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
-                                if phase != gpui::DispatchPhase::Bubble || ev.pressed_button != Some(MouseButton::Left) {
+                                if phase != gpui::DispatchPhase::Bubble {
                                     return;
                                 }
+                                let held = ev.pressed_button == Some(MouseButton::Left);
+                                let none = ev.pressed_button.is_none();
                                 weak.update(cx, |this, cx| {
                                     let mut v = this.viz.borrow_mut();
-                                    let Some(x0) = v.press_x else { return };
+                                    // No button down but a press is still recorded: its
+                                    // release was never seen (it landed where its bar
+                                    // wasn't drawn any more). Any bar may forget it.
+                                    if !held {
+                                        if none && v.press.is_some() {
+                                            v.press = None;
+                                            v.drag = None;
+                                            cx.notify();
+                                        }
+                                        return;
+                                    }
+                                    let Some((p, x0)) = v.press else { return };
+                                    if p != id {
+                                        return;
+                                    }
                                     if v.drag.is_some() || (f32::from(ev.position.x) - x0).abs() > DRAG_PX {
                                         v.drag = v.frac_at(ev.position.x);
                                         cx.notify();
@@ -455,10 +485,11 @@ impl Crate {
             .children(progress)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, ev: &MouseDownEvent, _, _| {
+                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                     let mut v = this.viz.borrow_mut();
-                    v.press_x = Some(ev.position.x.into());
+                    v.press = Some((id, ev.position.x.into()));
                     v.drag = None;
+                    cx.notify();
                 }),
             )
             .on_mouse_up(
@@ -467,7 +498,7 @@ impl Crate {
                     let (press, drag) = {
                         let mut v = this.viz.borrow_mut();
                         let drag = v.drag.take().or_else(|| v.drag_target(ev.position.x));
-                        (v.press_x.take(), drag)
+                        (v.press.take().filter(|(p, _)| *p == id), drag)
                     };
                     match (press, drag) {
                         (Some(_), Some(f)) if len_ms > 0 => this.transport(Transport::SetPosition((f as f64 * len_ms as f64) as u64), cx),
@@ -482,9 +513,13 @@ impl Crate {
                 cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
                     let drag = {
                         let mut v = this.viz.borrow_mut();
-                        // Where the pointer let go, if it travelled far enough.
+                        // Only the bar the press started on; where the pointer let
+                        // go, if it travelled far enough.
+                        if v.press.is_none_or(|(p, _)| p != id) {
+                            return;
+                        }
                         let drag = v.drag_target(ev.position.x).or(v.drag);
-                        v.press_x = None;
+                        v.press = None;
                         v.drag = None;
                         drag
                     };
@@ -505,7 +540,7 @@ impl Viz {
     /// A release that moved past the drag threshold without a move event
     /// in between still seeks to where it ended.
     fn drag_target(&self, x: Pixels) -> Option<f32> {
-        let x0 = self.press_x?;
+        let (_, x0) = self.press?;
         ((f32::from(x) - x0).abs() > DRAG_PX).then(|| self.frac_at(x)).flatten()
     }
 }

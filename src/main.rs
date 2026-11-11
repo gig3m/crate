@@ -1022,7 +1022,9 @@ impl Crate {
             self.selection.clear();
         }
         // A playlist being named belongs to the page it was started on.
-        self.naming = None;
+        if self.naming.take().is_some() {
+            self.refocus = true;
+        }
         self.back.push(old);
         if self.back.len() > 50 {
             self.back.remove(0);
@@ -2101,6 +2103,14 @@ impl Render for Crate {
                                 this.start_naming(playlist_add::NameFor::Smart(query), name, window, cx);
                             }
                             "commit" => this.commit_naming(cx),
+                            k if k.starts_with("plnewkey:") => {
+                                this.start_naming(playlist_add::NameFor::Albums(vec![k[9..].to_string()]), "Crate test".into(), window, cx)
+                            }
+                            k if k.starts_with("pladdkey:") => {
+                                if let Some((pl, key)) = k[9..].split_once(':') {
+                                    this.add_items_to_playlist(vec![key.to_string()], pl.to_string(), "test".into(), cx);
+                                }
+                            }
                             k if k.starts_with("plopen:") => this.open_playlist(k[7..].to_string(), "test".into(), cx),
                             k if k.starts_with("plplay:") => this.play_playlist_from(k[7..].parse().unwrap_or(0), false, cx),
                             k if k.starts_with("plrm:") => this.remove_playlist_row(k[5..].parse().unwrap_or(0), cx),
@@ -2270,7 +2280,7 @@ impl Render for Crate {
         let player = if compact { self.compact_nav(&t, cx) } else { self.player_bar(&t, cx) };
         let palette = self.palette.then(|| self.palette_view(&t, cx));
         let now_playing = (self.now_playing && self.now.is_some() && !compact)
-            .then(|| div().absolute().inset_0().child(self.now_playing_view(&t, cx)));
+            .then(|| div().absolute().inset_0().occlude().child(self.now_playing_view(&t, cx)));
 
         let toast = self.status_toast(&t, cx);
         let el = div()

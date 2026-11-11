@@ -305,6 +305,7 @@ impl Crate {
             .child(div().flex_1().child("TITLE"))
             .child(div().w(px(220.0)).child("ALBUM"))
             .child(div().w(px(64.0)).flex().justify_end().child("TIME"))
+            .child(div().w(px(24.0)))
             .child(div().w(px(28.0)));
 
         let n = detail.map(|d| d.tracks.len()).unwrap_or(0);
@@ -389,6 +390,7 @@ impl Crate {
                                     .text_color(rgb(t.text2))
                                     .child(fmt_ms(tr.duration_ms)),
                             )
+                            .child(this.playlist_menu_icon(("pl-add", i), vec![tr.rating_key.clone()], tr.title.clone(), t.muted, cx))
                             .child(div().w(px(28.0)).flex().justify_end().when(!smart && item_id > 0, |d| {
                                 d.child(
                                     div()
