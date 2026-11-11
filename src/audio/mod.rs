@@ -240,7 +240,9 @@ pub enum Event {
     /// `gain` is the leveling factor the decoder applies to this track's samples.
     TrackStarted { index: usize, label: String, source_rate: u32, bits: u32, at_frame: u64, at_us: u64, gain: f32 },
     /// A queued track (engine index) couldn't be opened and was skipped.
-    Skipped { index: usize, error: String },
+    /// A track was skipped: it couldn't be opened, or (`partial`) it failed
+    /// part-way and the queue moved on.
+    Skipped { index: usize, error: String, partial: bool },
     Reconnected { from: u32, to: u32, silent_ms: f64 },
     FirstAudio { ms_since_play: f64 },
     Finished,
@@ -436,6 +438,8 @@ fn decoder_thread(
     let mut queued_us = 0u64;
     let mut queued_rem = 0u64;
     let mut scratch: Vec<f32> = Vec::new();
+    // A non-stereo track's interleaved frames before the mix to stereo.
+    let mut wide: Vec<f32> = Vec::new();
     // Crossfades: the current track's held-back end (only while the next
     // queued track will fade in), and the previous track's end being mixed
     // into the current one's start.
@@ -455,7 +459,7 @@ fn decoder_thread(
     // Spike/testing aid: cap each track at N seconds.
     let track_limit: Option<f64> = std::env::var("CRATE_TRACK_LIMIT").ok().and_then(|v| v.parse().ok());
 
-    loop {
+    'tracks: loop {
         let popped = {
             let mut q = queue.lock().unwrap();
             q.items.pop_front().map(|src| {
@@ -508,6 +512,32 @@ fn decoder_thread(
             }
         };
         let (src, gain) = (item.src, item.gain);
+        // A track that fails after it was opened (a decoder it can't make, a
+        // network drop mid-stream, too many corrupt frames): skip it and carry
+        // on with the queue, unless it's the first track and nothing has played
+        // (that's the error to report).
+        macro_rules! track_failed {
+            ($label:lifetime, $played:expr, $err:expr) => {{
+                let e: anyhow::Error = $err;
+                if index == 0 && $played == 0 {
+                    return Err(e);
+                }
+                eprintln!("[engine] {} failed part-way: {e:#}; skipping to the next track", src.label());
+                let _ = ev.send(Event::Skipped { index, error: format!("{e:#}"), partial: true });
+                // What's held back plays as is; a fade from the previous track
+                // has nothing left to fade under.
+                fading.clear();
+                if !tail.is_empty() {
+                    drained.clear();
+                    drained.extend(tail.drain(..));
+                    let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, queued_rem: &mut queued_rem, stream_frames: &mut stream_frames };
+                    if !out.push(&drained, tail_rate, &cmd_tx, &stats) {
+                        return Ok(());
+                    }
+                }
+                continue $label;
+            }};
+        }
         // A gain that isn't a sane finite factor is ignored rather than trusted.
         let gain = if gain.is_finite() && gain > 0.0 && gain <= 4.0 { gain } else { 1.0 };
         let open = || -> anyhow::Result<_> {
@@ -532,7 +562,7 @@ fn decoder_thread(
                     Err(_) if stats.stop.load(Ordering::Acquire) => return Ok(()),
                     Err(e2) => {
                         eprintln!("[engine] skipping {}: {e:#}; retry: {e2:#}", src.label());
-                        let _ = ev.send(Event::Skipped { index, error: format!("{e2:#}") });
+                        let _ = ev.send(Event::Skipped { index, error: format!("{e2:#}"), partial: false });
                         // The held end was kept for a fade into the skipped
                         // track; the next one's fade was decided against it
                         // too. Play the end as is, so nothing crossfades.
@@ -551,7 +581,7 @@ fn decoder_thread(
             Err(e) => return Err(e),
         };
         let Some(CodecParameters::Audio(params)) = &track.codec_params else {
-            anyhow::bail!("not audio")
+            track_failed!('tracks, 0, anyhow::anyhow!("not audio"))
         };
         let rate = params.sample_rate.unwrap_or(48_000);
         let bits = params.bits_per_sample.unwrap_or(0);
@@ -657,7 +687,9 @@ fn decoder_thread(
             use symphonia::core::formats::{SeekMode, SeekTo};
             use symphonia::core::units::Time;
             let time = Time::try_from_secs_f64((start_ms - preroll_ms) as f64 / 1000.0).unwrap_or_default();
-            fmt.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(track.id) })?;
+            if let Err(e) = fmt.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(track.id) }) {
+                track_failed!('tracks, 0, e.into())
+            }
         }
 
         // Hold back this track's end only if the next queued track will fade
@@ -667,8 +699,10 @@ fn decoder_thread(
             q.items.front().map(|n| (n.fade_ms.min(12_000) as u64 * rate as u64 / 1000) as usize * CHANNELS).unwrap_or(0)
         };
         tail_rate = rate;
-        let mut dec = opus::codecs()
-            .make_audio_decoder(params, &AudioDecoderOptions::default().gapless(true))?;
+        let mut dec = match opus::codecs().make_audio_decoder(params, &AudioDecoderOptions::default().gapless(true)) {
+            Ok(d) => d,
+            Err(e) => track_failed!('tracks, 0, anyhow::Error::from(e).context("no decoder for this format")),
+        };
         if seeked && ogg_opus {
             // The decoder starts mid-stream: no start-of-stream trims (Opus
             // pre-skip) on the first packets it sees.
@@ -676,6 +710,7 @@ fn decoder_thread(
         }
         let limit_frames = track_limit.map(|s| (s * rate as f64) as u64);
         let mut track_frames = 0u64;
+        let mut bad_packets = 0u32;
         // Symphonia's Ogg reader returns UnexpectedEof, not Ok(None), when the
         // last page isn't flagged end-of-stream, and Plex never flags it.
         // Where decoded output starts on the track (the pre-roll is dropped).
@@ -701,7 +736,7 @@ fn decoder_thread(
                     }
                     break;
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => track_failed!('tracks, track_frames, e.into()),
             };
             if stats.stop.load(Ordering::Acquire) {
                 return Ok(());
@@ -712,11 +747,35 @@ fn decoder_thread(
             if packet.track_id != track.id {
                 continue;
             }
-            let buf = dec.decode(&packet)?;
+            let buf = match dec.decode(&packet) {
+                Ok(b) => {
+                    bad_packets = 0;
+                    b
+                }
+                // A corrupt frame: drop it and go on (symphonia's decode
+                // errors are recoverable); a run of them is a broken file.
+                Err(symphonia::core::errors::Error::DecodeError(e)) => {
+                    bad_packets += 1;
+                    if bad_packets > 20 {
+                        track_failed!('tracks, track_frames, anyhow::anyhow!("too many corrupt frames ({e})"))
+                    }
+                    eprintln!("[engine] {}: dropped a corrupt frame ({e})", src.label());
+                    continue;
+                }
+                Err(e) => track_failed!('tracks, track_frames, e.into()),
+            };
             let ch = buf.spec().channels().count();
-            anyhow::ensure!(ch == CHANNELS, "only stereo in the spike (got {ch})");
-            scratch.resize(buf.frames() * ch, 0.0);
-            buf.copy_to_slice_interleaved(&mut scratch[..]);
+            if ch == CHANNELS {
+                scratch.resize(buf.frames() * ch, 0.0);
+                buf.copy_to_slice_interleaved(&mut scratch[..]);
+            } else {
+                // Mono is copied to both sides (still bit-exact); more than
+                // two channels are mixed down to stereo.
+                let weights = stereo_weights(buf.spec().channels());
+                wide.resize(buf.frames() * ch, 0.0);
+                buf.copy_to_slice_interleaved(&mut wide[..]);
+                to_stereo(&wide, &weights, &mut scratch);
+            }
             if preroll_frames > 0 {
                 let drop = preroll_frames.min(scratch.len() / CHANNELS);
                 scratch.drain(..drop * CHANNELS);
@@ -1137,5 +1196,86 @@ mod fade_tests {
         }
         assert_eq!(fade_limit(1.0, 1.0), 1.0);
         assert_eq!(fade_limit(-0.8, 1.0), -0.8);
+    }
+}
+
+/// Each channel's (left, right) weight when mixing to stereo: mono goes to
+/// both sides at full level; surround uses the usual -3 dB for centre and
+/// rear/side channels, drops LFE, and is scaled so a full-scale signal on
+/// every channel can't clip.
+fn stereo_weights(ch: &symphonia::core::audio::Channels) -> Vec<(f32, f32)> {
+    use symphonia::core::audio::Channels;
+    const H: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    let n = ch.count();
+    if n == 1 {
+        return vec![(1.0, 1.0)];
+    }
+    let mut w: Vec<(f32, f32)> = match ch {
+        Channels::Positioned(p) => (0..32u32)
+            .filter(|b| p.bits() & (1 << b) != 0)
+            .map(|b| match b {
+                0 => (1.0, 0.0),                        // front left
+                1 => (0.0, 1.0),                        // front right
+                3 | 18 => (0.0, 0.0),                   // LFE
+                4 | 6 | 9 | 12 | 15 | 19 | 22 => (H, 0.0), // left-side positions
+                5 | 7 | 10 | 14 | 17 | 20 | 23 => (0.0, H), // right-side positions
+                _ => (H, H),                            // centres
+            })
+            .collect(),
+        // Unlabelled channels: the first two are left and right.
+        _ => (0..n).map(|i| match i { 0 => (1.0, 0.0), 1 => (0.0, 1.0), _ => (0.0, 0.0) }).collect(),
+    };
+    w.resize(n, (0.0, 0.0));
+    let (l, r) = w.iter().fold((0.0f32, 0.0f32), |(l, r), (a, b)| (l + a, r + b));
+    let peak = l.max(r);
+    if peak > 1.0 {
+        for x in &mut w {
+            x.0 /= peak;
+            x.1 /= peak;
+        }
+    }
+    w
+}
+
+/// Mix interleaved frames of `weights.len()` channels into stereo.
+fn to_stereo(wide: &[f32], weights: &[(f32, f32)], out: &mut Vec<f32>) {
+    let n = weights.len().max(1);
+    out.clear();
+    out.reserve(wide.len() / n * 2);
+    for frame in wide.chunks_exact(n) {
+        let (mut l, mut r) = (0.0f32, 0.0f32);
+        for (s, (a, b)) in frame.iter().zip(weights) {
+            l += s * a;
+            r += s * b;
+        }
+        out.push(l);
+        out.push(r);
+    }
+}
+
+#[cfg(test)]
+mod stereo_tests {
+    use symphonia::core::audio::{Channels, Position};
+
+    #[test]
+    fn mono_is_copied_exactly() {
+        let w = super::stereo_weights(&Channels::Positioned(Position::FRONT_CENTER));
+        let mut out = Vec::new();
+        super::to_stereo(&[0.25, -0.5], &w, &mut out);
+        assert_eq!(out, vec![0.25, 0.25, -0.5, -0.5]);
+    }
+
+    #[test]
+    fn surround_downmix_cannot_clip() {
+        let p = Position::FRONT_LEFT | Position::FRONT_RIGHT | Position::FRONT_CENTER | Position::LFE1 | Position::REAR_LEFT | Position::REAR_RIGHT;
+        let w = super::stereo_weights(&Channels::Positioned(p));
+        assert_eq!(w.len(), 6);
+        assert_eq!(w[3], (0.0, 0.0), "LFE dropped");
+        let mut out = Vec::new();
+        super::to_stereo(&[1.0; 6], &w, &mut out);
+        assert!(out.iter().all(|x| *x <= 1.0 + 1e-6), "{out:?}");
+        // Left-only content stays on the left.
+        super::to_stereo(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0], &w, &mut out);
+        assert!(out[0] > 0.3 && out[1] == 0.0);
     }
 }
