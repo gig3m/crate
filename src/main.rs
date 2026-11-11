@@ -308,6 +308,18 @@ impl Crate {
                             .filter(|r| r.kind == "album" && r.id.starts_with("music.recent.added"))
                             .flat_map(|r| r.items.iter().map(|i| i.rating_key.clone()))
                             .collect();
+                        // Mixes for you: similar artists (subtitle, covers) and their art.
+                        for (k, _) in Crate::mix_artists(&home) {
+                            this.request_sonic_artists(k, cx);
+                        }
+                        let mix_thumbs: Vec<String> = Crate::mix_artists(&home)
+                            .iter()
+                            .flat_map(|(k, _)| this.albums.iter().filter(move |a| a.artist_key == *k).take(4).map(|a| a.thumb.clone()))
+                            .collect();
+                        let mix_thumbs = mix_thumbs.into_iter().chain(home.mixes.iter().flat_map(|m| m.3.iter().map(|(th, _)| th.clone())));
+                        for th in mix_thumbs {
+                            this.request_thumb(&th);
+                        }
                         this.home = Some(home);
                         if !keys.is_empty() {
                             let rx = plex_call(move |c| async move { c.album_formats(keys).await });

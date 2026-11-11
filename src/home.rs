@@ -226,6 +226,100 @@ impl Crate {
             .child(div().text_size(px(13.0)).text_color(rgb(t.muted)).child(blurb))
     }
 
+    /// Recently played artists for "Mixes for you" (key, name), up to three.
+    pub(crate) fn mix_artists(home: &crate::plex::Home) -> Vec<(String, String)> {
+        home.rows
+            .iter()
+            .filter(|r| r.kind == "artist" && r.id.starts_with("music.recent.played"))
+            .flat_map(|r| r.items.iter())
+            .take(3)
+            .map(|i| (i.rating_key.clone(), i.title.clone()))
+            .collect()
+    }
+
+    /// "Mixes for you" (canvas): artist mixes for recently played artists
+    /// (Plex artist radio) and mood mixes (random tracks from library moods),
+    /// each a 2x2 cover collage.
+    fn mixes_section(&self, home: &crate::plex::Home, cols: usize, card_w: f32, t: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        enum Mix {
+            Artist(String, String),
+            Mood(String, String, String, Vec<(String, String)>),
+        }
+        let mut mixes: Vec<Mix> = Self::mix_artists(home).into_iter().map(|(k, n)| Mix::Artist(k, n)).collect();
+        mixes.extend(home.mixes.iter().map(|(a, b, c, d)| Mix::Mood(a.clone(), b.clone(), c.clone(), d.clone())));
+        if mixes.is_empty() {
+            return None;
+        }
+        let half = ((card_w - 2.0) / 2.0).floor();
+        let cards: Vec<_> = mixes
+            .into_iter()
+            .take(cols)
+            .enumerate()
+            .map(|(i, m)| {
+                let (title, desc, covers): (String, String, Vec<(String, String)>) = match &m {
+                    Mix::Artist(key, name) => {
+                        let mut covers: Vec<(String, String)> =
+                            self.albums.iter().filter(|a| a.artist_key == *key).take(4).map(|a| (a.thumb.clone(), a.rating_key.clone())).collect();
+                        // Fill with the sonically similar artists' covers, then marks.
+                        if let Some(Some(sim)) = self.sonic_artists.get(key) {
+                            for s in sim {
+                                if covers.len() >= 4 {
+                                    break;
+                                }
+                                if let Some(a) = self.albums.iter().find(|a| a.artist_key == s.0) {
+                                    covers.push((a.thumb.clone(), a.rating_key.clone()));
+                                }
+                            }
+                        }
+                        let with = match self.sonic_artists.get(key) {
+                            Some(Some(sim)) if !sim.is_empty() => format!("With {}", sim.iter().take(2).map(|s| s.1.clone()).collect::<Vec<_>>().join(", ")),
+                            _ => "Artist radio from your library".into(),
+                        };
+                        (format!("{name} Mix"), with, covers)
+                    }
+                    Mix::Mood(title, desc, _, covers) => (title.clone(), desc.clone(), covers.clone()),
+                };
+                let mut covers = covers;
+                while covers.len() < 4 {
+                    covers.push((String::new(), format!("{title}-{}", covers.len())));
+                }
+                let grid = div()
+                    .w(px(card_w))
+                    .h(px(card_w))
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(2.0))
+                    .rounded(px(8.0))
+                    .overflow_hidden()
+                    .children(covers.iter().map(|(th, k)| self.cover_or_mark(th, k, half, 0.0)));
+                div()
+                    .id(("mix", i))
+                    .w(px(card_w))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .cursor_pointer()
+                    .child(grid)
+                    .child(div().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).truncate().child(title.clone()))
+                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(desc))
+                    .on_click(cx.listener(move |this, _, _, cx| match &m {
+                        Mix::Artist(key, _) => this.play_radio(key, title.clone(), cx),
+                        Mix::Mood(_, _, q, _) => this.play_station(format!("query:{q}"), title.clone(), cx),
+                    }))
+            })
+            .collect();
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(14.0))
+                .child(Self::section_head("Mixes for you", None, t))
+                .child(div().flex().gap(px(20.0)).children(cards))
+                .into_any_element(),
+        )
+    }
+
     fn section_head(title: &str, link: Option<gpui::AnyElement>, t: &Theme) -> gpui::Div {
         div()
             .flex()
@@ -397,6 +491,9 @@ impl Crate {
         let cols = self.home_cols();
         let card_w = self.home_card_w(cols);
         let mut col = col.child(top).child(stations_section);
+        if let Some(mixes) = self.mixes_section(home, cols, card_w, t, cx) {
+            col = col.child(mixes);
+        }
         for (ri, row) in home.rows.iter().enumerate().filter(|(_, r)| r.kind != "station") {
             let artist = row.kind == "artist";
             let cards: Vec<_> = row
