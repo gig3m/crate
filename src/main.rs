@@ -182,6 +182,8 @@ struct Crate {
     np_lyrics: bool,
     /// Whether the last track shown in Now Playing had lyrics (layout while the next loads).
     np_had_lyrics: std::cell::Cell<bool>,
+    /// Tracks whose detail fetch failed (until they're fetched again).
+    detail_failed: std::collections::HashSet<String>,
     /// Mix pages by id ("artist:<key>", "mood:<query>", "builder:<key>").
     mixes: HashMap<String, mix::MixPage>,
     /// Bumped per queue started (Now::queue_id) and per play request, so late
@@ -804,6 +806,7 @@ impl Crate {
             view_size: (1280.0, 800.0),
             np_lyrics: theme::saved_lyrics(),
             np_had_lyrics: std::cell::Cell::new(false),
+            detail_failed: Default::default(),
             mixes: HashMap::new(),
             queue_seq: 0,
             play_intent: 0,
@@ -1977,6 +1980,8 @@ impl Crate {
             return;
         }
         self.track_detail.insert(rk.clone(), None);
+        self.detail_failed.remove(&rk);
+        let rk_err = rk.clone();
         let rx = plex_call(move |c| async move { c.track_detail(&rk, player_bar::BARS).await.map(|d| (rk, d)) });
         cx.spawn(async move |this, cx| match rx.await {
             Ok(Ok((rk, d))) => {
@@ -1986,7 +1991,17 @@ impl Crate {
                 })
                 .ok();
             }
-            Ok(Err(e)) => eprintln!("[crate] track detail: {e:#}"),
+            Ok(Err(e)) => {
+                eprintln!("[crate] track detail: {e:#}");
+                // Show it as having no detail (Now Playing's no-lyrics
+                // layout), and try again the next time it plays.
+                this.update(cx, |this, cx| {
+                    this.track_detail.remove(&rk_err);
+                    this.detail_failed.insert(rk_err);
+                    cx.notify();
+                })
+                .ok();
+            }
             Err(_) => {}
         })
         .detach();

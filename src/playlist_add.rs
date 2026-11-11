@@ -70,6 +70,7 @@ impl Crate {
         self.playlist_busy = true;
         let section = crate::section();
         let smart = matches!(n.what, NameFor::Smart(_));
+        let chunked = matches!(n.what, NameFor::Tracks(_));
         let (rx, albums) = match n.what {
             NameFor::Albums(keys) => {
                 let (t, k) = (title.clone(), keys.clone());
@@ -103,6 +104,12 @@ impl Crate {
                         }
                         let kind = if smart { "Smart playlist" } else { "Playlist" };
                         this.say(format!("{kind} \u{201c}{title}\u{201d} created · {n} track{}", if n == 1 { "" } else { "s" }));
+                        this.reload_playlists(cx);
+                    }
+                    // A long save can fail part-way with the playlist made:
+                    // show it in the sidebar either way.
+                    Ok(Err(e)) if chunked => {
+                        this.say(format!("\u{201c}{title}\u{201d}: {e:#}"));
                         this.reload_playlists(cx);
                     }
                     Ok(Err(e)) => this.say(format!("Couldn't create \u{201c}{title}\u{201d}: {e:#}")),

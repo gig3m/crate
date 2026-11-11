@@ -1000,8 +1000,19 @@ impl Client {
             .send()
             .await?;
         anyhow::ensure!(res.status().is_success(), "playlist {rating_key} -> {}", res.status());
-        let env: Envelope = res.json().await.context("playlist")?;
-        Ok(env.mc.metadata.into_iter().filter_map(Meta::into_track).collect())
+        let v: serde_json::Value = res.json().await.context("playlist")?;
+        // Keep each item's playlist item id, so the playlist page can light
+        // up the row playing.
+        let raw = v["MediaContainer"]["Metadata"].as_array().cloned().unwrap_or_default();
+        Ok(raw
+            .into_iter()
+            .filter_map(|it| {
+                let id = it["playlistItemID"].as_u64().unwrap_or(0);
+                let mut t = serde_json::from_value::<Meta>(it).ok().and_then(Meta::into_track)?;
+                t.playlist_item = id;
+                Some(t)
+            })
+            .collect())
     }
 
     /// A playlist's header and items (up to `limit`), with each item's
@@ -1250,9 +1261,9 @@ impl Client {
     pub async fn create_playlist_chunked(&self, title: &str, keys: &[String]) -> anyhow::Result<(String, u64)> {
         const CHUNK: usize = 200;
         let (first, rest) = keys.split_at(keys.len().min(CHUNK));
-        let (key, mut n) = self.create_playlist(title, first).await?;
+        let (key, mut n) = self.create_playlist(title, first).await.context("couldn't create it")?;
         for part in rest.chunks(CHUNK) {
-            n += self.add_to_playlist(&key, part).await.with_context(|| format!("created \u{201c}{title}\u{201d} with {n} tracks, then adding more failed"))?;
+            n += self.add_to_playlist(&key, part).await.with_context(|| format!("saved {n} of {} tracks, then adding the rest failed", keys.len()))?;
         }
         Ok((key, n))
     }
