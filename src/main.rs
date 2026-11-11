@@ -1351,6 +1351,8 @@ impl Crate {
 
     /// A preset chip: load its curve into the sliders (Off keeps them as they are).
     pub(crate) fn set_eq_preset(&mut self, p: theme::EqPreset, window: &mut Window, cx: &mut Context<Self>) {
+        // A pick still loading is overtaken by this choice.
+        self.autoeq_pick_gen += 1;
         // AutoEQ without a profile yet: nothing to switch to.
         let p = if p == theme::EqPreset::AutoEq && self.eq_autoeq.is_none() { self.eq_preset } else { p };
         self.eq_preset = p;
@@ -1363,6 +1365,7 @@ impl Crate {
 
     /// A slider moved: that makes the curve Custom (starting from what was shown).
     fn set_eq_band(&mut self, i: usize, db: f32, save: bool, cx: &mut Context<Self>) {
+        self.autoeq_pick_gen += 1;
         if let Some(curve) = self.preset_curve(self.eq_preset) {
             self.eq_custom = curve;
         }

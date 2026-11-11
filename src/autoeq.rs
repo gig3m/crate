@@ -153,6 +153,7 @@ impl Crate {
     /// Open (or close) the AutoEQ search under the presets.
     pub(crate) fn toggle_autoeq_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.autoeq_picker.take().is_some() {
+            self.autoeq_pick_gen += 1;
             self.refocus = true;
             cx.notify();
             return;
