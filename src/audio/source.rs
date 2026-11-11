@@ -221,12 +221,9 @@ impl Progressive {
         // One temp file per attempt: overlapping downloads of the same track
         // (seek, restart) never share or truncate each other's file.
         // Request first, so a 404 or auth failure surfaces as itself.
-        let mut resp = reqwest::blocking::Client::new()
-            .get(url)
-            .header("X-Plex-Token", token)
-            .header("X-Plex-Client-Identifier", client)
-            .send()?
-            .error_for_status()?;
+        let http = reqwest::blocking::Client::new();
+        let mut resp = http.get(url).header("X-Plex-Token", token).header("X-Plex-Client-Identifier", client).send()?.error_for_status()?;
+        let (url, token, client) = (url.to_string(), token.to_string(), client.to_string());
         let n = ATTEMPT.fetch_add(1, Ordering::Relaxed);
         let part = cache.with_extension(format!("part.{}.{n}", std::process::id()));
         let writer = File::create(&part)?;
@@ -248,11 +245,47 @@ impl Progressive {
                     st2.total.store(len, Ordering::Release);
                 }
                 let mut buf = vec![0u8; 256 * 1024];
+                let mut resumes = 0u32;
                 loop {
                     if cancel2.load(Ordering::Acquire) {
                         anyhow::bail!("cancelled");
                     }
-                    let n = resp.read(&mut buf)?;
+                    let n = match resp.read(&mut buf) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            // A dropped connection (Plex sometimes cuts one
+                            // mid-file): pick up where it stopped, when the
+                            // length is known and the server does ranges.
+                            let (got, total) = (st2.written.load(Ordering::Acquire), st2.total.load(Ordering::Acquire));
+                            let mut resumed = None;
+                            while resumed.is_none() && resumes < 5 && total > 0 && got < total {
+                                std::thread::sleep(Duration::from_millis(500 << resumes));
+                                resumes += 1;
+                                if cancel2.load(Ordering::Acquire) {
+                                    anyhow::bail!("cancelled");
+                                }
+                                let r = http
+                                    .get(&url)
+                                    .header("X-Plex-Token", &token)
+                                    .header("X-Plex-Client-Identifier", &client)
+                                    .header("Range", format!("bytes={got}-"))
+                                    .send();
+                                match r {
+                                    Ok(r) if r.status() == reqwest::StatusCode::PARTIAL_CONTENT => resumed = Some(r),
+                                    Ok(r) => eprintln!("[download] resume at {got}: {}", r.status()),
+                                    Err(e) => eprintln!("[download] resume at {got}: {e}"),
+                                }
+                            }
+                            match resumed {
+                                Some(r) => {
+                                    eprintln!("[download] {} resumed at {got} of {total} bytes after: {e}", cache.display());
+                                    resp = r;
+                                    continue;
+                                }
+                                None => return Err(e.into()),
+                            }
+                        }
+                    };
                     if n == 0 {
                         break;
                     }
