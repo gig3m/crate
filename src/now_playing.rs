@@ -59,7 +59,10 @@ impl Crate {
                 self.np_had_lyrics.set(!lyrics.is_empty());
                 !lyrics.is_empty()
             }
-            None if self.detail_failed.contains(&tr.rating_key) => false,
+            None if self.detail_failed.contains(&tr.rating_key) => {
+                self.np_had_lyrics.set(false);
+                false
+            }
             None => self.np_had_lyrics.get(),
         };
         let show_lyrics = self.np_lyrics && has_lyrics;

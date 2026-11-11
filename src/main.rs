@@ -1697,7 +1697,8 @@ impl Crate {
                 && std::fs::write(&art, img.bytes()).is_ok() {
                     now.sent_idx = None;
                 }
-        if now.sent_idx != Some(now.idx) {
+        let announced = now.sent_idx != Some(now.idx);
+        if announced {
             now.sent_idx = Some(now.idx);
             let tr = &now.tracks[now.idx];
             let art = Self::art_path(&tr.album_key);
@@ -1712,6 +1713,11 @@ impl Crate {
         }
         let rk = now.tracks[now.idx].rating_key.clone();
         let album_key = now.tracks[now.idx].album_key.clone();
+        // A detail fetch that failed gets one retry each time the track is
+        // announced (it starts), not on every poll.
+        if announced {
+            self.detail_failed.remove(&rk);
+        }
         self.request_track_detail(rk, cx);
         // Now Playing's ambient field comes from the album's UltraBlur colors.
         self.request_album_detail(album_key, cx);
@@ -1976,11 +1982,10 @@ impl Crate {
     }
 
     fn request_track_detail(&mut self, rk: String, cx: &mut Context<Self>) {
-        if self.track_detail.contains_key(&rk) {
+        if self.track_detail.contains_key(&rk) || self.detail_failed.contains(&rk) {
             return;
         }
         self.track_detail.insert(rk.clone(), None);
-        self.detail_failed.remove(&rk);
         let rk_err = rk.clone();
         let rx = plex_call(move |c| async move { c.track_detail(&rk, player_bar::BARS).await.map(|d| (rk, d)) });
         cx.spawn(async move |this, cx| match rx.await {
