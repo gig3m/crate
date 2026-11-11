@@ -2768,13 +2768,21 @@ fn main() {
     let (base, token, section) = (acct.url.clone(), acct.token.clone(), acct.section.clone());
     offline::set_scope(&acct.server_id, &saved_url);
     // Remote when the address in use is one Plex lists as not local (or a
-    // relay). An address it doesn't list (PLEX_URL) counts as local.
+    // relay), unless its host resolves to a private or Tailscale IP (e.g.
+    // plex.example.com over the tailnet): that never crosses the internet.
+    // An address Plex doesn't list (PLEX_URL) counts as local.
     // CRATE_REMOTE=1/0 overrides, for testing.
     let remote = match std::env::var("CRATE_REMOTE").ok().as_deref() {
         Some("1") => true,
         Some("0") => false,
-        _ => acct.connections.iter().find(|c| c.uri == acct.url).is_some_and(|c| !c.local || c.relay),
+        _ => {
+            acct.connections.iter().find(|c| c.uri == acct.url).is_some_and(|c| !c.local || c.relay)
+                && !rt.block_on(account::resolves_private(&acct.url))
+        }
     };
+    if std::env::var_os("CRATE_TRACE").is_some() {
+        eprintln!("[crate] {} -> {}", acct.url, if remote { "remote" } else { "local" });
+    }
     let _ = REMOTE.set(remote);
     let _ = SECTION.set(section.clone());
 

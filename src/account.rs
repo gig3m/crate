@@ -369,3 +369,49 @@ pub async fn music_sections(http: &reqwest::Client, url: &str, token: &str) -> a
         .filter_map(|d| Some((d["key"].as_str()?.to_string(), d["title"].as_str()?.to_string())))
         .collect())
 }
+
+/// True when every address `url`'s host resolves to is on a private
+/// network: RFC 1918, Tailscale/CGNAT (100.64/10), loopback, link-local,
+/// or IPv6 ULA/link-local. Such a server is reached without crossing the
+/// internet (LAN or tailnet), whatever Plex labels the address.
+pub async fn resolves_private(url: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(url) else { return false };
+    let Some(host) = u.host_str().map(str::to_owned) else { return false };
+    let port = u.port_or_known_default().unwrap_or(443);
+    let lookup = tokio::task::spawn_blocking(move || {
+        use std::net::ToSocketAddrs as _;
+        (host.trim_matches(['[', ']']), port).to_socket_addrs().map(|a| a.map(|s| s.ip()).collect::<Vec<_>>())
+    });
+    match tokio::time::timeout(std::time::Duration::from_secs(2), lookup).await {
+        Ok(Ok(Ok(ips))) => !ips.is_empty() && ips.iter().all(|ip| is_private(*ip)),
+        _ => false,
+    }
+}
+
+pub fn is_private(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v) => {
+            let o = v.octets();
+            v.is_private() || v.is_loopback() || v.is_link_local() || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        std::net::IpAddr::V6(v) => {
+            let s = v.segments()[0];
+            v.is_loopback() || (s & 0xfe00) == 0xfc00 || (s & 0xffc0) == 0xfe80
+                || v.to_ipv4_mapped().is_some_and(|m| is_private(m.into()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod private_tests {
+    use super::is_private;
+    #[test]
+    fn ranges() {
+        for ip in ["192.168.1.10", "192.168.1.2", "172.20.0.1", "100.100.10.20", "100.127.0.1", "127.0.0.1", "fd7a:115c:a1e0::1", "fe80::1", "::ffff:10.0.0.1"] {
+            assert!(is_private(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["45.33.22.210", "100.63.0.1", "100.128.0.1", "8.8.8.8", "2606:4700::1"] {
+            assert!(!is_private(ip.parse().unwrap()), "{ip}");
+        }
+    }
+}
