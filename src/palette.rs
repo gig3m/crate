@@ -24,7 +24,6 @@ pub(crate) enum Item {
 pub(crate) enum PalCmd {
     Nav(&'static str, &'static str),
     NowPlaying,
-    Lyrics,
     Queue,
     Shuffle,
     Repeat,
@@ -35,7 +34,7 @@ pub(crate) enum PalCmd {
 }
 
 impl PalCmd {
-    const ALL: [PalCmd; 19] = [
+    const ALL: [PalCmd; 17] = [
         PalCmd::Nav("home", "Go to Home"),
         PalCmd::Nav("albums", "Go to Albums"),
         PalCmd::Nav("artists", "Go to Artists"),
@@ -47,21 +46,18 @@ impl PalCmd {
         PalCmd::Nav("stations", "Go to Stations"),
         PalCmd::SonicAdventure,
         PalCmd::NowPlaying,
-        PalCmd::Lyrics,
         PalCmd::Queue,
         PalCmd::Shuffle,
         PalCmd::Repeat,
         PalCmd::Settings,
         PalCmd::ThemeCrate,
         PalCmd::ThemeOmarchy,
-        PalCmd::Nav("search", "Search"),
     ];
 
     fn label(self) -> &'static str {
         match self {
             PalCmd::Nav(_, l) => l,
-            PalCmd::NowPlaying => "Open Now Playing",
-            PalCmd::Lyrics => "Show lyrics",
+            PalCmd::NowPlaying => "Open Now Playing (lyrics)",
             PalCmd::Queue => "Show the queue",
             PalCmd::Shuffle => "Toggle shuffle",
             PalCmd::Repeat => "Cycle repeat",
@@ -74,9 +70,11 @@ impl PalCmd {
 }
 
 /// A leading `@`, `#` or `>` picks a scope (canvas); returns it and the rest.
+/// A leading backslash searches the text as typed (`\#1 Record`).
 pub(crate) fn split_prefix(q: &str) -> (Option<char>, &str) {
     match q.chars().next() {
         Some(c @ ('@' | '#' | '>')) => (Some(c), q[1..].trim_start()),
+        Some('\\') => (None, &q[1..]),
         _ => (None, q),
     }
 }
@@ -137,7 +135,7 @@ impl Crate {
             }
         }
         if prefix.is_none() && (self.pal_scope == 0 || self.pal_scope == 4) {
-            let q = self.search_query.to_lowercase();
+            let q = rest.clone();
             if !q.is_empty()
                 && let Some(h) = &self.home
             {
@@ -182,6 +180,7 @@ impl Crate {
             }
             Item::Filter { kind, label, query } => {
                 self.close_palette(window, cx);
+                self.now_playing = false;
                 self.add_filter(crate::library::LibFilter { kind, label, query }, cx);
             }
             Item::Command(c) => {
@@ -192,25 +191,31 @@ impl Crate {
     }
 
     fn run_command(&mut self, c: PalCmd, window: &mut Window, cx: &mut Context<Self>) {
+        // Commands that change the page close Now Playing so the change shows.
+        if matches!(c, PalCmd::Nav(..) | PalCmd::Settings | PalCmd::SonicAdventure) {
+            self.now_playing = false;
+        }
         match c {
-            PalCmd::Nav(id, _) => {
-                self.now_playing = false;
-                self.nav_to(id, window, cx);
-            }
+            PalCmd::Nav(id, _) => self.nav_to(id, window, cx),
             PalCmd::NowPlaying => self.open_now_playing(None, cx),
-            PalCmd::Lyrics => self.open_now_playing(None, cx),
             PalCmd::Queue => self.open_now_playing(Some(0), cx),
-            PalCmd::Shuffle => self.toggle_shuffle(cx),
-            PalCmd::Repeat => self.cycle_repeat(cx),
+            PalCmd::Shuffle => {
+                self.toggle_shuffle(cx);
+                self.status = if self.shuffle { "Shuffle on" } else { "Shuffle off" }.into();
+            }
+            PalCmd::Repeat => {
+                self.cycle_repeat(cx);
+                self.status = format!("Repeat: {:?}", self.repeat).into();
+            }
             PalCmd::Settings => self.open_audio_settings(cx),
             PalCmd::SonicAdventure => self.open_sonic(cx),
             PalCmd::ThemeCrate => self.set_theme_mode(crate::theme::Mode::Crate, cx),
             PalCmd::ThemeOmarchy => self.set_theme_mode(crate::theme::Mode::Omarchy, cx),
         }
-        if self.now.is_none() && matches!(c, PalCmd::NowPlaying | PalCmd::Lyrics | PalCmd::Queue | PalCmd::Shuffle | PalCmd::Repeat) {
+        if self.now.is_none() && matches!(c, PalCmd::NowPlaying | PalCmd::Queue) {
             self.status = "Nothing is playing".into();
-            cx.notify();
         }
+        cx.notify();
     }
 
     /// Queue an album, track or playlist (play next or at the end).
