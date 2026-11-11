@@ -710,14 +710,15 @@ impl Client {
         section: &str,
         artist_key: &str,
     ) -> anyhow::Result<(std::collections::HashSet<String>, std::collections::HashSet<String>)> {
-        let fp = format!("/library/sections/{section}/format");
-        let sp = format!("/library/sections/{section}/subformat");
+        let fp = format!("/library/sections/{section}/format?type=9");
+        let sp = format!("/library/sections/{section}/subformat?type=9");
         let (formats, subformats) = tokio::join!(self.directory(&fp), self.directory(&sp));
         let pick = |dir: &[(String, String)], names: &[&str]| -> Vec<String> {
             dir.iter().filter(|(_, t)| names.contains(&t.as_str())).map(|(k, _)| k.clone()).collect()
         };
-        let small = pick(&formats.unwrap_or_default(), &["EP", "Single"]);
-        let live = pick(&subformats.unwrap_or_default(), &["Live"]);
+        // Errors propagate: a failed lookup must not be cached as "no EPs".
+        let small = pick(&formats?, &["EP", "Single"]);
+        let live = pick(&subformats?, &["Live"]);
         let keys = |filter: String| async move {
             if filter.is_empty() {
                 return Ok::<_, anyhow::Error>(std::collections::HashSet::new());

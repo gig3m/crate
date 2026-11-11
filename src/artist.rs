@@ -191,7 +191,9 @@ impl Crate {
         let kinds = self.artist_kinds.get(key).cloned().flatten();
         let kind_of = |a: &Album| -> usize {
             let t = a.title.to_lowercase();
-            let live_title = t.starts_with("live at") || t.starts_with("live from") || t.contains("(live");
+            let live_title = t == "live"
+                || ["live at ", "live from ", "live in "].iter().any(|p| t.starts_with(p))
+                || ["(live)", "[live]", "(live at", "(live from", "(live in", " - live"].iter().any(|p| t.contains(p));
             match &kinds {
                 Some((small, _)) if small.contains(&a.rating_key) => 1,
                 Some((_, live)) if live.contains(&a.rating_key) => 2,
@@ -203,7 +205,10 @@ impl Crate {
             c[kind_of(a)] += 1;
             c
         });
-        let tab = if counts[self.artist_tab.min(2)] > 0 { self.artist_tab.min(2) } else { 0 };
+        // This artist's chosen tab if it still has albums, else the first that does.
+        let want = self.artist_tabs.get(key).copied().unwrap_or(0).min(2);
+        let tab = if counts[want] > 0 { want } else { (0..3).find(|&i| counts[i] > 0).unwrap_or(0) };
+        let artist_key = key.to_string();
         let tabs_el = (counts[1] + counts[2] > 0).then(|| {
             div().flex().gap(px(4.0)).p(px(4.0)).rounded(px(10.0)).bg(rgb(t.surface)).border_1().border_color(rgb(t.raised)).children(
                 ["Albums", "Singles & EPs", "Live"].iter().enumerate().filter(|(i, _)| counts[*i] > 0).map(|(i, label)| {
@@ -223,10 +228,13 @@ impl Crate {
                         .cursor_pointer()
                         .child(*label)
                         .child(div().font_family(MONO).text_size(px(11.0)).text_color(rgb(t.muted)).child(counts[i].to_string()))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.artist_tab = i;
-                            cx.notify();
-                        }))
+                        .on_click({
+                            let k = artist_key.clone();
+                            cx.listener(move |this, _, _, cx| {
+                                this.artist_tabs.insert(k.clone(), i);
+                                cx.notify();
+                            })
+                        })
                 }),
             )
         });

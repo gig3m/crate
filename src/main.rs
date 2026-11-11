@@ -157,7 +157,8 @@ struct Crate {
     sonic: sonic::SonicState,
     /// Artist key -> (singles & EPs, live) album keys; and the open tab.
     artist_kinds: HashMap<String, Option<sonic::AlbumKinds>>,
-    artist_tab: usize,
+    /// The discography tab picked per artist (kept across history).
+    artist_tabs: HashMap<String, usize>,
     sonic_search: Entity<InputState>,
     history: Option<Vec<plex::HistoryItem>>,
     top_tracks: Option<Vec<(Track, u64)>>,
@@ -583,7 +584,7 @@ impl Crate {
             sonic_artists: HashMap::new(),
             sonic: sonic::SonicState::default(),
             artist_kinds: HashMap::new(),
-            artist_tab: 0,
+            artist_tabs: HashMap::new(),
             sonic_search,
             history: None,
             top_tracks: None,
@@ -724,7 +725,6 @@ impl Crate {
         }
         self.go(View::Artist { key: key.clone(), name, info: None });
         self.request_sonic_artists(key.clone(), cx);
-        self.artist_tab = 0;
         self.request_artist_kinds(key.clone(), cx);
         self.album_scroll = gpui::ScrollHandle::new();
         cx.notify();
@@ -799,9 +799,19 @@ impl Crate {
                 let ix = *ix;
                 self.load_album_tracks(ix, cx);
             }
-            View::Artist { key, info: None, .. } => {
-                let key = key.clone();
-                self.load_artist_info(key, cx);
+            View::Artist { key, info, .. } => {
+                let (key, missing) = (key.clone(), info.is_none());
+                // Lookups that failed on the first visit get another try.
+                self.request_artist_kinds(key.clone(), cx);
+                self.request_sonic_artists(key.clone(), cx);
+                if missing {
+                    self.load_artist_info(key, cx);
+                }
+            }
+            View::Album { ix, .. } => {
+                if let Some(k) = self.albums.get(*ix).map(|a| a.rating_key.clone()) {
+                    self.request_sonic_albums(k, cx);
+                }
             }
             _ => {}
         }
