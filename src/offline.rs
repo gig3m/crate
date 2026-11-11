@@ -393,9 +393,27 @@ impl Crate {
                 self.offline.queue.push_back(key);
             }
         }
+        let flipped_back = !orphans.is_empty() && !refetch;
+        if !orphans.is_empty() {
+            // The album's download may be writing one of these: stop it
+            // first, and queue the album again for anything still missing.
+            if let Some(j) = self.offline.job.as_ref().filter(|j| j.key == album_key) {
+                j.cancel.store(true, Ordering::Relaxed);
+                if !self.offline.queue.iter().any(|k| k == album_key) {
+                    self.offline.queue.push_back(album_key.to_string());
+                }
+            }
+        }
         for part in orphans {
             if !part_in_use(&self.offline.index, &part, None) {
                 delete_part(&part);
+            }
+        }
+        // Back on files that are all kept: complete again.
+        if flipped_back && let Some(a) = self.offline.index.albums.iter_mut().find(|a| a.key == album_key) {
+            a.complete = !a.tracks.is_empty() && a.tracks.iter().all(|t| file_for(&t.part_key).is_some_and(|p| p.exists()));
+            if a.complete {
+                a.failed = None;
             }
         }
         if changed {

@@ -337,6 +337,9 @@ pub(crate) struct Now {
     rep_at: Instant,
     /// Rating keys in the order the queue started, to undo shuffle.
     orig_order: Vec<String>,
+    /// The queue index whose start failed (an Audio error): Play moves past
+    /// it instead of retrying it forever.
+    failed_at: Option<usize>,
 }
 
 impl Now {
@@ -370,6 +373,7 @@ impl Now {
             rep_elapsed: 0,
             rep_at: Instant::now(),
             orig_order,
+            failed_at: None,
         }
     }
 }
@@ -1444,6 +1448,7 @@ impl Crate {
             rep_elapsed: 0,
             rep_at: Instant::now(),
             orig_order,
+            failed_at: None,
         });
         // With leveling on, the first track needs its gain before it starts
         // (bounded: Plex answers in tens of ms on a LAN; give up after 1.5 s).
@@ -1513,7 +1518,7 @@ impl Crate {
 
     /// Fetch loudness for `tracks` in the background, then re-hand the engine
     /// its unopened tracks with their gains (the playing one keeps its gain).
-    fn fill_gains(&mut self, tracks: &[Track], from: usize, cx: &mut Context<Self>) {
+    pub(crate) fn fill_gains(&mut self, tracks: &[Track], from: usize, cx: &mut Context<Self>) {
         let missing = self.missing_gains(tracks, from);
         if missing.is_empty() {
             self.sync_upcoming();
@@ -1691,6 +1696,7 @@ impl Crate {
                 now.idx = idx;
                 now.elapsed_ms = ms;
                 now.paused = start_paused;
+                now.failed_at = None;
                 now.finished = false;
                 now.stopped = false;
                 now.engine_end = range.end;
@@ -1762,7 +1768,14 @@ impl Crate {
                     // from the top at the end of the queue, else from the current
                     // track (an error or a radio refill that ran dry mid-queue).
                     if !matches!(t, Transport::Pause) {
-                        let from = if idx + 1 >= n { 0 } else { idx };
+                        let from = if idx + 1 >= n {
+                            0
+                        } else if now.failed_at == Some(idx) {
+                            // That track couldn't start: go on to the next.
+                            idx + 1
+                        } else {
+                            idx
+                        };
                         self.play_from(from, 0, cx);
                     }
                     return;
@@ -1874,6 +1887,7 @@ impl Crate {
                     self.status = format!("Audio error: {e}").into();
                     now.finished = true;
                     now.stopped = true;
+                    now.failed_at = Some(now.idx);
                     failed = true;
                 }
                 AudioEvent::FirstAudio { ms_since_play } => {

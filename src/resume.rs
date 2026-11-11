@@ -17,6 +17,14 @@ struct Saved {
     /// The station a radio queue refills from.
     refill: Option<String>,
     orig_order: Vec<String>,
+    #[serde(default)]
+    shuffle: bool,
+}
+
+/// Off for test runs that set CRATE_NO_RESUME (they mustn't read or
+/// overwrite the real resume point).
+fn enabled() -> bool {
+    std::env::var_os("CRATE_NO_RESUME").is_none()
 }
 
 fn path() -> std::path::PathBuf {
@@ -28,6 +36,9 @@ fn path() -> std::path::PathBuf {
 
 impl Crate {
     pub(crate) fn save_resume(&self) {
+        if !enabled() {
+            return;
+        }
         let Some(n) = self.now.as_ref() else { return };
         if n.tracks.is_empty() {
             return;
@@ -40,6 +51,7 @@ impl Crate {
             elapsed_ms: if n.finished { 0 } else { n.elapsed_ms },
             refill: n.refill.clone(),
             orig_order: n.orig_order.clone(),
+            shuffle: self.shuffle,
         };
         let p = path();
         let res = (|| -> std::io::Result<()> {
@@ -55,7 +67,7 @@ impl Crate {
 
     /// At launch: the last queue, paused where it was left.
     pub(crate) fn restore_resume(&mut self, cx: &mut Context<Self>) {
-        if self.now.is_some() {
+        if self.now.is_some() || !enabled() {
             return;
         }
         let Ok(bytes) = std::fs::read(path()) else { return };
@@ -64,11 +76,21 @@ impl Crate {
             return;
         }
         let idx = s.idx.min(s.tracks.len() - 1);
+        // Left in the last seconds of a track: start it from the top rather
+        // than seeking to (or past) its end.
+        let len = s.tracks[idx].duration_ms;
+        let elapsed = if len > 0 && s.elapsed_ms + 5000 >= len { 0 } else { s.elapsed_ms };
+        self.shuffle = s.shuffle;
         for t in &s.tracks {
             self.request_thumb(&t.thumb.clone());
         }
         self.queue_seq += 1;
-        self.now = Some(crate::Now::restored(s.context, s.context_key, s.tracks, idx, s.elapsed_ms, s.refill, s.orig_order, self.queue_seq));
+        let tracks = s.tracks.clone();
+        self.now = Some(crate::Now::restored(s.context, s.context_key, s.tracks, idx, elapsed, s.refill, s.orig_order, self.queue_seq));
+        // Loudness for leveling, fetched in the background like any queue's.
+        if self.leveling != crate::theme::Leveling::Off {
+            self.fill_gains(&tracks, idx, cx);
+        }
         cx.notify();
     }
 }

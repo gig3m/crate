@@ -829,15 +829,16 @@ fn decoder_thread(
             if !prefetched && stats.played_us.load(Ordering::Acquire) >= track_start_us + prefetch_after_us {
                 prefetched = true;
                 let next = queue.lock().unwrap().items.front().map(|n| n.src.clone());
-                if let Some(next) = next
-                    && let Some(flag) = next.prefetch()
-                {
-                    stats.prefetches.lock().unwrap().push(flag.clone());
-                    // A stop that landed just before the push missed it.
-                    if stats.stop.load(Ordering::Acquire) {
-                        flag.store(true, Ordering::Release);
-                    }
-                    prefetches.add(Some(flag));
+                if let Some(next) = next {
+                    let flag = next.prefetch(|flag| {
+                        // Registered before the worker starts; a stop that
+                        // landed just before the push missed it.
+                        stats.prefetches.lock().unwrap().push(flag.clone());
+                        if stats.stop.load(Ordering::Acquire) {
+                            flag.store(true, Ordering::Release);
+                        }
+                    });
+                    prefetches.add(flag);
                 }
             }
             // The previous track's end fades out under this one's start.

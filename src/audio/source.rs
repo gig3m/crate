@@ -65,8 +65,10 @@ impl Source {
     /// wait on the network (the decoder opens the next track only when it
     /// reaches it). A no-op for local files and tracks already cached; `stop`
     /// (the engine's) abandons it.
-    /// Returns the prefetch's own stop flag (set it to abandon it).
-    pub fn prefetch(&self) -> Option<Arc<AtomicBool>> {
+    /// Returns the prefetch's own stop flag (set it to abandon it);
+    /// `register` gets it before the worker starts, so a stop can't slip in
+    /// between.
+    pub fn prefetch(&self, register: impl FnOnce(&Arc<AtomicBool>)) -> Option<Arc<AtomicBool>> {
         let Source::Http { cache, .. } = self else { return None };
         if cache.exists() {
             return None;
@@ -79,6 +81,7 @@ impl Source {
             }
             inflight.insert(cache.clone(), stop.clone());
         }
+        register(&stop);
         let (src, flag, path) = (self.clone(), stop.clone(), cache.clone());
         let _ = std::thread::Builder::new().name("prefetch".into()).spawn(move || {
             match src.open_as(flag.clone(), true) {
