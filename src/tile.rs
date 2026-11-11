@@ -31,7 +31,7 @@ impl Crate {
         let shown_ms = self.viz.borrow().drag.map(|f| (f as f64 * len as f64) as u64).unwrap_or(n.elapsed_ms);
         let format = n.formats.get(&n.idx).map(|&(rate, bits)| {
             if let Some(k) = n.transcoded.get(&n.idx) {
-                return format!("MP3 {k}k · transcoded");
+                return format!("Opus {k}k · transcoded");
             }
             let codec = detail.as_ref().map(|d| d.codec.clone()).unwrap_or_default();
             let khz = if rate % 1000 == 0 { format!("{}", rate / 1000) } else { format!("{:.1}", rate as f32 / 1000.0) };

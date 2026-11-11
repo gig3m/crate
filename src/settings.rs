@@ -496,7 +496,7 @@ impl Crate {
             .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(match (remote, kbps) {
                 (false, _) => "Connected on this network: every track plays as the original file.".to_string(),
                 (true, 0) => "Connected remotely, playing original files.".to_string(),
-                (true, k) => format!("Connected remotely: Plex converts tracks to MP3 at about {k} kbps (not bit-perfect). Applies from the next track."),
+                (true, k) => format!("Connected remotely: Plex converts tracks to Opus at about {k} kbps (not bit-perfect, still gapless). Applies from the next track."),
             }));
 
         div()

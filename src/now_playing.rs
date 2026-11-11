@@ -363,7 +363,7 @@ impl Crate {
                 let codec = detail.as_ref().map(|d| d.codec.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| "Audio".into());
                 let tx = n.transcoded.get(&n.idx).copied();
                 let source = match fmt {
-                    // The decoder sees Plex's MP3, not the file: describe the file.
+                    // The decoder sees Plex's Opus, not the file: describe the file.
                     _ if tx.is_some() => {
                         let kbps = detail.as_ref().and_then(|d| d.bitrate).map(|b| format!(" · {b} kbps")).unwrap_or_default();
                         format!("{codec} on the server{kbps}")
@@ -394,7 +394,7 @@ impl Crate {
                 let steps: Vec<(&str, String, bool)> = vec![
                     ("Source", source, true),
                     match tx {
-                        Some(k) => ("Plex stream", format!("Transcoded · MP3 ~{k} kbps · remote connection"), false),
+                        Some(k) => ("Plex stream", format!("Transcoded · Opus ~{k} kbps · remote connection"), false),
                         None => ("Plex stream", "Direct play · original file · no transcode".into(), true),
                     },
                     ("Decoder", "symphonia · lock-free ring buffer".into(), true),

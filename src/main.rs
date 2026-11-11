@@ -2525,10 +2525,11 @@ static SECTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// Whether the server address in use is remote (set once at launch).
 pub(crate) static REMOTE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// The bitrate in a transcoded stream's engine label (`…part-<id>.tx<kbps>.mp3`).
+/// The bitrate in a transcoded stream's engine label (`…part-<id>.tx<kbps>.ogg`,
+/// or `.mp3` from before Opus).
 fn transcoded_kbps(label: &str) -> Option<u32> {
     let rest = label.rsplit_once(".tx")?.1;
-    rest.strip_suffix(".mp3")?.parse().ok()
+    rest.strip_suffix(".ogg").or_else(|| rest.strip_suffix(".mp3"))?.parse().ok()
 }
 
 pub(crate) fn section() -> String {
@@ -2909,6 +2910,7 @@ mod transcode_tests {
     #[test]
     fn label_kbps() {
         assert_eq!(super::transcoded_kbps("plex:part-46213.tx128.mp3"), Some(128));
+        assert_eq!(super::transcoded_kbps("plex:part-46213.tx192.ogg"), Some(192));
         assert_eq!(super::transcoded_kbps("plex:part-46213.flac"), None);
         assert_eq!(super::transcoded_kbps("plex:part-46213.mp3"), None);
         assert_eq!(super::transcoded_kbps("song.txt.mp3"), None);

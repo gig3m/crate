@@ -58,19 +58,23 @@ impl Crate {
         let id = t.part_key.split('/').nth(3).unwrap_or("x").to_string();
         let kbps = self.transcode_kbps();
         if kbps > 0 {
-            // Plex picks the transcode profile by client; Linux matches none
-            // (400), so name one. The decision call must come first in the
-            // same session or musicBitrate is ignored (wad
-            // plex/music-transcode-400.md). MP3, since symphonia has no Opus.
+            // Opus in Ogg: Plex's Plexamp profile picks Opus (Linux matches no
+            // profile, 400), and the extra target swaps its MKV for Ogg, whose
+            // pre-skip and final granule give sample-accurate track edges
+            // (gapless; MKV's DiscardPadding isn't read by symphonia). Decoded
+            // by audio::opus (libopus). The decision call must come first in
+            // the same session or musicBitrate is ignored (wad
+            // plex/music-transcode-400.md).
+            const EXTRA: &str = "add-transcode-target%28type%3DmusicProfile%26context%3Dstreaming%26protocol%3Dhttp%26container%3Dogg%26audioCodec%3Dopus%26replace%3Dtrue%29";
             let q = format!(
-                "path=%2Flibrary%2Fmetadata%2F{}&protocol=http&directPlay=0&directStream=0&mediaIndex=0&partIndex=0&offset=0&musicBitrate={kbps}&session={{session}}&X-Plex-Client-Profile-Name=Web",
+                "path=%2Flibrary%2Fmetadata%2F{}&protocol=http&directPlay=0&directStream=0&mediaIndex=0&partIndex=0&offset=0&musicBitrate={kbps}&session={{session}}&X-Plex-Client-Profile-Name=Plexamp&X-Plex-Client-Profile-Extra={EXTRA}",
                 t.rating_key
             );
             return Source::Http {
-                url: format!("{base}/music/:/transcode/universal/start.mp3?{q}"),
+                url: format!("{base}/music/:/transcode/universal/start.ogg?{q}"),
                 token,
                 // Keeps `part-<id>.` so the engine label still names the part.
-                cache: crate::plex::audio_cache_dir().join(format!("part-{id}.tx{kbps}.mp3")),
+                cache: crate::plex::audio_cache_dir().join(format!("part-{id}.tx{kbps}.ogg")),
                 prepare: Some(format!("{base}/music/:/transcode/universal/decision?{q}")),
                 len_ms: (t.duration_ms > 0).then_some(t.duration_ms),
             };

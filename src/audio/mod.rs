@@ -9,6 +9,7 @@
 //! - caller: reads `Stats` and receives `Event`s.
 
 pub mod eq;
+pub mod opus;
 pub mod source;
 
 use std::{
@@ -658,11 +659,21 @@ fn decoder_thread(
             q.items.front().map(|n| (n.fade_ms.min(12_000) as u64 * rate as u64 / 1000) as usize * CHANNELS).unwrap_or(0)
         };
         tail_rate = rate;
-        let mut dec = symphonia::default::get_codecs()
+        let mut dec = opus::codecs()
             .make_audio_decoder(params, &AudioDecoderOptions::default().gapless(true))?;
         let limit_frames = track_limit.map(|s| (s * rate as f64) as u64);
         let mut track_frames = 0u64;
-        while let Some(packet) = fmt.next_packet()? {
+        // Symphonia's Ogg reader ends a stream with an UnexpectedEof error
+        // (after every frame, end trim applied) rather than Ok(None). Other
+        // formats end cleanly, so there it still means a cut-off file.
+        let eof_is_end = params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
+        loop {
+            let packet = match fmt.next_packet() {
+                Ok(Some(p)) => p,
+                Ok(None) => break,
+                Err(symphonia::core::errors::Error::IoError(e)) if eof_is_end && e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            };
             if stats.stop.load(Ordering::Acquire) {
                 return Ok(());
             }
