@@ -1018,9 +1018,13 @@ impl Crate {
         // With leveling on, the first track needs its gain before it starts
         // (bounded: Plex answers in tens of ms on a LAN; give up after 1.5 s).
         let tracks = self.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default();
-        let mut missing = self.missing_gains(&tracks, start);
+        // Wait only if the tracks about to play are missing gains; earlier ones fill in behind.
+        let mut missing = self.missing_gains(&tracks[start.min(tracks.len())..], 0);
         if missing.is_empty() {
             self.play_from(start, 0, cx);
+            if self.leveling != theme::Leveling::Off {
+                self.fill_gains(&tracks, start, cx);
+            }
             return;
         }
         // Wait only for the first batch (the tracks about to play); the rest fill in behind.
@@ -1042,12 +1046,16 @@ impl Crate {
                     Ok(Err(e)) => eprintln!("[crate] loudness: {e:#}"),
                     Err(_) => {}
                 }
-                // Only if this queue is still the one waiting (nothing stopped,
+                // Start only if this queue is still the one waiting (nothing stopped,
                 // paused, skipped or replaced it meanwhile).
                 if this.pending_start == Some(seq) && this.engine.is_none() {
                     this.play_from(start, 0, cx);
-                    let rest = this.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default();
-                    this.fill_gains(&rest, start, cx);
+                }
+                // Either way, while it's the current queue: load the rest and retune
+                // the engine's unopened tracks (it may have been started by Play).
+                if let Some(n) = this.now.as_ref().filter(|n| n.queue_id == seq) {
+                    let (rest, idx) = (n.tracks.clone(), n.idx);
+                    this.fill_gains(&rest, idx, cx);
                 }
             })
             .ok();
@@ -1116,6 +1124,10 @@ impl Crate {
     fn play_from(&mut self, idx: usize, ms: u64, cx: &mut Context<Self>) {
         // An explicit start supersedes a queue waiting on loudness.
         self.pending_start = None;
+        // The new engine reports its own gains; don't show the old one's meanwhile.
+        if let Some(n) = self.now.as_mut() {
+            n.level.clear();
+        }
         let Some(now) = self.now.as_mut() else { return };
         if idx >= now.tracks.len() {
             return;
@@ -1191,8 +1203,12 @@ impl Crate {
             Transport::SetRepeat(r) => return self.set_modes(None, Some(r), cx),
             _ => {}
         }
-        // Any transport action supersedes a queue still waiting on loudness.
-        self.pending_start = None;
+        // Pause and Stop cancel a queue still waiting on loudness; anything that
+        // starts playback goes through play_from, which supersedes it. A no-op
+        // (Next at the end) leaves the wait alone.
+        if matches!(t, Transport::Stop | Transport::Pause) {
+            self.pending_start = None;
+        }
         let Some(now) = self.now.as_mut() else { return };
         let (idx, elapsed, n) = (now.idx, now.elapsed_ms, now.tracks.len());
         eprintln!("[crate] transport {t:?}");
@@ -1204,10 +1220,14 @@ impl Crate {
                     _ => !now.paused,
                 };
                 if now.finished {
-                    if !want_pause {
+                    // After a finish (paused stays false), PlayPause means play again.
+                    if !matches!(t, Transport::Pause) {
                         self.play_from(0, 0, cx);
                     }
                     return;
+                }
+                if want_pause {
+                    self.pending_start = None;
                 }
                 now.paused = want_pause;
                 if let Some(e) = &self.engine {

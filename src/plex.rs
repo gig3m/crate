@@ -568,8 +568,10 @@ impl Client {
                     continue;
                 }
             };
+            let mut answered = std::collections::HashSet::new();
             for m in v["MediaContainer"]["Metadata"].as_array().into_iter().flatten() {
                 let Some(key) = m["ratingKey"].as_str() else { continue };
+                answered.insert(key.to_string());
                 let streams = m["Media"][0]["Part"][0]["Stream"].as_array().cloned().unwrap_or_default();
                 let g = streams.iter().find(|s| s["streamType"].as_i64() == Some(2)).map(|a| Gain {
                     // Plex's per-track `gain` repeats the album's; derive the track's from its loudness.
@@ -580,6 +582,9 @@ impl Client {
                 });
                 out.push((key.to_string(), g.unwrap_or_default()));
             }
+            // Keys Plex didn't return (deleted, unknown) count as known-unanalyzed,
+            // so they aren't refetched on every start.
+            out.extend(chunk.iter().filter(|k| !answered.contains(*k)).map(|k| (k.clone(), Gain::default())));
         }
         Ok(out)
     }
