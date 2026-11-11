@@ -2,7 +2,7 @@
 
 use gpui::{Context, FontWeight, ObjectFit, SharedString, div, img, prelude::*, px, rgb};
 
-use crate::{Aulos, fmt_ms, icons, mpris::Transport, shell::MONO, theme::Theme};
+use crate::{Crate, fmt_ms, icons, mpris::Transport, shell::MONO, theme::Theme};
 
 /// Seek bar segments (the canvas draws 96 bars).
 pub(crate) const BARS: usize = 96;
@@ -11,7 +11,7 @@ fn khz(r: u32) -> String {
     if r.is_multiple_of(1000) { format!("{}", r / 1000) } else { format!("{:.1}", r as f32 / 1000.0) }
 }
 
-impl Aulos {
+impl Crate {
     pub(crate) fn player_bar(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let now = self.now.as_ref();
         let track = now.map(|n| &n.tracks[n.idx]);

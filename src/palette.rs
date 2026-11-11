@@ -3,7 +3,7 @@
 use gpui::{Context, FontWeight, KeyDownEvent, ObjectFit, Window, div, img, prelude::*, px, rgb};
 use gpui_component::input::Input;
 
-use crate::{Aulos, icons, plex::{Playlist, SearchHit}, shell::MONO, theme::Theme};
+use crate::{Crate, icons, plex::{Playlist, SearchHit}, shell::MONO, theme::Theme};
 
 const SCOPES: [&str; 5] = ["All", "Artists", "Albums", "Tracks", "Playlists"];
 
@@ -15,7 +15,7 @@ pub(crate) enum Item {
     Radio(String, String),
 }
 
-impl Aulos {
+impl Crate {
     pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = true;
         self.pal_sel = 0;

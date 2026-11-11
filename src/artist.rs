@@ -2,18 +2,18 @@
 
 use gpui::{Context, FontWeight, ObjectFit, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb};
 
-use crate::{Aulos, PAD_X, icons, plex::{Album, ArtistInfo}, shell::MONO, theme::{Theme, mix}};
+use crate::{Crate, PAD_X, icons, plex::{Album, ArtistInfo}, shell::MONO, theme::{Theme, mix}};
 
 /// `0xRRGGBB` with alpha 0..1.
 fn rgba(c: u32, a: f32) -> gpui::Hsla {
     gpui::rgba((c << 8) | (a.clamp(0.0, 1.0) * 255.0) as u32).into()
 }
 
-impl Aulos {
+impl Crate {
     /// Start Plex radio seeded from an artist or album (`/library/metadata/{key}/station/...`).
     pub(crate) fn play_radio(&mut self, key: &str, title: String, cx: &mut Context<Self>) {
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_micros()).unwrap_or(0);
-        self.play_station(format!("/library/metadata/{key}/station/aulos-{nonce:x}?type=10"), title, cx);
+        self.play_station(format!("/library/metadata/{key}/station/crate-{nonce:x}?type=10"), title, cx);
     }
 
     pub(crate) fn artist_view(&self, key: &str, name: &str, info: Option<&ArtistInfo>, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {

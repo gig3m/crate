@@ -4,9 +4,9 @@
 
 use gpui::{Context, FontWeight, div, linear_color_stop, linear_gradient, prelude::*, px, rgb};
 
-use crate::{Aulos, PAD_X, icons, shell::MONO, theme::{Theme, mix}};
+use crate::{Crate, PAD_X, icons, shell::MONO, theme::{Theme, mix}};
 
-impl Aulos {
+impl Crate {
     pub(crate) fn refresh_sonic_progress(&mut self, cx: &mut Context<Self>) {
         let rx = crate::plex_call(|c| async move { c.sonic_progress().await });
         cx.spawn(async move |this, cx| {

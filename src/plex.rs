@@ -351,8 +351,8 @@ impl Client {
             .get(format!("{}{}", self.base, path))
             .header("Accept", "application/json")
             .header("X-Plex-Token", &self.token)
-            .header("X-Plex-Product", "Aulos")
-            .header("X-Plex-Client-Identifier", "aulos-spike")
+            .header("X-Plex-Product", "Crate")
+            .header("X-Plex-Client-Identifier", "crate")
             .send()
             .await?;
         anyhow::ensure!(res.status().is_success(), "{} -> {}", path, res.status());
@@ -508,13 +508,47 @@ impl Client {
             .post(format!("{}/playQueues?type=audio&uri={uri}&repeat=0&own=1&includeChapters=0", self.base))
             .header("Accept", "application/json")
             .header("X-Plex-Token", &self.token)
-            .header("X-Plex-Product", "Aulos")
-            .header("X-Plex-Client-Identifier", "aulos-spike")
+            .header("X-Plex-Product", "Crate")
+            .header("X-Plex-Client-Identifier", "crate")
             .send()
             .await?;
         anyhow::ensure!(res.status().is_success(), "playQueues -> {}", res.status());
         let env: Envelope = res.json().await.context("play queue")?;
         Ok((env.mc.id.unwrap_or(0), env.mc.metadata.into_iter().filter_map(Meta::into_track).collect()))
+    }
+
+    fn write_req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let host = std::fs::read_to_string("/proc/sys/kernel/hostname").map(|h| h.trim().to_string()).unwrap_or_else(|_| "Linux".into());
+        self.http
+            .request(method, format!("{}{path}", self.base))
+            .header("Accept", "application/json")
+            .header("X-Plex-Token", &self.token)
+            .header("X-Plex-Product", "Crate")
+            .header("X-Plex-Version", env!("CARGO_PKG_VERSION"))
+            .header("X-Plex-Client-Identifier", "crate")
+            .header("X-Plex-Platform", "Linux")
+            .header("X-Plex-Device-Name", host)
+    }
+
+    /// Report playback to the server (`state` = playing | paused | stopped).
+    /// The server shows it as a session, and records a play (and any Last.fm
+    /// scrobble) when a track stops past ~90%.
+    pub async fn timeline(&self, rating_key: &str, state: &str, time_ms: u64, duration_ms: u64) -> anyhow::Result<()> {
+        let path = format!(
+            "/:/timeline?ratingKey={rating_key}&key=%2Flibrary%2Fmetadata%2F{rating_key}&state={state}&time={time_ms}&duration={duration_ms}"
+        );
+        let res = self.write_req(reqwest::Method::GET, &path).send().await?;
+        anyhow::ensure!(res.status().is_success(), "timeline -> {}", res.status());
+        Ok(())
+    }
+
+    /// Set your rating (0–10) on a track or album, or clear it with None.
+    pub async fn rate(&self, rating_key: &str, rating: Option<u8>) -> anyhow::Result<()> {
+        let r = rating.map(|r| r.min(10) as i32).unwrap_or(-1);
+        let path = format!("/:/rate?key={rating_key}&identifier=com.plexapp.plugins.library&rating={r}");
+        let res = self.write_req(reqwest::Method::PUT, &path).send().await?;
+        anyhow::ensure!(res.status().is_success(), "rate -> {}", res.status());
+        Ok(())
     }
 
     /// `n` random tracks matching a filter (`genre=..`, `mood=..`, `album.decade=..`).
@@ -833,12 +867,12 @@ fn urlencode(s: &str) -> String {
         .collect()
 }
 
-/// ~/.cache/aulos (or $XDG_CACHE_HOME/aulos).
+/// ~/.cache/crate (or $XDG_CACHE_HOME/crate).
 pub fn cache_dir() -> std::path::PathBuf {
     let base = std::env::var("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache"));
-    base.join("aulos")
+    base.join("crate")
 }
 
 fn art_cache_path(thumb: &str) -> std::path::PathBuf {
@@ -911,13 +945,13 @@ pub async fn run(
     if let Ok(bytes) = std::fs::read(&lib_cache)
         && let Ok(cached) = serde_json::from_slice::<Vec<Album>>(&bytes)
     {
-        eprintln!("[aulos] cached library: {} albums in {:?}", cached.len(), t.elapsed());
+        eprintln!("[crate] cached library: {} albums in {:?}", cached.len(), t.elapsed());
         let _ = albums_tx.send(("cache", Ok(cached)));
     }
     let t = std::time::Instant::now();
     let albums = client.albums(&section).await;
     if let Ok(a) = &albums {
-        eprintln!("[aulos] fetched {} albums in {:?}", a.len(), t.elapsed());
+        eprintln!("[crate] fetched {} albums in {:?}", a.len(), t.elapsed());
         if let Ok(json) = serde_json::to_vec(a) {
             let _ = write_atomic(&lib_cache, &json);
         }
@@ -942,7 +976,7 @@ pub async fn run(
                 }
             };
             if let Err(e) = &bytes {
-                eprintln!("[aulos] art {}: {e:#}", req.thumb);
+                eprintln!("[crate] art {}: {e:#}", req.thumb);
             }
             let _ = tx.send(ArtResult { thumb: req.thumb, bytes: bytes.ok() });
             drop(permit);

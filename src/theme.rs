@@ -27,7 +27,7 @@ pub struct Theme {
 }
 
 fn state_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("AULOS_THEME_DIR") {
+    if let Ok(d) = std::env::var("CRATE_THEME_DIR") {
         return PathBuf::from(d);
     }
     let home = std::env::var("HOME").unwrap_or_default();

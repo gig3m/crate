@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Crate
+GenericName=Music Player
+Comment=Plex music client for Omarchy
+Exec=crate
+Icon=crate
+Terminal=false
+Categories=Audio;Music;Player;AudioVideo;
+StartupWMClass=crate

@@ -1,4 +1,4 @@
-//! Aulos audio spike: decode local files back to back with symphonia, push
+//! Crate audio spike: decode local files back to back with symphonia, push
 //! f32 frames through a lock-free ring, play them on a PipeWire stream at the
 //! source's native rate. Writes the exact samples it queued to a reference
 //! file so a recording of the output can be compared bit for bit.
@@ -175,7 +175,7 @@ fn decode_all(
 fn main() -> anyhow::Result<()> {
     let args = parse_args();
     let rate = probe_rate(&args.files[0])?;
-    eprintln!("[aulos-audio] stream rate {rate} Hz, {} file(s)", args.files.len());
+    eprintln!("[crate-audio] stream rate {rate} Hz, {} file(s)", args.files.len());
 
     let stats = Arc::new(Stats {
         frames_played: AtomicU64::new(0),
@@ -213,8 +213,8 @@ fn main() -> anyhow::Result<()> {
         *pw::keys::MEDIA_TYPE => "Audio",
         *pw::keys::MEDIA_ROLE => "Music",
         *pw::keys::MEDIA_CATEGORY => "Playback",
-        *pw::keys::APP_NAME => "Aulos",
-        *pw::keys::NODE_NAME => "aulos",
+        *pw::keys::APP_NAME => "Crate",
+        *pw::keys::NODE_NAME => "crate",
         *pw::keys::AUDIO_CHANNELS => "2",
         // Ask the graph to run at the source rate (honoured only if allowed-rates permits).
         "node.rate" => format!("1/{rate}"),
@@ -223,7 +223,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(t) = &args.target {
         props.insert("target.object", t.as_str());
     }
-    let stream = pw::stream::StreamBox::new(&core, "aulos-playback", props)?;
+    let stream = pw::stream::StreamBox::new(&core, "crate-playback", props)?;
 
     struct Rt {
         cons: rtrb::Consumer<f32>,

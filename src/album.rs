@@ -2,13 +2,27 @@
 
 use gpui::{Context, FontWeight, ObjectFit, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb};
 
-use crate::{Aulos, PAD_X, View, fmt_ms, icons, plex::Track, shell::MONO, theme::{Theme, mix}};
+use crate::{Crate, PAD_X, View, fmt_ms, icons, plex::Track, shell::MONO, theme::{Theme, mix}};
 
-/// Five stars for a 0–10 Plex rating (half stars round down).
-pub(crate) fn stars(rating: Option<f32>, size: f32, on: u32, off: u32) -> gpui::Div {
+/// Clickable stars: `on_rate(n)` with n in 1..=5.
+pub(crate) fn rate_stars(
+    id: impl Into<gpui::SharedString>,
+    rating: Option<f32>,
+    size: f32,
+    on: u32,
+    off: u32,
+    cx: &mut Context<Crate>,
+    on_rate: impl Fn(&mut Crate, u8, &mut Context<Crate>) + Clone + 'static,
+) -> gpui::Div {
+    let id: gpui::SharedString = id.into();
     let full = rating.map(|r| (r / 2.0).floor() as usize).unwrap_or(0);
-    div().flex().gap(px(2.0)).children((0..5).map(|i| {
-        if i < full { icons::icon("star", size, on) } else { icons::icon("star-outline", size, off) }
+    div().flex().gap(px(2.0)).children((0..5u8).map(|i| {
+        let f = on_rate.clone();
+        div()
+            .id(gpui::SharedString::from(format!("{id}-{i}")))
+            .cursor_pointer()
+            .child(if (i as usize) < full { icons::icon("star", size, on) } else { icons::icon("star-outline", size, off) })
+            .on_click(cx.listener(move |this, _, _, cx| f(this, i + 1, cx)))
     }))
 }
 
@@ -36,7 +50,7 @@ fn month_year(ts: i64) -> String {
     format!("{} {y}", M[(m - 1) as usize])
 }
 
-impl Aulos {
+impl Crate {
     pub(crate) fn request_album_detail(&mut self, key: String, cx: &mut Context<Self>) {
         if key.is_empty() || self.album_detail.contains_key(&key) {
             return;
@@ -53,7 +67,7 @@ impl Aulos {
                 .ok();
             }
             // Leave the None marker: retrying here would refetch on every 250 ms poll.
-            Ok(Err(e)) => eprintln!("[aulos] album detail {key}: {e:#}"),
+            Ok(Err(e)) => eprintln!("[crate] album detail {key}: {e:#}"),
             Err(_) => {}
         })
         .detach();
@@ -204,7 +218,10 @@ impl Aulos {
                 }
             })))
             .child(div().flex_1())
-            .child(stars(detail.as_ref().and_then(|d| d.rating), 18.0, t.accent, t.line));
+            .child({
+                let k = album.rating_key.clone();
+                rate_stars(format!("ar-{k}"), detail.as_ref().and_then(|d| d.rating), 18.0, t.accent, t.line, cx, move |this, n, cx| this.rate_album(k.clone(), n, cx))
+            });
 
         // Track table.
         let head = div()
@@ -268,7 +285,10 @@ impl Aulos {
                                     )
                                     .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(tr.artist.clone())),
                             )
-                            .child(div().w(px(110.0)).child(stars(rating, 13.0, t.accent, t.line)))
+                            .child(div().w(px(110.0)).child({
+                                let k = tr.rating_key.clone();
+                                rate_stars(format!("tr-{k}"), rating, 13.0, t.accent, t.line, cx, move |this, n, cx| this.rate_track(k.clone(), n, cx))
+                            }))
                             .child(
                                 div()
                                     .w(px(56.0))

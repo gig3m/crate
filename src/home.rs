@@ -3,7 +3,7 @@
 
 use gpui::{Context, FontWeight, ObjectFit, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb};
 
-use crate::{Aulos, PAD_X, View, icons, plex::Album, shell::MONO, theme::{Theme, mix}};
+use crate::{Crate, PAD_X, View, icons, plex::Album, shell::MONO, theme::{Theme, mix}};
 
 pub(crate) fn ago(ts: i64) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(ts);
@@ -27,7 +27,7 @@ pub(crate) fn station_blurb(title: &str) -> &'static str {
     }
 }
 
-impl Aulos {
+impl Crate {
     /// Start a Plex station (`/library/sections/N/stations/M`), radio key, or
     /// `query:<filter>` random radio; it refills as it runs low.
     pub(crate) fn play_station(&mut self, key: String, title: String, cx: &mut Context<Self>) {
@@ -293,7 +293,7 @@ impl Aulos {
                 Self::side_card(
                     "card-sonic",
                     "Sonic Adventure",
-                    "Pick two tracks. Aulos walks the sonic path between them.".into(),
+                    "Pick two tracks. Crate walks the sonic path between them.".into(),
                     "sonic",
                     t.discovery,
                     t,

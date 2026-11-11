@@ -5,7 +5,7 @@
 
 use gpui::{Context, FontWeight, div, prelude::*, px, rgb};
 
-use crate::{Aulos, PAD_X, shell::MONO, theme::Theme};
+use crate::{Crate, PAD_X, shell::MONO, theme::Theme};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AudioInfo {
@@ -47,12 +47,12 @@ fn read_audio_info() -> anyhow::Result<AudioInfo> {
 }
 
 /// A prompt the user can hand to their coding agent to make PipeWire follow
-/// the file's sample rate permanently. Aulos itself never edits system config.
+/// the file's sample rate permanently. Crate itself never edits system config.
 pub(crate) fn pipewire_prompt(sink: &str, allowed: &str) -> String {
     format!(
-        r#"Set up PipeWire on this Linux machine so the audio graph can run at the playing file's sample rate (bit-perfect playback for the Aulos music player) instead of resampling everything to one rate.
+        r#"Set up PipeWire on this Linux machine so the audio graph can run at the playing file's sample rate (bit-perfect playback for the Crate music player) instead of resampling everything to one rate.
 
-Current state: clock.allowed-rates is {allowed}. Aulos plays to the sink "{sink}".
+Current state: clock.allowed-rates is {allowed}. Crate plays to the sink "{sink}".
 
 Please:
 1. Find the playback sample rates each of my output devices supports. For USB/ALSA devices, read the "Rates:" lines under "Playback" in /proc/asound/card*/stream*; for others, use `pw-dump` (the node's EnumFormat params) or `pactl list sinks`.
@@ -67,7 +67,7 @@ Trade-off to mention to me: while a file plays at, say, 44.1 kHz, other apps tha
     )
 }
 
-impl Aulos {
+impl Crate {
     pub(crate) fn open_audio_settings(&mut self, cx: &mut Context<Self>) {
         self.go(crate::View::Soon("audio"));
         let task = cx.background_spawn(async { read_audio_info() });
@@ -179,9 +179,9 @@ impl Aulos {
                     .child(format!("clock.allowed-rates {rates} · clock.rate {}", info.clock_rate)),
             )
             .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(if only_one {
-                "PipeWire runs every app at one shared rate, so files at other rates are resampled. To play bit-perfect, PipeWire has to be allowed to switch to your device's other rates (clock.allowed-rates). That's a system setting, so Aulos doesn't change it; the prompt below walks your coding agent through it. Trade-off: while Aulos plays, other apps share its rate, and the device briefly re-clocks when the rate changes."
+                "PipeWire runs every app at one shared rate, so files at other rates are resampled. To play bit-perfect, PipeWire has to be allowed to switch to your device's other rates (clock.allowed-rates). That's a system setting, so Crate doesn't change it; the prompt below walks your coding agent through it. Trade-off: while Crate plays, other apps share its rate, and the device briefly re-clocks when the rate changes."
             } else {
-                "PipeWire is allowed to follow the file's rate. Aulos asks for each file's own rate; a device that can't do a rate gets the nearest one it supports, resampled."
+                "PipeWire is allowed to follow the file's rate. Crate asks for each file's own rate; a device that can't do a rate gets the nearest one it supports, resampled."
             }))
             .when_some(now_line, |d, (l, c)| d.child(div().text_size(px(12.0)).text_color(rgb(c)).child(l)))
             .when(only_one, |d| {

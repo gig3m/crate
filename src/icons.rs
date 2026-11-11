@@ -46,16 +46,19 @@ const ICONS: &[(&str, &str, bool, f32)] = &[
 ];
 
 fn svg_for(name: &str) -> Option<String> {
-    if name == "logo" {
-        // The aulos mark: two pipes and a crossbar.
-        return Some(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" fill="none"><path d="M9 28 14 4M23 28 18 4" stroke="black" stroke-width="3" stroke-linecap="round"/></svg>"#.into(),
-        );
-    }
-    if name == "logo-bar" {
-        return Some(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" fill="none"><path d="M11 18h10" stroke="black" stroke-width="2" stroke-linecap="round"/></svg>"#.into(),
-        );
+    // The Crate mark (two records in a crate on an accent tile), as layers:
+    // GPUI tints each svg one color, so `logo()` stacks accent and base layers.
+    if let Some(i) = name.strip_prefix("crate-").and_then(|n| n.parse::<usize>().ok()) {
+        const L: [&str; 7] = [
+            r#"<rect x="0" y="0" width="32" height="32" rx="8" fill="black"/>"#,
+            r#"<circle cx="19.6" cy="12" r="5.6" fill="black"/>"#,
+            r#"<circle cx="19.6" cy="12" r="5.6" fill="none" stroke="black" stroke-width="1.4"/>"#,
+            r#"<circle cx="12.6" cy="12.6" r="5.6" fill="black"/>"#,
+            r#"<circle cx="12.6" cy="12.6" r="5.6" fill="none" stroke="black" stroke-width="1.4"/><circle cx="12.6" cy="12.6" r="1.5" fill="black"/>"#,
+            r#"<rect x="5.5" y="15" width="21" height="11.5" rx="2.2" fill="black"/>"#,
+            r#"<rect x="5.5" y="15" width="21" height="11.5" rx="2.2" fill="none" stroke="black" stroke-width="1.4"/><rect x="12" y="18.4" width="8" height="2.8" rx="1.4" fill="black"/>"#,
+        ];
+        return L.get(i).map(|l| format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">{l}</svg>"#));
     }
     let &(_, d, filled, w) = ICONS.iter().find(|i| i.0 == name)?;
     Some(if filled {
@@ -82,6 +85,18 @@ impl AssetSource for Icons {
             Ok(vec![])
         }
     }
+}
+
+/// The Crate logo at `size`: accent tile, records and crate in `base`.
+pub fn logo(size: f32, accent: u32, base: u32) -> gpui::Div {
+    use gpui::{ParentElement, Styled, div, px, rgb};
+    div().size(px(size)).flex_none().relative().children((0..7).map(move |i| {
+        gpui::svg()
+            .path(format!("icons/crate-{i}.svg"))
+            .absolute()
+            .size(px(size))
+            .text_color(rgb(if i % 2 == 0 { accent } else { base }))
+    }))
 }
 
 /// `icon("home", 18.0, color)`

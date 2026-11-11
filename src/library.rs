@@ -7,7 +7,7 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
 };
 
-use crate::{Aulos, PAD_X, icons, plex::ArtRequest, shell::MONO, theme::Theme};
+use crate::{Crate, PAD_X, icons, plex::ArtRequest, shell::MONO, theme::Theme};
 
 pub(crate) const GRID_GAP_X: f32 = 18.0;
 pub(crate) const GRID_GAP_Y: f32 = 22.0;
@@ -64,7 +64,7 @@ pub(crate) struct LibFilter {
     pub query: String,
 }
 
-impl Aulos {
+impl Crate {
     /// Re-query the album order for the current sort and filters. The default
     /// (date added, no filters) is the cached list as-is.
     pub(crate) fn refresh_library(&mut self, cx: &mut Context<Self>) {
@@ -151,7 +151,7 @@ impl Aulos {
         let genres: Vec<(String, String)> = home.map(|h| h.genres.clone()).unwrap_or_default();
         let this = cx.entity().downgrade();
         let add_btn = Button::new("lib-add-filter").ghost().label("+ Filter").dropdown_menu(move |menu, window, cx| {
-            let pick = |kind: &'static str, items: Vec<(String, String)>, this: gpui::WeakEntity<Aulos>| {
+            let pick = |kind: &'static str, items: Vec<(String, String)>, this: gpui::WeakEntity<Crate>| {
                 move |mut m: gpui_component::menu::PopupMenu, _: &mut Window, _: &mut Context<gpui_component::menu::PopupMenu>| {
                     for (q, l) in &items {
                         let (q, l) = (q.clone(), l.clone());

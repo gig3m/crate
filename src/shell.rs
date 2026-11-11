@@ -2,7 +2,7 @@
 
 use gpui::{Context, FontWeight, ObjectFit, Window, div, img, prelude::*, px, rgb};
 
-use crate::{Aulos, PAD_X, SIDEBAR_W, View, icons, theme::Theme};
+use crate::{Crate, PAD_X, SIDEBAR_W, View, icons, theme::Theme};
 
 pub const MONO: &str = "JetBrainsMono Nerd Font";
 
@@ -19,7 +19,7 @@ const NAV_LIBRARY: &[(&str, &str, &str, &str)] = &[
     ("offline", "Offline", "offline", ""),
 ];
 
-impl Aulos {
+impl Crate {
     fn nav_active(&self) -> &'static str {
         match &self.view {
             View::Home => "home",
@@ -157,14 +157,8 @@ impl Aulos {
                     .px(px(10.0))
                     .pt(px(4.0))
                     .pb(px(18.0))
-                    .child(
-                        div()
-                            .size(px(26.0))
-                            .relative()
-                            .child(icons::icon("logo", 26.0, t.accent).absolute())
-                            .child(icons::icon("logo-bar", 26.0, t.text).absolute()),
-                    )
-                    .child(div().text_size(px(19.0)).font_weight(FontWeight::BOLD).text_color(rgb(t.text_strong)).child("aulos")),
+                    .child(icons::logo(30.0, t.accent, t.base))
+                    .child(div().text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(rgb(t.text_strong)).child("crate")),
             );
         for &(id, label, ic, key) in NAV_PRIMARY {
             nav = nav.child(item(id, label, ic, key, cx));

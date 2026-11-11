@@ -3,7 +3,7 @@
 use gpui::{Context, FontWeight, ObjectFit, div, img, prelude::*, px, rgb, uniform_list};
 
 use crate::{
-    Aulos, PAD_X, fmt_ms,
+    Crate, PAD_X, fmt_ms,
     library::{GRID_GAP_X, LibFilter},
     plex::{HistoryItem, Track},
     shell::MONO,
@@ -22,7 +22,7 @@ fn title(s: &'static str, sub: String, t: &Theme) -> gpui::Div {
         .child(div().font_family(MONO).text_size(px(13.0)).text_color(rgb(t.muted)).child(sub))
 }
 
-impl Aulos {
+impl Crate {
     /// Data a page needs when it opens.
     pub(crate) fn load_page(&mut self, id: &str, cx: &mut Context<Self>) {
         let section = std::env::var("PLEX_SECTION").unwrap_or_else(|_| "5".into());

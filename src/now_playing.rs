@@ -4,7 +4,7 @@
 
 use gpui::{Context, FontWeight, Hsla, ObjectFit, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb};
 
-use crate::{Aulos, album::stars, fmt_ms, icons, mpris::Transport, shell::MONO, theme::{Theme, mix}};
+use crate::{Crate, fmt_ms, icons, mpris::Transport, shell::MONO, theme::{Theme, mix}};
 
 fn white(a: f32) -> Hsla {
     gpui::hsla(0.0, 0.0, 1.0, a)
@@ -36,7 +36,7 @@ fn day(ts: i64) -> String {
     format!("{} {d}, {y}", M[(m - 1) as usize])
 }
 
-impl Aulos {
+impl Crate {
     pub(crate) fn now_playing_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(n) = self.now.as_ref() else {
             return div().size_full().bg(rgb(t.base)).into_any_element();
@@ -114,6 +114,12 @@ impl Aulos {
                     .on_click(cx.listener(move |this, _, _, cx| this.transport(Transport::SetPosition(ms), cx)))
             })
             .collect();
+        let np_stars = {
+            let k = tr.rating_key.clone();
+            crate::album::rate_stars(format!("np-{k}"), detail.as_ref().and_then(|d| d.rating), 18.0, t.accent, 0x8a8a8a, cx, move |this, n, cx| {
+                this.rate_track(k.clone(), n, cx)
+            })
+        };
         let btn = |id: &'static str, ic: &'static str, size: f32, color: Hsla, tr: Option<Transport>| {
             div()
                 .id(id)
@@ -162,7 +168,7 @@ impl Aulos {
                                     }),
                             ),
                     )
-                    .child(div().pt(px(8.0)).child(stars(detail.as_ref().and_then(|d| d.rating), 18.0, t.accent, 0x8a8a8a))),
+                    .child(div().pt(px(8.0)).child(np_stars)),
             )
             .child(div().flex().gap(px(2.0)).children(bars))
             .child(

@@ -1,5 +1,5 @@
-//! MPRIS (org.mpris.MediaPlayer2.aulos) so media keys, playerctl and the
-//! Omarchy bar can see and drive Aulos. mpris-server's Player is !Send, so it
+//! MPRIS (org.mpris.MediaPlayer2.crate) so media keys, playerctl and the
+//! Omarchy bar can see and drive Crate. mpris-server's Player is !Send, so it
 //! lives on its own thread with a current-thread tokio runtime.
 
 use mpris_server::{LoopStatus, Metadata, PlaybackStatus, Player, Time};
@@ -36,9 +36,9 @@ pub fn start(cmds: mpsc::UnboundedSender<Transport>) -> mpsc::UnboundedSender<Up
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
-                let player = match Player::builder("aulos")
-                    .identity("Aulos")
-                    .desktop_entry("aulos")
+                let player = match Player::builder("crate")
+                    .identity("Crate")
+                    .desktop_entry("crate")
                     .can_play(true)
                     .can_pause(true)
                     .can_go_next(true)
@@ -80,7 +80,7 @@ pub fn start(cmds: mpsc::UnboundedSender<Transport>) -> mpsc::UnboundedSender<Up
                     });
                 }
                 tokio::task::spawn_local(player.run());
-                eprintln!("[mpris] org.mpris.MediaPlayer2.aulos ready");
+                eprintln!("[mpris] org.mpris.MediaPlayer2.crate ready");
                 while let Some(u) = rx.recv().await {
                     let r = match u {
                         Update::Track { id, title, artist, album, length_ms, art_url } => {
@@ -89,7 +89,7 @@ pub fn start(cmds: mpsc::UnboundedSender<Transport>) -> mpsc::UnboundedSender<Up
                                 .artist([artist])
                                 .album(album)
                                 .length(Time::from_millis(length_ms as i64));
-                            if let Ok(tid) = mpris_server::TrackId::try_from(format!("/io/aulos/track/{id}")) {
+                            if let Ok(tid) = mpris_server::TrackId::try_from(format!("/io/crate/track/{id}")) {
                                 m = m.trackid(tid);
                             }
                             if let Some(a) = art_url {

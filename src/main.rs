@@ -1,12 +1,12 @@
-//! Aulos GPUI spike: themed shell, virtualized album grid over a real Plex
+//! Crate GPUI spike: themed shell, virtualized album grid over a real Plex
 //! library, cover art fetched on a tokio side thread, and a scroll benchmark.
 //!
 //! Env:
 //!   PLEX_URL      (default http://plex-server:32400)
 //!   PLEX_TOKEN    (required; set in the environment)
 //!   PLEX_SECTION  (default 5)
-//!   AULOS_ITEMS   (default 50000; real albums are cycled to fill)
-//!   AULOS_BENCH   (set: auto-scroll, print frame stats, quit)
+//!   CRATE_ITEMS   (default 50000; real albums are cycled to fill)
+//!   CRATE_BENCH   (set: auto-scroll, print frame stats, quit)
 
 mod album;
 mod artist;
@@ -39,11 +39,11 @@ use gpui::{
 use gpui_component::input::InputState;
 use tokio::sync::mpsc;
 
-use aulos_spike::audio::{Engine, Event as AudioEvent, Source};
+use crate_audio::audio::{Engine, Event as AudioEvent, Source};
 use mpris::{Transport, Update as MprisUpdate};
 use plex::{Album, ArtRequest, ArtResult, ArtistInfo, ArtistRequest, HubsRequest, SearchHit, SearchRequest, Track, TracksRequest};
 
-gpui::actions!(aulos, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch, ToggleNowPlaying, PaletteRadio]);
+gpui::actions!(crate_app, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch, ToggleNowPlaying, PaletteRadio, Rate1, Rate2, Rate3, Rate4, Rate5]);
 
 #[derive(Clone)]
 enum View {
@@ -59,7 +59,7 @@ use theme::Theme;
 pub(crate) const SIDEBAR_W: f32 = 240.0;
 pub(crate) const PAD_X: f32 = 36.0;
 
-struct Aulos {
+struct Crate {
     theme: Theme,
     theme_gen: String,
     albums: Vec<Album>,
@@ -163,6 +163,12 @@ struct Now {
     queue_id: u64,
     /// The user stopped, or the engine failed: don't continue on our own.
     stopped: bool,
+    /// Play reporting: the track last reported, its state, last known
+    /// position, and when we last told the server.
+    rep_idx: Option<usize>,
+    rep_state: &'static str,
+    rep_elapsed: u64,
+    rep_at: Instant,
 }
 
 struct Bench {
@@ -175,7 +181,7 @@ struct Bench {
     duration: Duration,
 }
 
-impl Aulos {
+impl Crate {
     #[allow(clippy::too_many_arguments)]
     fn new(
         window: &mut Window,
@@ -208,12 +214,12 @@ impl Aulos {
                             }
                         }
                         // Test hook: start the Nth station.
-                        if let Some(n) = std::env::var("AULOS_STATION").ok().and_then(|v| v.parse::<usize>().ok())
+                        if let Some(n) = std::env::var("CRATE_STATION").ok().and_then(|v| v.parse::<usize>().ok())
                             && let Some(st) = home.rows.iter().filter(|r| r.kind == "station").flat_map(|r| r.items.iter()).nth(n)
                         {
                             this.play_station(st.key.clone(), st.title.clone(), cx);
                         }
-                        if let Some(n) = std::env::var("AULOS_PLAYLIST").ok().and_then(|v| v.parse::<usize>().ok())
+                        if let Some(n) = std::env::var("CRATE_PLAYLIST").ok().and_then(|v| v.parse::<usize>().ok())
                             && let Some(p) = home.playlists.get(n)
                         {
                             this.play_playlist(p.rating_key.clone(), p.title.clone(), cx);
@@ -223,7 +229,7 @@ impl Aulos {
                     })
                     .ok();
                 }
-                Ok(Err(e)) => eprintln!("[aulos] hubs: {e:#}"),
+                Ok(Err(e)) => eprintln!("[crate] hubs: {e:#}"),
                 Err(_) => {}
             })
             .detach();
@@ -306,8 +312,8 @@ impl Aulos {
                             cx.notify();
                             return;
                         }
-                        // Test hooks: AULOS_SORT=artist|title|year|plays, AULOS_FILTER=Decade:1990s:decade=1990
-                        if let Ok(v) = std::env::var("AULOS_SORT") {
+                        // Test hooks: CRATE_SORT=artist|title|year|plays, CRATE_FILTER=Decade:1990s:decade=1990
+                        if let Ok(v) = std::env::var("CRATE_SORT") {
                             this.lib_sort = library::LibSort::ALL
                                 .into_iter()
                                 .find(|s| s.label().to_lowercase().starts_with(&v))
@@ -315,41 +321,41 @@ impl Aulos {
                             this.go(View::Library);
                             this.refresh_library(cx);
                         }
-                        if let Ok(v) = std::env::var("AULOS_FILTER") {
+                        if let Ok(v) = std::env::var("CRATE_FILTER") {
                             let p: Vec<&str> = v.splitn(3, ':').collect();
                             if let [kind, label, query] = p[..] {
                                 let kind: &'static str = Box::leak(kind.to_string().into_boxed_str());
                                 this.add_filter(library::LibFilter { kind, label: label.into(), query: query.into() }, cx);
                             }
                         }
-                        if std::env::var_os("AULOS_AUDIO_SETTINGS").is_some() {
+                        if std::env::var_os("CRATE_AUDIO_SETTINGS").is_some() {
                             this.open_audio_settings(cx);
                         }
-                        if let Ok(page) = std::env::var("AULOS_PAGE") {
+                        if let Ok(page) = std::env::var("CRATE_PAGE") {
                             let page: &'static str = Box::leak(page.into_boxed_str());
                             this.go(View::Soon(page));
                             this.load_page(page, cx);
                         }
-                        if std::env::var_os("AULOS_STATIONS").is_some() {
+                        if std::env::var_os("CRATE_STATIONS").is_some() {
                             this.go(View::Soon("stations"));
                             this.refresh_sonic_progress(cx);
                         }
-                        if let Ok(q) = std::env::var("AULOS_QUERY_RADIO") {
+                        if let Ok(q) = std::env::var("CRATE_QUERY_RADIO") {
                             this.play_station(format!("query:{q}"), "Test radio".into(), cx);
                         }
-                        if let Ok(key) = std::env::var("AULOS_RADIO") {
+                        if let Ok(key) = std::env::var("CRATE_RADIO") {
                             this.play_radio(&key, "Radio".into(), cx);
                         }
                         if let Some(ix) = this.autoplay.take() {
                             this.play_album(ix, cx);
-                        } else if let Ok(key) = std::env::var("AULOS_ARTIST_KEY") {
-                                this.open_artist(key, std::env::var("AULOS_ARTIST_NAME").unwrap_or_default(), cx);
+                        } else if let Ok(key) = std::env::var("CRATE_ARTIST_KEY") {
+                                this.open_artist(key, std::env::var("CRATE_ARTIST_NAME").unwrap_or_default(), cx);
                         } else {
                             let find = |var: &str| {
                                 let key = std::env::var(var).ok()?;
                                 this.albums.iter().position(|a| a.rating_key == key)
                             };
-                            let (open, play) = (find("AULOS_OPEN_KEY"), find("AULOS_AUTOPLAY_KEY"));
+                            let (open, play) = (find("CRATE_OPEN_KEY"), find("CRATE_AUTOPLAY_KEY"));
                             if let Some(ix) = open {
                                 this.open_album(ix, cx);
                             }
@@ -402,7 +408,7 @@ impl Aulos {
                     .update(cx, |this, cx| {
                         if gen_now != this.theme_gen {
                             let (t, g) = Theme::load();
-                            eprintln!("[aulos] theme changed -> accent {:06x}", t.accent);
+                            eprintln!("[crate] theme changed -> accent {:06x}", t.accent);
                             apply_component_theme(&t, None, cx);
                             this.theme = t;
                             this.theme_gen = g;
@@ -417,11 +423,11 @@ impl Aulos {
         })
         .detach();
 
-        let total = std::env::var("AULOS_ITEMS")
+        let total = std::env::var("CRATE_ITEMS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0); // 0 = the real library size
-        let bench = std::env::var("AULOS_BENCH").ok().map(|_| Bench {
+        let bench = std::env::var("CRATE_BENCH").ok().map(|_| Bench {
             started: None,
             last: None,
             intervals: Vec::new(),
@@ -447,10 +453,10 @@ impl Aulos {
             last_render_us: 0,
             tracks_tx,
             plex,
-            target: std::env::var("AULOS_TARGET").ok(),
+            target: std::env::var("CRATE_TARGET").ok(),
             engine: None,
             now: None,
-            autoplay: std::env::var("AULOS_AUTOPLAY").ok().and_then(|v| v.parse().ok()),
+            autoplay: std::env::var("CRATE_AUTOPLAY").ok().and_then(|v| v.parse().ok()),
             play_gen: 0,
             view: View::Home,
             back: Vec::new(),
@@ -466,8 +472,8 @@ impl Aulos {
             palette: false,
             pal_sel: 0,
             pal_scope: 0,
-            test_search: std::env::var("AULOS_SEARCH").ok(),
-            now_playing: std::env::var_os("AULOS_NOW_PLAYING").is_some(),
+            test_search: std::env::var("CRATE_SEARCH").ok(),
+            now_playing: std::env::var_os("CRATE_NOW_PLAYING").is_some(),
             sonic_progress: None,
             compact_playing: true,
             audio_info: None,
@@ -477,7 +483,7 @@ impl Aulos {
             artist_cache: Vec::new(),
             artist_cache_for: usize::MAX,
             artist_scroll: UniformListScrollHandle::new(),
-            np_tab: std::env::var("AULOS_NP_TAB").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            np_tab: std::env::var("CRATE_NP_TAB").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             album_detail: HashMap::new(),
             fwd: Vec::new(),
             album_scroll: gpui::ScrollHandle::new(),
@@ -514,7 +520,7 @@ impl Aulos {
             let t0 = Instant::now();
             let _ = tx.send(SearchRequest { query: query.clone(), reply });
             if let Ok(Ok(hits)) = rx.await {
-                eprintln!("[aulos] search {query:?}: {} hits in {:?}", hits.len(), t0.elapsed());
+                eprintln!("[crate] search {query:?}: {} hits in {:?}", hits.len(), t0.elapsed());
                 this.update(cx, |this, cx| {
                     if this.search_gen == gen_id {
                         for h in &hits {
@@ -533,7 +539,7 @@ impl Aulos {
     }
 
     fn activate_hit(&mut self, h: SearchHit, cx: &mut Context<Self>) {
-        eprintln!("[aulos] activate {} {:?}", h.kind, h.title);
+        eprintln!("[crate] activate {} {:?}", h.kind, h.title);
         match h.kind.as_str() {
             "album" => {
                 if let Some(ix) = self.albums.iter().position(|a| a.rating_key == h.rating_key) {
@@ -585,7 +591,7 @@ impl Aulos {
                 Ok(Ok(t)) => {
                     this.update(cx, |this, cx| f(this, album, t, cx)).ok();
                 }
-                Ok(Err(e)) => eprintln!("[aulos] tracks: {e:#}"),
+                Ok(Err(e)) => eprintln!("[crate] tracks: {e:#}"),
                 Err(_) => {}
             }
         })
@@ -622,7 +628,7 @@ impl Aulos {
                 })
                 .ok();
             }
-            Ok(Err(e)) => eprintln!("[aulos] artist: {e:#}"),
+            Ok(Err(e)) => eprintln!("[crate] artist: {e:#}"),
             Err(_) => {}
         })
         .detach();
@@ -702,7 +708,7 @@ impl Aulos {
             if let View::Album { ix: cur, tracks: slot } = &mut this.view
                 && *cur == ix {
                     // Test hook: behave as if track N (1-based) was clicked.
-                    let auto = std::env::var("AULOS_PLAY_TRACK").ok().and_then(|v| v.parse::<usize>().ok());
+                    let auto = std::env::var("CRATE_PLAY_TRACK").ok().and_then(|v| v.parse::<usize>().ok());
                     *slot = Some(tracks.clone());
                     if let (Some(n), Some(album)) = (auto, this.album(ix).cloned()) {
                         this.play_tracks(album, tracks, n.saturating_sub(1), cx);
@@ -738,6 +744,7 @@ impl Aulos {
         }
         self.queue_seq += 1;
         self.play_intent += 1;
+        self.report_stop();
         for t in &tracks {
             self.request_thumb(&t.thumb.clone());
         }
@@ -760,12 +767,16 @@ impl Aulos {
             engine_end: 0,
             queue_id: self.queue_seq,
             stopped: false,
+            rep_idx: None,
+            rep_state: "stopped",
+            rep_elapsed: 0,
+            rep_at: Instant::now(),
         });
         self.play_from(start, 0, cx);
     }
 
     fn art_path(album_key: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(format!("/scratch/aulos-cache/art-{album_key}.jpg"))
+        std::path::PathBuf::from(format!("/scratch/crate-cache/art-{album_key}.jpg"))
     }
 
     /// (Re)start the engine at album track `idx`, `ms` into it.
@@ -784,7 +795,7 @@ impl Aulos {
                 Source::Http {
                     url: format!("{base}{}", t.part_key),
                     token: token.clone(),
-                    cache: std::path::PathBuf::from(format!("/scratch/aulos-cache/part-{id}.{ext}")),
+                    cache: std::path::PathBuf::from(format!("/scratch/crate-cache/part-{id}.{ext}")),
                 }
             })
             .collect();
@@ -829,7 +840,7 @@ impl Aulos {
     fn transport(&mut self, t: Transport, cx: &mut Context<Self>) {
         let Some(now) = self.now.as_mut() else { return };
         let (idx, elapsed, n) = (now.idx, now.elapsed_ms, now.tracks.len());
-        eprintln!("[aulos] transport {t:?}");
+        eprintln!("[crate] transport {t:?}");
         match t {
             Transport::PlayPause | Transport::Play | Transport::Pause => {
                 let want_pause = match t {
@@ -872,6 +883,8 @@ impl Aulos {
                 self.engine = None;
                 now.finished = true;
                 now.stopped = true;
+                self.report_stop();
+                let Some(now) = self.now.as_mut() else { return };
                 now.paused = true;
                 let _ = self.mpris.send(MprisUpdate::Status { playing: false, stopped: true });
                 cx.notify();
@@ -892,18 +905,18 @@ impl Aulos {
                     }
                 }
                 AudioEvent::Reconnected { from, to, silent_ms } => {
-                    eprintln!("[aulos] rate change {from} -> {to}: {silent_ms:.1} ms");
+                    eprintln!("[crate] rate change {from} -> {to}: {silent_ms:.1} ms");
                 }
                 AudioEvent::Finished => now.finished = true,
                 AudioEvent::Error(e) => {
-                    eprintln!("[aulos] audio: {e}");
+                    eprintln!("[crate] audio: {e}");
                     self.status = format!("Audio error: {e}").into();
                     now.finished = true;
                     now.stopped = true;
                     failed = true;
                 }
                 AudioEvent::FirstAudio { ms_since_play } => {
-                    eprintln!("[aulos] first audio {ms_since_play:.0} ms");
+                    eprintln!("[crate] first audio {ms_since_play:.0} ms");
                 }
             }
         }
@@ -981,7 +994,7 @@ impl Aulos {
                         }
                         Ok(Err(e)) => {
                             // Don't retry on every poll; the queue ends where it is.
-                            eprintln!("[aulos] refill: {e:#}");
+                            eprintln!("[crate] refill: {e:#}");
                             now.refill = None;
                         }
                         Err(_) => {}
@@ -1003,6 +1016,7 @@ impl Aulos {
         }
         cx.notify();
         let keep = !now.finished;
+        self.report();
         if failed {
             // Stop the pipeline; Drop stops both engine threads.
             self.engine = None;
@@ -1010,7 +1024,99 @@ impl Aulos {
         keep
     }
 
-    /// Grid cells: the real library, or AULOS_ITEMS for the scroll benchmark.
+    /// Grid cells: the real library, or CRATE_ITEMS for the scroll benchmark.
+    /// Tell the server what's playing: `playing`/`paused` on changes and every
+    /// 10 s, `stopped` when a track ends or is left. The server records the
+    /// play (and scrobbles) when a track stops past ~90%.
+    fn report(&mut self) {
+        let Some(n) = self.now.as_mut() else { return };
+        let Some(tr) = n.tracks.get(n.idx) else { return };
+        let state = if n.finished { "stopped" } else if n.paused { "paused" } else { "playing" };
+        let mut sends: Vec<(String, &'static str, u64, u64)> = Vec::new();
+        if n.rep_idx != Some(n.idx) {
+            // Left the previous track (finished, skipped or seeked away).
+            if let Some(prev) = n.rep_idx.and_then(|i| n.tracks.get(i))
+                && n.rep_state != "stopped"
+            {
+                sends.push((prev.rating_key.clone(), "stopped", n.rep_elapsed, prev.duration_ms));
+            }
+            n.rep_idx = Some(n.idx);
+            n.rep_state = "stopped";
+        }
+        let due = n.rep_at.elapsed() >= Duration::from_secs(10);
+        if state != n.rep_state || (state == "playing" && due) {
+            if !(state == "stopped" && n.rep_state == "stopped") {
+                sends.push((tr.rating_key.clone(), state, n.elapsed_ms, tr.duration_ms));
+            }
+            n.rep_state = state;
+            n.rep_at = Instant::now();
+        }
+        n.rep_elapsed = n.elapsed_ms;
+        for (rk, st, t, d) in sends {
+            send_timeline(rk, st, t, d);
+        }
+    }
+
+    /// The current track is being abandoned (stop, or a new queue): close it out.
+    fn report_stop(&mut self) {
+        let Some(n) = self.now.as_mut() else { return };
+        if let Some(tr) = n.rep_idx.and_then(|i| n.tracks.get(i))
+            && n.rep_state != "stopped"
+        {
+            send_timeline(tr.rating_key.clone(), "stopped", n.elapsed_ms.max(n.rep_elapsed), tr.duration_ms);
+            n.rep_state = "stopped";
+        }
+    }
+
+    /// 1–5 keys: rate the playing track.
+    fn rate_playing(&mut self, stars: u8, cx: &mut Context<Self>) {
+        if let Some(rk) = self.now.as_ref().and_then(|n| n.tracks.get(n.idx)).map(|t| t.rating_key.clone()) {
+            self.rate_track(rk, stars, cx);
+        }
+    }
+
+    /// Rate a track 1–5 stars; choosing the current rating clears it.
+    pub(crate) fn rate_track(&mut self, rk: String, stars: u8, cx: &mut Context<Self>) {
+        let current = self
+            .track_detail
+            .get(&rk)
+            .and_then(|d| d.as_ref())
+            .and_then(|d| d.rating)
+            .or_else(|| self.album_detail.values().flatten().find_map(|a| a.stats.get(&rk).and_then(|s| s.1)));
+        let new = if current.map(|r| (r / 2.0).round() as u8) == Some(stars) { None } else { Some(stars * 2) };
+        if let Some(Some(d)) = self.track_detail.get_mut(&rk) {
+            d.rating = new.map(f32::from);
+        }
+        for a in self.album_detail.values_mut().flatten() {
+            if let Some(s) = a.stats.get_mut(&rk) {
+                s.1 = new.map(f32::from);
+            }
+        }
+        self.rate_on_server(rk, new, cx);
+    }
+
+    pub(crate) fn rate_album(&mut self, key: String, stars: u8, cx: &mut Context<Self>) {
+        let Some(Some(d)) = self.album_detail.get_mut(&key) else { return };
+        let new = if d.rating.map(|r| (r / 2.0).round() as u8) == Some(stars) { None } else { Some(stars * 2) };
+        d.rating = new.map(f32::from);
+        self.rate_on_server(key, new, cx);
+    }
+
+    fn rate_on_server(&mut self, key: String, rating: Option<u8>, cx: &mut Context<Self>) {
+        cx.notify();
+        let rx = plex_call(move |c| async move { c.rate(&key, rating).await });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Err(e)) = rx.await {
+                this.update(cx, |this, cx| {
+                    this.status = format!("Rating not saved: {e:#}").into();
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     fn request_track_detail(&mut self, rk: String, cx: &mut Context<Self>) {
         if self.track_detail.contains_key(&rk) {
             return;
@@ -1025,7 +1131,7 @@ impl Aulos {
                 })
                 .ok();
             }
-            Ok(Err(e)) => eprintln!("[aulos] track detail: {e:#}"),
+            Ok(Err(e)) => eprintln!("[crate] track detail: {e:#}"),
             Err(_) => {}
         })
         .detach();
@@ -1068,7 +1174,7 @@ impl Aulos {
         let now = Instant::now();
         if b.started.is_none() {
             b.started = Some(now);
-            eprintln!("[aulos] bench: scrolling at {} px/s for {:?}", b.speed, b.duration);
+            eprintln!("[crate] bench: scrolling at {} px/s for {:?}", b.speed, b.duration);
         }
         if let Some(last) = b.last {
             let dt = now.duration_since(last);
@@ -1128,7 +1234,7 @@ fn apply_component_theme(t: &Theme, window: Option<&mut Window>, cx: &mut App) {
     });
 }
 
-impl Aulos {
+impl Crate {
 
     fn open_hub_item(&mut self, kind: &str, key: &str, title: &str, cx: &mut Context<Self>) {
         match kind {
@@ -1138,7 +1244,7 @@ impl Aulos {
                 }
             }
             "artist" => self.open_artist(key.to_string(), title.to_string(), cx),
-            _ => eprintln!("[aulos] station {title:?} not implemented yet"),
+            _ => eprintln!("[crate] station {title:?} not implemented yet"),
         }
     }
 
@@ -1188,7 +1294,7 @@ fn report(b: &Bench, art_loaded: usize) {
     );
 }
 
-impl Render for Aulos {
+impl Render for Crate {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t0 = Instant::now();
         let t = self.theme.clone();
@@ -1282,10 +1388,10 @@ impl Render for Aulos {
             .then(|| div().absolute().inset_0().child(self.now_playing_view(&t, cx)));
 
         let el = div()
-            .key_context("Aulos")
+            .key_context("Crate")
             .track_focus(&self.focus)
             .capture_key_down(|ev: &gpui::KeyDownEvent, window, cx| {
-                if std::env::var_os("AULOS_KEYLOG").is_some() {
+                if std::env::var_os("CRATE_KEYLOG").is_some() {
                     eprintln!("[keys] {:?} has_focus={}", ev.keystroke, window.focused(cx).is_some());
                 }
             })
@@ -1305,6 +1411,11 @@ impl Render for Aulos {
                     this.go_back(cx)
                 }
             }))
+            .on_action(cx.listener(|this, _: &Rate1, _, cx| this.rate_playing(1, cx)))
+            .on_action(cx.listener(|this, _: &Rate2, _, cx| this.rate_playing(2, cx)))
+            .on_action(cx.listener(|this, _: &Rate3, _, cx| this.rate_playing(3, cx)))
+            .on_action(cx.listener(|this, _: &Rate4, _, cx| this.rate_playing(4, cx)))
+            .on_action(cx.listener(|this, _: &Rate5, _, cx| this.rate_playing(5, cx)))
             .on_action(cx.listener(|this, _: &ToggleNowPlaying, _, cx| {
                 this.now_playing = !this.now_playing && this.now.is_some();
                 cx.notify();
@@ -1345,6 +1456,32 @@ where
 
 /// More tracks for a radio: a Plex station/radio key, or `query:<filter>`
 /// for random tracks matching a library filter.
+/// Timeline reports go out one at a time, in order: if a new track's
+/// `playing` overtook the previous track's `stopped`, the server would close
+/// the old session itself and then count the late `stopped` as a second play.
+static TIMELINE: std::sync::OnceLock<mpsc::UnboundedSender<(String, &'static str, u64, u64)>> = std::sync::OnceLock::new();
+
+fn send_timeline(rk: String, state: &'static str, time: u64, duration: u64) {
+    if rk.is_empty() || std::env::var_os("CRATE_NO_REPORT").is_some() {
+        return;
+    }
+    let tx = TIMELINE.get_or_init(|| {
+        let (tx, mut rx) = mpsc::unbounded_channel::<(String, &'static str, u64, u64)>();
+        if let Some((handle, client)) = PLEX.get() {
+            let client = client.clone();
+            handle.spawn(async move {
+                while let Some((rk, st, t, d)) = rx.recv().await {
+                    if let Err(e) = client.timeline(&rk, st, t, d).await {
+                        eprintln!("[crate] timeline {st} {rk}: {e:#}");
+                    }
+                }
+            });
+        }
+        tx
+    });
+    let _ = tx.send((rk, state, time, duration));
+}
+
 fn fetch_more(key: String) -> tokio::sync::oneshot::Receiver<anyhow::Result<Vec<Track>>> {
     plex_call(move |c| async move {
         match key.strip_prefix("query:") {
@@ -1357,7 +1494,23 @@ fn fetch_more(key: String) -> tokio::sync::oneshot::Receiver<anyhow::Result<Vec<
     })
 }
 
+/// The app was called Aulos; move its caches once so nothing re-downloads.
+fn migrate_old_caches() {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let xdg = std::env::var("XDG_CACHE_HOME").unwrap_or_else(|_| format!("{home}/.cache"));
+    for (old, new) in [(format!("{xdg}/aulos"), format!("{xdg}/crate")), ("/scratch/aulos-cache".into(), "/scratch/crate-cache".into())] {
+        let (old, new) = (std::path::Path::new(&old), std::path::Path::new(&new));
+        if old.is_dir() && !new.exists() {
+            match std::fs::rename(old, new) {
+                Ok(()) => eprintln!("[crate] moved {} -> {}", old.display(), new.display()),
+                Err(e) => eprintln!("[crate] couldn't move {}: {e}", old.display()),
+            }
+        }
+    }
+}
+
 fn main() {
+    migrate_old_caches();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,zbus=warn")).init();
     let base = std::env::var("PLEX_URL").unwrap_or_else(|_| "http://plex-server:32400".into());
     let token = std::env::var("PLEX_TOKEN").expect("PLEX_TOKEN not set; set it in the environment");
@@ -1396,27 +1549,33 @@ fn main() {
             ])
             .expect("bundled fonts");
         cx.bind_keys([
-            gpui::KeyBinding::new("space", PlayPause, Some("Aulos && !Input")),
-            gpui::KeyBinding::new("n", NextTrack, Some("Aulos && !Input")),
-            gpui::KeyBinding::new("p", PrevTrack, Some("Aulos && !Input")),
-            gpui::KeyBinding::new("right", SeekForward, Some("Aulos && !Input")),
-            gpui::KeyBinding::new("left", SeekBack, Some("Aulos && !Input")),
-            gpui::KeyBinding::new("escape", Back, Some("Aulos && !Input")),
-            gpui::KeyBinding::new("f", ToggleNowPlaying, Some("Aulos && !Input")),
+            gpui::KeyBinding::new("space", PlayPause, Some("Crate && !Input")),
+            gpui::KeyBinding::new("n", NextTrack, Some("Crate && !Input")),
+            gpui::KeyBinding::new("p", PrevTrack, Some("Crate && !Input")),
+            gpui::KeyBinding::new("right", SeekForward, Some("Crate && !Input")),
+            gpui::KeyBinding::new("left", SeekBack, Some("Crate && !Input")),
+            gpui::KeyBinding::new("escape", Back, Some("Crate && !Input")),
+            gpui::KeyBinding::new("f", ToggleNowPlaying, Some("Crate && !Input")),
+            gpui::KeyBinding::new("1", Rate1, Some("Crate && !Input")),
+            gpui::KeyBinding::new("2", Rate2, Some("Crate && !Input")),
+            gpui::KeyBinding::new("3", Rate3, Some("Crate && !Input")),
+            gpui::KeyBinding::new("4", Rate4, Some("Crate && !Input")),
+            gpui::KeyBinding::new("5", Rate5, Some("Crate && !Input")),
             // gpui-component binds tab to IndentInline in its Input; bound later at
             // the same depth, this wins inside the palette's search box.
             gpui::KeyBinding::new("tab", PaletteRadio, Some("Palette > Input")),
-            gpui::KeyBinding::new("ctrl-k", FocusSearch, Some("Aulos")),
+            gpui::KeyBinding::new("ctrl-k", FocusSearch, Some("Crate")),
         ]);
         let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                app_id: Some("aulos-spike".into()),
+                app_id: Some("crate".into()),
+                titlebar: Some(gpui::TitlebarOptions { title: Some("Crate".into()), ..Default::default() }),
                 ..Default::default()
             },
             move |window, cx| {
-                let view = cx.new(|cx| Aulos::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds, transport_rx, mpris_tx, search_tx, hubs_tx, artist_tx));
+                let view = cx.new(|cx| Crate::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds, transport_rx, mpris_tx, search_tx, hubs_tx, artist_tx));
                 cx.new(|cx| gpui_component::Root::new(view, window, cx))
             },
         )

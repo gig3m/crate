@@ -1,15 +1,15 @@
-//! Compact layout from the design canvas (Tile.dc.html): what Aulos shows in
+//! Compact layout from the design canvas (Tile.dc.html): what Crate shows in
 //! a narrow tiled window. Playing tab plus a four-item bottom nav.
 
 use gpui::{Context, FontWeight, Hsla, ObjectFit, div, img, linear_color_stop, linear_gradient, prelude::*, px, rgb};
 
-use crate::{Aulos, View, fmt_ms, icons, mpris::Transport, shell::MONO, theme::{Theme, mix}};
+use crate::{Crate, View, fmt_ms, icons, mpris::Transport, shell::MONO, theme::{Theme, mix}};
 
 fn white(a: f32) -> Hsla {
     gpui::hsla(0.0, 0.0, 1.0, a)
 }
 
-impl Aulos {
+impl Crate {
     pub(crate) fn tile_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(n) = self.now.as_ref() else { return div().into_any_element() };
         let tr = &n.tracks[n.idx];

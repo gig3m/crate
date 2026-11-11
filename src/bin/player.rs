@@ -2,18 +2,18 @@
 //!
 //! usage: player [--target NODE] ITEM...
 //!   ITEM = a local file, or plex:/library/parts/<id>/<ts>/file.<ext>
-//!   (plex items stream progressively into /scratch/aulos-cache; needs PLEX_TOKEN)
+//!   (plex items stream progressively into /scratch/crate-cache; needs PLEX_TOKEN)
 
 use std::{path::PathBuf, sync::atomic::Ordering, time::Duration};
 
-use aulos_spike::audio::{Engine, Event, Source};
+use crate_audio::audio::{Engine, Event, Source};
 
 fn main() -> anyhow::Result<()> {
     let mut target = None;
     let mut queue = Vec::new();
     let base = std::env::var("PLEX_URL").unwrap_or_else(|_| "http://plex-server:32400".into());
     let cache_dir = PathBuf::from(
-        std::env::var("AULOS_CACHE").unwrap_or_else(|_| "/scratch/aulos-cache".into()),
+        std::env::var("CRATE_CACHE").unwrap_or_else(|_| "/scratch/crate-cache".into()),
     );
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -35,10 +35,10 @@ fn main() -> anyhow::Result<()> {
     let mut tracks: Vec<(u64, u32, String)> = Vec::new();
     let mut reported = 0usize;
     // Stress aid: pause/resume every N ms (exercises set_active during drains).
-    let toggle_ms: Option<u64> = std::env::var("AULOS_TOGGLE_MS").ok().and_then(|v| v.parse().ok());
+    let toggle_ms: Option<u64> = std::env::var("CRATE_TOGGLE_MS").ok().and_then(|v| v.parse().ok());
     let mut toggled_off = false;
     let mut toggles = 0u64;
-    let toggle_for = std::env::var("AULOS_TOGGLE_FOR_S").ok().and_then(|v| v.parse::<f64>().ok());
+    let toggle_for = std::env::var("CRATE_TOGGLE_FOR_S").ok().and_then(|v| v.parse::<f64>().ok());
     let started = std::time::Instant::now();
     loop {
         let toggling = toggle_ms.is_some() && toggle_for.is_none_or(|f| started.elapsed().as_secs_f64() < f);

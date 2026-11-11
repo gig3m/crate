@@ -87,7 +87,7 @@ impl Progressive {
         let mut resp = reqwest::blocking::Client::new()
             .get(url)
             .header("X-Plex-Token", token)
-            .header("X-Plex-Client-Identifier", "aulos-spike")
+            .header("X-Plex-Client-Identifier", "crate")
             .send()?
             .error_for_status()?;
         let n = ATTEMPT.fetch_add(1, Ordering::Relaxed);

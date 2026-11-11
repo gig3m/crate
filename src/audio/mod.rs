@@ -1,4 +1,4 @@
-//! Aulos audio engine (spike quality, shaped for the real app).
+//! Crate audio engine (spike quality, shaped for the real app).
 //!
 //! Threads:
 //! - decoder: walks the queue, decodes with symphonia, pushes f32 frames into
@@ -189,7 +189,7 @@ fn decoder_thread(
     // got audio has nothing to drain (and an inactive one never would).
     let mut stream_frames = 0u64;
     // Spike/testing aid: cap each track at N seconds.
-    let track_limit: Option<f64> = std::env::var("AULOS_TRACK_LIMIT").ok().and_then(|v| v.parse().ok());
+    let track_limit: Option<f64> = std::env::var("CRATE_TRACK_LIMIT").ok().and_then(|v| v.parse().ok());
 
     for (index, src) in queue.into_iter().enumerate() {
         let mss = MediaSourceStream::new(src.open(stats.stop.clone())?, Default::default());
@@ -398,8 +398,8 @@ fn pw_thread(
                 *pw::keys::MEDIA_TYPE => "Audio",
                 *pw::keys::MEDIA_ROLE => "Music",
                 *pw::keys::MEDIA_CATEGORY => "Playback",
-                *pw::keys::APP_NAME => "Aulos",
-                *pw::keys::NODE_NAME => "aulos",
+                *pw::keys::APP_NAME => "Crate",
+                *pw::keys::NODE_NAME => "crate",
                 *pw::keys::AUDIO_CHANNELS => "2",
                 "node.rate" => format!("1/{rate}"),
                 "node.latency" => format!("{}/{rate}", rate / 50),
@@ -407,7 +407,7 @@ fn pw_thread(
             if let Some(t) = &target {
                 props.insert("target.object", t.as_str());
             }
-            let stream = pw::stream::StreamBox::new(&core, "aulos-playback", props)?;
+            let stream = pw::stream::StreamBox::new(&core, "crate-playback", props)?;
             // SAFETY (spike): the stream borrows `core`, which lives for the
             // whole thread; we never drop core before the stream.
             let stream: pw::stream::StreamBox<'static> = unsafe { std::mem::transmute(stream) };
