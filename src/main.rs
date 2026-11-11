@@ -1352,6 +1352,7 @@ impl Crate {
             n.level.clear();
             n.transcoded.clear();
             n.formats.clear();
+            n.skipped_to = 0;
         }
         let Some(now) = self.now.as_mut() else { return };
         if idx >= now.tracks.len() {
