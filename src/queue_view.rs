@@ -11,6 +11,8 @@ use crate::{Crate, PAD_X, View, fmt_ms, icons, shell::MONO, theme::Theme};
 #[derive(Clone)]
 pub(crate) struct QueueDrag {
     from: usize,
+    /// The dragged track, found again on drop (the queue may have shifted).
+    key: String,
     queue_id: u64,
 }
 
@@ -172,6 +174,7 @@ impl Crate {
                             let stop_line = this.stop_after == Some(i) && i + 1 < this.now.as_ref().map(|n| n.tracks.len()).unwrap_or(0);
                             let (bg, border, text) = (t.raised, t.line, t.text);
                             let gtitle = tr.title.clone();
+                            let dkey = tr.rating_key.clone();
                             div()
                                 .id(("q-row", i))
                                 .group("q-row")
@@ -199,8 +202,14 @@ impl Crate {
                                         }
                                     })
                                     .on_drop(cx.listener(move |this, dr: &QueueDrag, _, cx| {
-                                        if this.now.as_ref().is_some_and(|n| n.queue_id == dr.queue_id) {
-                                            this.move_upcoming(dr.from, i, cx);
+                                        let first = this.first_editable();
+                                        // Where the dragged track is now, nearest its old place.
+                                        let from = this.now.as_ref().filter(|n| n.queue_id == dr.queue_id).and_then(|n| {
+                                            let at = |j: usize| n.tracks.get(j).is_some_and(|t| t.rating_key == dr.key);
+                                            if at(dr.from) { Some(dr.from) } else { (first..n.tracks.len()).filter(|&j| at(j)).min_by_key(|&j| j.abs_diff(dr.from)) }
+                                        });
+                                        if let Some(from) = from {
+                                            this.move_upcoming(from, i, cx);
                                         }
                                     }))
                                 })
@@ -232,7 +241,7 @@ impl Crate {
                                                     .cursor_grab()
                                                     .child(icons::icon("grip", 16.0, t.text2))
                                                     .on_click(|_, _, cx| cx.stop_propagation())
-                                                    .on_drag(QueueDrag { from: i, queue_id }, move |_, _, _, cx| {
+                                                    .on_drag(QueueDrag { from: i, key: dkey.clone(), queue_id }, move |_, _, _, cx| {
                                                         let title = gtitle.clone();
                                                         cx.new(|_| QueueGhost { title, bg, border, text })
                                                     }),

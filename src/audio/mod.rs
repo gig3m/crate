@@ -729,10 +729,11 @@ fn decoder_thread(
 
         // Hold back this track's end only if the next queued track will fade
         // in (checked now; if the queue changes, the end just plays as is).
-        let hold = {
-            let q = queue.lock().unwrap();
-            q.items.front().map(|n| (n.fade_ms.min(12_000) as u64 * rate as u64 / 1000) as usize * CHANNELS).unwrap_or(0)
-        };
+        let hold_for = |q: &Queue| q.items.front().map(|n| (n.fade_ms.min(12_000) as u64 * rate as u64 / 1000) as usize * CHANNELS).unwrap_or(0);
+        let mut hold = hold_for(&queue.lock().unwrap());
+        // Re-checked as the track plays: editing the queue can change whether
+        // the next track fades in.
+        let mut packets_since_hold = 0u32;
         tail_rate = rate;
         let mut dec = match opus::codecs().make_audio_decoder(params, &AudioDecoderOptions::default().gapless(true)) {
             Ok(d) => d,
@@ -854,8 +855,15 @@ fn decoder_thread(
             if !fading.is_empty() {
                 fade_done += mix_fade(&mut scratch, &mut fading, fade_done, fade_total);
             }
+            packets_since_hold += 1;
+            if packets_since_hold >= 32 {
+                packets_since_hold = 0;
+                hold = hold_for(&queue.lock().unwrap());
+            }
             let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, queued_rem: &mut queued_rem, stream_frames: &mut stream_frames };
-            if hold == 0 {
+            // Anything already held goes out first, in order, even if the hold
+            // has since dropped to nothing.
+            if hold == 0 && tail.is_empty() {
                 if !out.push(&scratch, rate, &cmd_tx, &stats) {
                     return Ok(());
                 }

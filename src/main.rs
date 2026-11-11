@@ -189,7 +189,7 @@ struct Crate {
     pub(crate) stop_after_album: bool,
     /// The last track change was the user's (Next, Prev, a click), not
     /// the queue moving on: "stop after" doesn't catch it.
-    user_jump: bool,
+    user_jump: Option<usize>,
     /// Pages whose data failed to load (History, Tracks), with the error.
     pub(crate) page_error: HashMap<&'static str, String>,
     /// Until when the server counts as unreachable (after a connect or
@@ -799,7 +799,7 @@ impl Crate {
             stop_after: None,
             queue_scroll: UniformListScrollHandle::new(),
             stop_after_album: false,
-            user_jump: false,
+            user_jump: None,
             page_error: HashMap::new(),
             server_down_until: None,
             hubs_tx: hubs_tx_keep,
@@ -1680,7 +1680,16 @@ impl Crate {
     fn play_from(&mut self, idx: usize, ms: u64, cx: &mut Context<Self>) {
         // Read first, so an early return can't leave it set for a later play.
         let start_paused = std::mem::take(&mut self.start_paused);
-        self.user_jump = true;
+        // The track a user action started (a seek restarts the current one).
+        self.user_jump = Some(idx);
+        // Jumping past the stop point, or back to an earlier track, ends "stop
+        // after" (and the engine gets the whole queue again).
+        if let Some(s) = self.stop_after
+            && let Some(cur) = self.now.as_ref().map(|n| n.idx)
+            && (idx > s || idx < cur)
+        {
+            self.stop_after = None;
+        }
         // An explicit start supersedes a queue waiting on loudness.
         self.pending_start = None;
         // The new engine reports its own gains; don't show the old one's meanwhile.
@@ -1801,7 +1810,9 @@ impl Crate {
                     // from the top at the end of the queue, else from the current
                     // track (an error or a radio refill that ran dry mid-queue).
                     if !matches!(t, Transport::Pause) {
-                        let stopped_here = self.stop_after == Some(idx);
+                        // Stopped there on purpose: the engine was given nothing
+                        // past this track though more is queued.
+                        let stopped_here = self.stop_after == Some(idx) || (now.engine_end == idx + 1 && idx + 1 < n && self.repeat != queue::Repeat::One);
                         self.stop_after = None;
                         let from = if idx + 1 >= n {
                             0
@@ -1979,9 +1990,10 @@ impl Crate {
             // paused at that track's start; a skip past it just ends it.
             // Whether this track started because of the user (Next, a click,
             // a new queue) rather than the queue playing on.
-            let jumped = std::mem::take(&mut self.user_jump);
+            let cur = self.now.as_ref().map(|n| n.idx);
+            let jumped = self.user_jump.take().is_some_and(|j| Some(j) == cur);
             if let Some(stop) = self.stop_after
-                && let Some(idx) = self.now.as_ref().map(|n| n.idx)
+                && let Some(idx) = cur
                 && idx > stop
             {
                 self.stop_after = None;
@@ -2011,6 +2023,10 @@ impl Crate {
                     // Another queue started meanwhile: these tracks aren't for it.
                     let Some(now) = this.now.as_mut().filter(|n| n.queue_id == qid) else { return };
                     now.refilling = false;
+                    // Radio was turned off for this queue meanwhile (Clear upcoming).
+                    if now.refill.is_none() {
+                        return;
+                    }
                     match res {
                         Ok(Ok(more)) => {
                             let have: HashSet<String> = now.tracks.iter().map(|t| t.rating_key.clone()).collect();
@@ -2033,6 +2049,7 @@ impl Crate {
                                 && let Some(e) = this.engine.as_ref()
                                 && let Some(n) = this.now.as_ref()
                                 && n.engine_end == n.tracks.len() - more.len()
+                                && this.stop_after.is_none_or(|s| n.engine_end <= s)
                                 && e.append(this.sources(&more, n.tracks.len().checked_sub(more.len() + 1).and_then(|p| n.tracks.get(p))))
                                 && let Some(n) = this.now.as_mut()
                             {

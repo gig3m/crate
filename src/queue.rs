@@ -167,19 +167,25 @@ impl Crate {
     /// Edit the upcoming tracks with `f` (which returns false to refuse) and
     /// hand the result to the engine, against the same decoder position; if
     /// the decoder moves on meanwhile, undo and try again.
-    fn edit_upcoming(&mut self, mut f: impl FnMut(&mut crate::Now, usize) -> bool) -> bool {
+    /// `f` also moves the "stop after" mark with its track, so the engine
+    /// is handed the new order and the new stop point together.
+    fn edit_upcoming(&mut self, mut f: impl FnMut(&mut crate::Now, usize, &mut Option<usize>) -> bool) -> bool {
         for _ in 0..5 {
             let started = self.engine.as_ref().filter(|e| !e.is_closed()).map(|e| e.started());
             let first = self.first_editable();
+            let stop_before = self.stop_after;
+            let mut stop = self.stop_after;
             let Some(now) = self.now.as_mut() else { return false };
             let before = (now.tracks.clone(), now.orig_order.clone(), now.engine_end);
-            if !f(now, first) {
+            if !f(now, first, &mut stop) {
                 return false;
             }
+            self.stop_after = stop;
             match started {
                 None => return true,
                 Some(s) if self.hand_over(s) => return true,
                 Some(_) => {
+                    self.stop_after = stop_before;
                     if let Some(now) = self.now.as_mut() {
                         (now.tracks, now.orig_order, now.engine_end) = before;
                     }
@@ -191,9 +197,15 @@ impl Crate {
 
     /// Drop upcoming track `i` from the queue.
     pub(crate) fn remove_upcoming(&mut self, i: usize, cx: &mut Context<Self>) {
-        let ok = self.edit_upcoming(|now, first| {
+        let ok = self.edit_upcoming(|now, first, stop| {
             if i < first || i >= now.tracks.len() {
                 return false;
+            }
+            // The mark stays on its track (or the one before, if it's this one).
+            if let Some(s) = stop.as_mut()
+                && *s >= i
+            {
+                *s = s.saturating_sub(1);
             }
             let t = now.tracks.remove(i);
             if let Some(p) = now.orig_order.iter().rposition(|k| *k == t.rating_key) {
@@ -204,14 +216,7 @@ impl Crate {
             }
             true
         });
-        if ok {
-            if let Some(s) = self.stop_after.as_mut()
-                && *s >= i
-                && *s > 0
-            {
-                *s -= 1;
-            }
-        } else {
+        if !ok {
             self.say("That track has already started loading; it can't be removed now");
         }
         cx.notify();
@@ -222,12 +227,22 @@ impl Crate {
         if from == to {
             return;
         }
-        let ok = self.edit_upcoming(|now, first| {
+        let ok = self.edit_upcoming(|now, first, stop| {
             if from < first || to < first || from >= now.tracks.len() || to >= now.tracks.len() {
                 return false;
             }
             let t = now.tracks.remove(from);
             now.tracks.insert(to, t);
+            // The mark follows its track.
+            if let Some(s) = stop.as_mut() {
+                if *s == from {
+                    *s = to;
+                } else if from < *s && to >= *s {
+                    *s -= 1;
+                } else if from > *s && to <= *s {
+                    *s += 1;
+                }
+            }
             true
         });
         if !ok {
@@ -239,9 +254,13 @@ impl Crate {
     /// Remove every upcoming track that can still be removed.
     pub(crate) fn clear_upcoming(&mut self, cx: &mut Context<Self>) {
         let mut removed = 0;
-        let ok = self.edit_upcoming(|now, first| {
+        let ok = self.edit_upcoming(|now, first, stop| {
             if first >= now.tracks.len() {
                 return false;
+            }
+            // A stop on a track being cleared goes with it; one before stays.
+            if stop.is_some_and(|s| s >= first) {
+                *stop = None;
             }
             let gone: Vec<Track> = now.tracks.drain(first..).collect();
             removed = gone.len();
@@ -256,8 +275,9 @@ impl Crate {
             true
         });
         if ok {
-            self.stop_after = None;
             self.say(format!("Cleared {removed} upcoming track{}", if removed == 1 { "" } else { "s" }));
+        } else {
+            self.say("The next track has already started loading; nothing else to clear");
         }
         cx.notify();
     }
@@ -314,6 +334,7 @@ impl Crate {
             let started = self.engine.as_ref().filter(|e| !e.is_closed()).map(|e| e.started());
             // What the decoder got through, even if it's closed: never insert before that.
             let decoded = self.engine.as_ref().map(|e| e.started()).unwrap_or(0);
+            let stop0 = self.stop_after;
             let Some(now) = self.now.as_mut() else { return };
             let opened = now.start_idx + decoded;
             let at = if next { (now.idx + 1).max(opened) } else { now.tracks.len() }.min(now.tracks.len());
@@ -326,6 +347,8 @@ impl Crate {
             if now.engine_end > at {
                 now.engine_end += n;
             }
+            // The "stop after" mark stays on its track.
+            self.stop_after = stop0.map(|s| if at <= s { s + n } else { s });
             match started {
                 // No live engine (finished or stopped): nothing to hand over.
                 None => {
@@ -338,6 +361,7 @@ impl Crate {
                 }
                 Some(_) => {
                     // Undo and retry from where the decoder is now.
+                    self.stop_after = stop0;
                     if let Some(now) = self.now.as_mut() {
                         now.tracks.drain(at..at + n);
                         now.orig_order.drain(opos..opos + n);
@@ -358,6 +382,7 @@ impl Crate {
         if let Some(now) = self.now.as_ref()
             && now.finished
             && !now.stopped
+            && !self.stop_after.is_some_and(|s| now.engine_end > s)
         {
             let (all, qid) = (now.tracks.clone(), now.queue_id);
             let missing: Vec<String> = self.missing_gains(&all[at.min(all.len())..(at + 50).min(all.len())], 0);
@@ -466,6 +491,11 @@ impl Crate {
 
     pub(crate) fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
         self.shuffle = !self.shuffle;
+        // The upcoming order is about to change: a stop past the current
+        // track no longer points at what was asked for.
+        if self.stop_after.is_some_and(|s| self.now.as_ref().is_some_and(|n| s > n.idx)) {
+            self.stop_after = None;
+        }
         // Reorder and hand over against the SAME `started`: if the decoder opens a
         // track in between, replace_upcoming fails and we redo it from the new point.
         for _ in 0..5 {
@@ -542,6 +572,10 @@ impl Crate {
     pub(crate) fn repeat_on_finish(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(n) = self.now.as_ref() else { return false };
         if !n.finished || n.stopped {
+            return false;
+        }
+        // Stopped on purpose ("stop after"): no repeat.
+        if self.stop_after.is_some_and(|s| n.engine_end > s) {
             return false;
         }
         match self.repeat {
