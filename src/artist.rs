@@ -193,7 +193,8 @@ impl Crate {
             let t = a.title.to_lowercase();
             let live_title = t == "live"
                 || ["live at ", "live from ", "live in "].iter().any(|p| t.starts_with(p))
-                || ["(live)", "[live]", "(live at", "(live from", "(live in", " - live"].iter().any(|p| t.contains(p));
+                || ["(live)", "[live]", "(live at", "(live from", "(live in"].iter().any(|p| t.contains(p))
+                || t.ends_with(" - live");
             match &kinds {
                 Some((small, _)) if small.contains(&a.rating_key) => 1,
                 Some((_, live)) if live.contains(&a.rating_key) => 2,

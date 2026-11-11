@@ -794,6 +794,12 @@ impl Crate {
     /// A view restored from history may still be waiting on data whose reply
     /// arrived after we'd left it; ask again.
     fn reload_view(&mut self, cx: &mut Context<Self>) {
+        // A similar-albums lookup that failed on the first visit gets another try.
+        if let View::Album { ix, .. } = &self.view
+            && let Some(k) = self.album(*ix).map(|a| a.rating_key.clone())
+        {
+            self.request_sonic_albums(k, cx);
+        }
         match &self.view {
             View::Album { ix, tracks: None } => {
                 let ix = *ix;
@@ -806,11 +812,6 @@ impl Crate {
                 self.request_sonic_artists(key.clone(), cx);
                 if missing {
                     self.load_artist_info(key, cx);
-                }
-            }
-            View::Album { ix, .. } => {
-                if let Some(k) = self.albums.get(*ix).map(|a| a.rating_key.clone()) {
-                    self.request_sonic_albums(k, cx);
                 }
             }
             _ => {}

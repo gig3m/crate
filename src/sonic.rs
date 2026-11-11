@@ -79,7 +79,10 @@ impl Crate {
                     this.artist_kinds.insert(key, Some(kinds));
                     cx.notify();
                 }
-                _ => {
+                other => {
+                    if let Ok(Err(e)) = other {
+                        eprintln!("[crate] album kinds for artist {key}: {e:#}");
+                    }
                     this.artist_kinds.remove(&key);
                 }
             })
