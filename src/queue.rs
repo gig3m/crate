@@ -74,7 +74,13 @@ impl Crate {
         if first > now.tracks.len() {
             return true;
         }
-        let range = if self.repeat == Repeat::One { first..first } else { first..now.tracks.len() };
+        // Repeat-one hands the engine just the current track; if the decoder
+        // hasn't opened it yet (started == 0), it's still upcoming.
+        let range = match self.repeat {
+            Repeat::One if started == 0 => first..(first + 1).min(now.tracks.len()),
+            Repeat::One => first..first,
+            _ => first..now.tracks.len(),
+        };
         let srcs = self.sources(&now.tracks[range.clone()]);
         if !engine.replace_upcoming(started, srcs) {
             return false;

@@ -1019,7 +1019,7 @@ impl Crate {
         // (bounded: Plex answers in tens of ms on a LAN; give up after 1.5 s).
         let tracks = self.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default();
         // Wait only if the tracks about to play are missing gains; earlier ones fill in behind.
-        let mut missing = self.missing_gains(&tracks[start.min(tracks.len())..], 0);
+        let mut missing = self.missing_gains(&tracks[start.min(tracks.len())..(start + 50).min(tracks.len())], 0);
         if missing.is_empty() {
             self.play_from(start, 0, cx);
             if self.leveling != theme::Leveling::Off {
@@ -1055,6 +1055,8 @@ impl Crate {
                 // the engine's unopened tracks (it may have been started by Play).
                 if let Some(n) = this.now.as_ref().filter(|n| n.queue_id == seq) {
                     let (rest, idx) = (n.tracks.clone(), n.idx);
+                    // Apply the gains just received now, not after the rest load.
+                    this.sync_upcoming();
                     this.fill_gains(&rest, idx, cx);
                 }
             })
@@ -1220,9 +1222,12 @@ impl Crate {
                     _ => !now.paused,
                 };
                 if now.finished {
-                    // After a finish (paused stays false), PlayPause means play again.
+                    // After a finish (paused stays false), PlayPause means play again:
+                    // from the top at the end of the queue, else from the current
+                    // track (an error or a radio refill that ran dry mid-queue).
                     if !matches!(t, Transport::Pause) {
-                        self.play_from(0, 0, cx);
+                        let from = if idx + 1 >= n { 0 } else { idx };
+                        self.play_from(from, 0, cx);
                     }
                     return;
                 }
