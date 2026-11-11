@@ -757,7 +757,8 @@ impl Client {
                 title: m["title"].as_str().unwrap_or_default().to_string(),
                 smart: m["smart"].as_bool().unwrap_or(false),
                 count: m["leafCount"].as_u64().unwrap_or(0),
-                thumb: m["composite"].as_str().unwrap_or_default().to_string(),
+                // The playlist's own poster; the auto collage only when there's none.
+                thumb: m["thumb"].as_str().or(m["composite"].as_str()).unwrap_or_default().to_string(),
             })
             .collect())
     }

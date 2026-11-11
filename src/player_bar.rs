@@ -234,9 +234,14 @@ impl Crate {
                     .items_center()
                     .relative()
                     .on_scroll(cx.listener(|this, ev: &gpui::ScrollEvent, _, cx| {
-                        let dy: f32 = ev.delta.pixel_delta(px(20.0)).y.into();
-                        if dy != 0.0 {
-                            this.set_volume(this.volume + if dy > 0.0 { 0.05 } else { -0.05 }, cx);
+                        // One 5% step per ~40 px of scroll (a mouse notch is 20 px
+                        // here; trackpads send many tiny deltas).
+                        let dy: f32 = ev.delta.pixel_delta(px(40.0)).y.into();
+                        this.volume_scroll += dy;
+                        let steps = (this.volume_scroll / 40.0).trunc();
+                        if steps != 0.0 {
+                            this.volume_scroll -= steps * 40.0;
+                            this.set_volume(this.volume + 0.05 * steps, cx);
                         }
                     }))
                     .child(

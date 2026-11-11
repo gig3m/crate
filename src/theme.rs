@@ -82,23 +82,32 @@ pub fn save_mode(mode: Mode) -> std::io::Result<()> {
 pub fn saved_volume() -> f32 {
     let raw = std::fs::read_to_string(config_path()).unwrap_or_default();
     let map: HashMap<String, toml::Value> = toml::from_str(&raw).unwrap_or_default();
-    map.get("volume").and_then(|v| v.as_float()).map(|v| v.clamp(0.0, 1.0) as f32).unwrap_or(1.0)
+    map.get("volume").and_then(|v| v.as_float()).filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0) as f32).unwrap_or(1.0)
 }
 
 pub fn save_volume(v: f32) -> std::io::Result<()> {
     save_key("volume", toml::Value::Float(((v as f64) * 100.0).round() / 100.0))
 }
 
-/// Set one key in ~/.config/crate/config.toml, keeping the others.
+/// Set one key in ~/.config/crate/config.toml, keeping the others. A file
+/// that doesn't parse is left alone (an error, not an empty rewrite), and the
+/// write goes through a temp file and rename so a crash can't truncate it.
 fn save_key(key: &str, value: toml::Value) -> std::io::Result<()> {
     let path = config_path();
-    let raw = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut map: toml::Table = toml::from_str(&raw).unwrap_or_default();
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let mut map: toml::Table =
+        toml::from_str(&raw).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{} doesn't parse: {e}", path.display())))?;
     map.insert(key.into(), value);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&path, toml::to_string(&map).unwrap_or_default())
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, toml::to_string(&map).unwrap_or_default())?;
+    std::fs::rename(&tmp, &path)
 }
 
 fn hex(s: &str) -> Option<u32> {

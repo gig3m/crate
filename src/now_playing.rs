@@ -360,7 +360,7 @@ impl Crate {
                     ("EQ", "Bypassed".into(), false),
                     (
                         "Volume",
-                        if self.volume >= 1.0 { "100% · samples untouched".into() } else { format!("{:.0}% · PipeWire software volume (not bit-perfect)", self.volume * 100.0) },
+                        if self.volume >= 1.0 { "100% · stream samples untouched".into() } else { format!("{:.0}% · PipeWire software volume (not bit-perfect)", self.volume * 100.0) },
                         self.volume >= 1.0,
                     ),
                     ("Output", output, native),
@@ -398,7 +398,7 @@ impl Crate {
                             .text_size(px(12.0))
                             .text_color(if bitperfect { rgb(t.healthy).into() } else { white(0.72) })
                             .child(if bitperfect {
-                                "● bit-perfect: native rate, volume 100%"
+                                "● bit-perfect from Crate: native rate, stream volume 100%"
                             } else if native {
                                 "● native rate · volume below 100% changes the samples"
                             } else {

@@ -116,6 +116,11 @@ struct Crate {
     /// restore when unmuting.
     volume: f32,
     unmute_to: f32,
+    volume_gen: u64,
+    /// Accumulated scroll on the volume slider (trackpads send tiny deltas).
+    volume_scroll: f32,
+    /// Theme previews for Settings, read once when it opens.
+    theme_previews: Option<(Theme, Theme)>,
     /// Album grid order for the current sort/filters (None: the cached list as-is).
     lib_view: Option<Vec<usize>>,
     lib_filters: Vec<library::LibFilter>,
@@ -505,7 +510,10 @@ impl Crate {
             shuffle: false,
             repeat: queue::Repeat::Off,
             volume: theme::saved_volume(),
-            unmute_to: 1.0,
+            unmute_to: if theme::saved_volume() > 0.0 { theme::saved_volume() } else { 0.5 },
+            volume_gen: 0,
+            volume_scroll: 0.0,
+            theme_previews: None,
             lib_view: None,
             lib_filters: Vec::new(),
             lib_sort: library::LibSort::Added,
@@ -1198,6 +1206,9 @@ impl Crate {
 
     /// Set volume (perceptual 0..=1): applied live, saved, reported to MPRIS.
     pub(crate) fn set_volume(&mut self, v: f32, cx: &mut Context<Self>) {
+        if !v.is_finite() {
+            return;
+        }
         let v = (v.clamp(0.0, 1.0) * 100.0).round() / 100.0;
         if v > 0.0 {
             self.unmute_to = v;
@@ -1206,8 +1217,22 @@ impl Crate {
         if let Some(e) = &self.engine {
             e.set_volume(v.powi(3));
         }
-        let _ = theme::save_volume(v);
         let _ = self.mpris.send(MprisUpdate::Volume(v as f64));
+        // Save once the slider settles, not on every scroll step.
+        self.volume_gen += 1;
+        let gen_id = self.volume_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(600)).await;
+            this.update(cx, |this, _| {
+                if this.volume_gen == gen_id
+                    && let Err(e) = theme::save_volume(this.volume)
+                {
+                    this.status = format!("Volume not saved: {e}").into();
+                }
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1709,6 +1734,8 @@ fn main() {
     let (hubs_tx, hubs_rx) = mpsc::unbounded_channel::<HubsRequest>();
     let (artist_tx, artist_rx) = mpsc::unbounded_channel::<ArtistRequest>();
     let mpris_tx = mpris::start(transport_tx);
+    // MPRIS starts at 1.0; tell it the saved level.
+    let _ = mpris_tx.send(MprisUpdate::Volume(theme::saved_volume() as f64));
     let client = plex::Client::new(base, token);
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     let _ = PLEX.set((rt.handle().clone(), client.clone()));

@@ -509,6 +509,9 @@ fn pw_thread(
                 *pw::keys::AUDIO_CHANNELS => "2",
                 "node.rate" => format!("1/{rate}"),
                 "node.latency" => format!("{}/{rate}", rate / 50),
+                // Crate owns its volume (saved in its config); don't let
+                // WirePlumber's restore-stream put back an old level.
+                "state.restore-props" => "false",
             };
             if let Some(t) = &target {
                 props.insert("target.object", t.as_str());
@@ -522,6 +525,14 @@ fn pw_thread(
             let draining = draining.clone();
             let listener = stream
                 .add_local_listener_with_user_data(Rt { cons: cons.clone(), stats: stats.clone() })
+                // A volume set before the format is negotiated is dropped, so
+                // (re)apply it once the stream reaches Paused or Streaming.
+                .state_changed(|stream, rt, _old, new| {
+                    if matches!(new, pw::stream::StreamState::Paused | pw::stream::StreamState::Streaming) {
+                        let v = rt.stats.volume();
+                        let _ = stream.set_control(spa_sys::SPA_PROP_channelVolumes, &[v; CHANNELS]);
+                    }
+                })
                 .process(|stream, rt| {
                     let t0 = Instant::now();
                     if let Ok(t) = stream.time() {

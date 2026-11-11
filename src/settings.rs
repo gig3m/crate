@@ -125,7 +125,7 @@ impl Crate {
                         Mode::Crate,
                         "Crate",
                         "The app's own palette from its design: deep blue-grey layers, white titles, blue, purple and green.",
-                        Th::load(Mode::Crate).0,
+                        self.theme_previews.as_ref().map(|p| p.0.clone()).unwrap_or_else(Th::crate_default),
                         cx,
                     ))
                     .child(option(
@@ -133,7 +133,7 @@ impl Crate {
                         Mode::Omarchy,
                         "Follow Omarchy",
                         "Colors from your current Omarchy theme, updating live when you switch themes.",
-                        Th::load(Mode::Omarchy).0,
+                        self.theme_previews.as_ref().map(|p| p.1.clone()).unwrap_or_else(Th::crate_default),
                         cx,
                     )),
             )
@@ -142,6 +142,8 @@ impl Crate {
 
     pub(crate) fn open_audio_settings(&mut self, cx: &mut Context<Self>) {
         self.go(crate::View::Soon("audio"));
+        use crate::theme::{Mode, Theme as Th};
+        self.theme_previews = Some((Th::load(Mode::Crate).0, Th::load(Mode::Omarchy).0));
         let task = cx.background_spawn(async { read_audio_info() });
         cx.spawn(async move |this, cx| {
             let res = task.await;
