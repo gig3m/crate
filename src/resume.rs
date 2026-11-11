@@ -81,6 +81,7 @@ impl Crate {
         let len = s.tracks[idx].duration_ms;
         let elapsed = if len > 0 && s.elapsed_ms + 5000 >= len { 0 } else { s.elapsed_ms };
         self.shuffle = s.shuffle;
+        let _ = self.mpris.send(crate::mpris::Update::Modes { shuffle: self.shuffle, repeat: self.repeat });
         for t in &s.tracks {
             self.request_thumb(&t.thumb.clone());
         }

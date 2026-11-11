@@ -1887,7 +1887,11 @@ impl Crate {
                     self.status = format!("Audio error: {e}").into();
                     now.finished = true;
                     now.stopped = true;
-                    now.failed_at = Some(now.idx);
+                    // Only a start that never got going; a mid-track failure
+                    // (PipeWire, say) leaves the track to be played again.
+                    if now.elapsed_ms <= now.start_ms + 500 {
+                        now.failed_at = Some(now.idx);
+                    }
                     failed = true;
                 }
                 AudioEvent::FirstAudio { ms_since_play } => {
