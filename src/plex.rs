@@ -506,6 +506,32 @@ impl Client {
         Ok((env.mc.id.unwrap_or(0), env.mc.metadata.into_iter().filter_map(Meta::into_track).collect()))
     }
 
+    /// `n` random tracks matching a filter (`genre=..`, `mood=..`, `album.decade=..`).
+    pub async fn random_tracks(&self, section: &str, filter: &str, n: usize) -> anyhow::Result<Vec<Track>> {
+        let res = self
+            .http
+            .get(format!("{}/library/sections/{section}/all?type=10&{filter}&sort=random", self.base))
+            .header("Accept", "application/json")
+            .header("X-Plex-Token", &self.token)
+            .header("X-Plex-Container-Start", "0")
+            .header("X-Plex-Container-Size", n.to_string())
+            .send()
+            .await?;
+        anyhow::ensure!(res.status().is_success(), "random tracks -> {}", res.status());
+        let env: Envelope = res.json().await.context("random tracks")?;
+        Ok(env.mc.metadata.into_iter().filter_map(Meta::into_track).collect())
+    }
+
+    /// Progress (percent) of the server's sonic analysis, if it's running.
+    pub async fn sonic_progress(&self) -> anyhow::Result<Option<u32>> {
+        let v: serde_json::Value = self.get("/activities").await?.json().await.context("activities")?;
+        Ok(v["MediaContainer"]["Activity"]
+            .as_array()
+            .and_then(|a| a.iter().find(|x| x["type"].as_str() == Some("media.generate.music.analysis")))
+            .and_then(|x| x["progress"].as_u64())
+            .map(|p| p as u32))
+    }
+
     /// The first `limit` tracks of a playlist.
     pub async fn playlist_tracks(&self, rating_key: &str, limit: usize) -> anyhow::Result<Vec<Track>> {
         let res = self

@@ -17,7 +17,7 @@ fn ago(ts: i64) -> String {
 }
 
 /// One-line descriptions for Plex's built-in stations.
-fn station_blurb(title: &str) -> &'static str {
+pub(crate) fn station_blurb(title: &str) -> &'static str {
     match title {
         "Library Radio" => "Your whole library, mixed",
         "Deep Cuts Radio" => "Album tracks you rarely play",
@@ -28,19 +28,19 @@ fn station_blurb(title: &str) -> &'static str {
 }
 
 impl Aulos {
-    /// Start a Plex station (`/library/sections/N/stations/M`).
+    /// Start a Plex station (`/library/sections/N/stations/M`), radio key, or
+    /// `query:<filter>` random radio; it refills as it runs low.
     pub(crate) fn play_station(&mut self, key: String, title: String, cx: &mut Context<Self>) {
         self.status = format!("Starting {title}…").into();
         cx.notify();
-        let key2 = key.clone();
-        let rx = crate::plex_call(move |c| async move { c.play_queue(&key).await });
+        let rx = crate::fetch_more(key.clone());
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| match res {
-                Ok(Ok((_id, tracks))) if !tracks.is_empty() => {
+                Ok(Ok(tracks)) if !tracks.is_empty() => {
                     this.start_queue(title, None, tracks, 0, cx);
                     if let Some(n) = this.now.as_mut() {
-                        n.refill = Some(key2);
+                        n.refill = Some(key);
                     }
                 }
                 Ok(Ok(_)) => this.status = format!("{title} returned no tracks").into(),

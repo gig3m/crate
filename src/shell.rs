@@ -52,6 +52,9 @@ impl Aulos {
             (View::Soon(a), View::Soon(b)) => a == b,
             (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
         };
+        if id == "stations" {
+            self.refresh_sonic_progress(cx);
+        }
         if !same || id == "albums" {
             self.go(v);
         }

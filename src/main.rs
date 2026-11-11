@@ -18,6 +18,7 @@ mod mpris;
 mod now_playing;
 mod player_bar;
 mod shell;
+mod stations;
 mod plex;
 mod theme;
 
@@ -110,6 +111,8 @@ struct Aulos {
     /// Full-window Now Playing, and its panel tab (queue / signal / info).
     now_playing: bool,
     np_tab: usize,
+    /// Server sonic analysis progress, for the Stations page.
+    sonic_progress: Option<u32>,
     /// Album rating key -> details (None while loading).
     album_detail: HashMap<String, Option<plex::AlbumDetail>>,
     focus: gpui::FocusHandle,
@@ -273,6 +276,13 @@ impl Aulos {
                                 this.add_filter(library::LibFilter { kind, label: label.into(), query: query.into() }, cx);
                             }
                         }
+                        if std::env::var_os("AULOS_STATIONS").is_some() {
+                            this.go(View::Soon("stations"));
+                            this.refresh_sonic_progress(cx);
+                        }
+                        if let Ok(q) = std::env::var("AULOS_QUERY_RADIO") {
+                            this.play_station(format!("query:{q}"), "Test radio".into(), cx);
+                        }
                         if let Ok(key) = std::env::var("AULOS_RADIO") {
                             this.play_radio(&key, "Radio".into(), cx);
                         }
@@ -402,6 +412,7 @@ impl Aulos {
             pal_scope: 0,
             test_search: std::env::var("AULOS_SEARCH").ok(),
             now_playing: std::env::var_os("AULOS_NOW_PLAYING").is_some(),
+            sonic_progress: None,
             np_tab: std::env::var("AULOS_NP_TAB").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             album_detail: HashMap::new(),
             fwd: Vec::new(),
@@ -832,14 +843,14 @@ impl Aulos {
             && now.idx + 2 >= now.tracks.len()
         {
             now.refilling = true;
-            let rx = plex_call(move |c| async move { c.play_queue(&key).await });
+            let rx = fetch_more(key);
             cx.spawn(async move |this, cx| {
                 let res = rx.await;
                 this.update(cx, |this, cx| {
                     let Some(now) = this.now.as_mut() else { return };
                     now.refilling = false;
                     match res {
-                        Ok(Ok((_, more))) => {
+                        Ok(Ok(more)) => {
                             let have: HashSet<String> = now.tracks.iter().map(|t| t.rating_key.clone()).collect();
                             let more: Vec<Track> = more.into_iter().filter(|t| !have.contains(&t.rating_key)).collect();
                             if more.is_empty() {
@@ -1170,6 +1181,7 @@ impl Render for Aulos {
                                     self.artist_view(&key, &name, info.as_ref(), &t, cx)
                                 }
                                 View::Library => grid.into_any_element(),
+                                View::Soon("stations") => self.stations_view(&t, cx),
                                 View::Soon(name) => self.soon_view(name, &t),
                                 View::Album { ix, tracks } => {
                                     let (ix, tracks) = (*ix, tracks.clone());
@@ -1202,6 +1214,20 @@ where
         let _ = tx.send(fut.await);
     });
     rx
+}
+
+/// More tracks for a radio: a Plex station/radio key, or `query:<filter>`
+/// for random tracks matching a library filter.
+fn fetch_more(key: String) -> tokio::sync::oneshot::Receiver<anyhow::Result<Vec<Track>>> {
+    plex_call(move |c| async move {
+        match key.strip_prefix("query:") {
+            Some(filter) => {
+                let section = std::env::var("PLEX_SECTION").unwrap_or_else(|_| "5".into());
+                c.random_tracks(&section, filter, 100).await
+            }
+            None => c.play_queue(&key).await.map(|(_, t)| t),
+        }
+    })
 }
 
 fn main() {
