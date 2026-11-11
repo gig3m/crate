@@ -120,7 +120,7 @@ impl Crate {
             .child(div().flex().flex_wrap().gap(px(6.0)).children(chips))
             .child(div().pt(px(6.0)).flex().gap(px(4.0)).opacity(if cur == EqPreset::Off { 0.45 } else { 1.0 }).children(bands))
             .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(if active {
-                "Heard right away. Changes the samples. A preamp takes off the biggest boost and a soft knee rounds any peak past 0.95 instead of clipping it."
+                "Heard right away. Changes the samples. A preamp takes off the biggest boost and a soft knee rounds any peak past 0.98 instead of clipping it."
             } else {
                 "Off: bypassed, samples untouched (bit-perfect). Moving a slider switches to Custom."
             }))

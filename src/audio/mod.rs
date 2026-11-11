@@ -228,7 +228,8 @@ impl Engine {
     }
 
     /// Set the ten-band EQ (dB per band; all zero = bypassed, bit-perfect).
-    /// Takes effect on the next audio cycle.
+    /// Takes effect on the next audio cycle. Single writer: call it from one
+    /// thread (the app's UI thread); the RT reader's seqlock assumes that.
     pub fn set_eq(&self, gains: [f32; 10]) {
         let gains = gains.map(|g| if g.is_finite() { g.clamp(-12.0, 12.0) } else { 0.0 });
         let pre = eq::preamp(&gains);
