@@ -24,7 +24,9 @@ pub enum Source {
     /// decision); `{session}` in both URLs becomes a fresh id per open.
     /// `len_ms` overrides the container's length, for streams that don't
     /// carry a reliable one (Plex's transcoded MP3 has no Xing header).
-    Http { url: String, token: String, cache: PathBuf, prepare: Option<String>, len_ms: Option<u64> },
+    /// `start_ms` > 0: a transcode Plex starts at that point of the track
+    /// (a seek), so the stream's first sample is there, not at 0:00.
+    Http { url: String, token: String, cache: PathBuf, prepare: Option<String>, len_ms: Option<u64>, start_ms: u64 },
 }
 
 impl Source {
@@ -35,6 +37,36 @@ impl Source {
                 format!("plex:{}", cache.file_name().unwrap_or_default().to_string_lossy())
             }
         }
+    }
+
+    /// Where in the track this source's first sample is (0 unless it's a
+    /// transcode started at a seek point).
+    pub fn start_ms(&self) -> u64 {
+        match self {
+            Source::Http { start_ms, .. } => *start_ms,
+            Source::File(_) => 0,
+        }
+    }
+
+    /// The same transcode, started by Plex at `ms` (rounded down to whole
+    /// seconds) instead of 0:00, so a seek doesn't wait for the encode to
+    /// reach it. None for direct play, or when the whole track is cached.
+    pub fn starting_at(&self, ms: u64) -> Option<Source> {
+        let Source::Http { url, token, cache, prepare: Some(prepare), len_ms, .. } = self else { return None };
+        let secs = ms / 1000;
+        if secs == 0 || cache.exists() || !url.contains("&offset=0&") {
+            return None;
+        }
+        let at = format!("&offset={secs}&");
+        Some(Source::Http {
+            url: url.replace("&offset=0&", &at),
+            token: token.clone(),
+            // Its own name: a partial stream must never pass for the track.
+            cache: cache.with_extension(format!("at{secs}.ogg")),
+            prepare: Some(prepare.replace("&offset=0&", &at)),
+            len_ms: *len_ms,
+            start_ms: secs * 1000,
+        })
     }
 
     /// Known length, when the container's own can't be trusted.

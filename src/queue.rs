@@ -77,6 +77,7 @@ impl Crate {
                 cache: crate::plex::audio_cache_dir().join(format!("part-{id}.tx{kbps}.ogg")),
                 prepare: Some(format!("{base}/music/:/transcode/universal/decision?{q}")),
                 len_ms: (t.duration_ms > 0).then_some(t.duration_ms),
+                start_ms: 0,
             };
         }
         let ext = t.part_key.rsplit('.').next().unwrap_or("bin").to_string();
@@ -86,6 +87,7 @@ impl Crate {
             cache: crate::plex::audio_cache_dir().join(format!("part-{id}.{ext}")),
             prepare: None,
             len_ms: None,
+            start_ms: 0,
         }
     }
 

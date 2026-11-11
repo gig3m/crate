@@ -705,10 +705,19 @@ fn decoder_thread(
         // pre-roll, so seek 80 ms early and drop what that decodes (RFC 7845
         // §4.6), letting the decoder settle before audio is heard.
         let ogg_opus = params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS && src.ext().as_deref() == Some("ogg");
-        let preroll_ms = if ogg_opus && index == 0 { start_ms.min(80) } else { 0 };
+        // A transcode Plex started at the seek point (whole seconds): no
+        // seek; the part of a second before the target is dropped instead.
+        let src_start = if index == 0 { src.start_ms().min(start_ms) } else { 0 };
+        let preroll_ms = if src_start > 0 {
+            start_ms - src_start
+        } else if ogg_opus && index == 0 {
+            start_ms.min(80)
+        } else {
+            0
+        };
         let mut preroll_frames = (preroll_ms * rate as u64 / 1000) as usize;
         // Seeking to (or pre-rolling back to) 0 is just playing from the start.
-        let seeked = index == 0 && start_ms > preroll_ms;
+        let seeked = index == 0 && src_start == 0 && start_ms > preroll_ms;
         if seeked {
             use symphonia::core::formats::{SeekMode, SeekTo};
             use symphonia::core::units::Time;

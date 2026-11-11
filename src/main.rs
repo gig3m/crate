@@ -1688,7 +1688,15 @@ impl Crate {
         }
         self.engine = None; // dropping stops the old one
         let range = self.engine_slice(&self.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default(), idx);
-        let queue = self.sources(&self.now.as_ref().map(|n| n.tracks[range.clone()].to_vec()).unwrap_or_default(), None);
+        let mut queue = self.sources(&self.now.as_ref().map(|n| n.tracks[range.clone()].to_vec()).unwrap_or_default(), None);
+        // A seek into a transcoded track that isn't cached: Plex starts the
+        // encode there rather than from 0:00.
+        if ms > 0
+            && let Some(first) = queue.first_mut()
+            && let Some(at) = first.src.starting_at(ms)
+        {
+            first.src = at;
+        }
         let eq = self.eq_gains();
         let Some(now) = self.now.as_mut() else { return };
         match Engine::play_from(queue, ms, self.target.clone()) {
@@ -2829,8 +2837,13 @@ pub(crate) static REMOTE: std::sync::OnceLock<bool> = std::sync::OnceLock::new()
 /// The bitrate in a transcoded stream's engine label (`…part-<id>.tx<kbps>.ogg`,
 /// or `.mp3` from before Opus).
 fn transcoded_kbps(label: &str) -> Option<u32> {
+    // `part-<id>.tx<kbps>.ogg`, or `.tx<kbps>.at<secs>.ogg` for a transcode
+    // started at a seek point.
     let rest = label.rsplit_once(".tx")?.1;
-    rest.strip_suffix(".ogg").or_else(|| rest.strip_suffix(".mp3"))?.parse().ok()
+    if !(rest.ends_with(".ogg") || rest.ends_with(".mp3")) {
+        return None;
+    }
+    rest.split('.').next()?.parse().ok()
 }
 
 pub(crate) fn section() -> String {
@@ -3229,5 +3242,6 @@ mod transcode_tests {
         assert_eq!(super::transcoded_kbps("plex:part-46213.flac"), None);
         assert_eq!(super::transcoded_kbps("plex:part-46213.mp3"), None);
         assert_eq!(super::transcoded_kbps("song.txt.mp3"), None);
+        assert_eq!(super::transcoded_kbps("plex:part-46213.tx192.at150.ogg"), Some(192));
     }
 }

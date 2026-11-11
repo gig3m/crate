@@ -30,7 +30,7 @@ fn main() -> anyhow::Result<()> {
             let token = std::env::var("PLEX_TOKEN").expect("PLEX_TOKEN for plex: items");
             let parts: Vec<&str> = path.split('/').collect();
             let name = format!("part-{}.{}", parts.get(3).unwrap_or(&"x"), path.rsplit('.').next().unwrap());
-            queue.push(Source::Http { url: format!("{base}{path}"), token, cache: cache_dir.join(name), prepare: None, len_ms: None });
+            queue.push(Source::Http { url: format!("{base}{path}"), token, cache: cache_dir.join(name), prepare: None, len_ms: None, start_ms: 0 });
         } else {
             queue.push(Source::File(PathBuf::from(a)));
         }
