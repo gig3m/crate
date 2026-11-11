@@ -379,7 +379,11 @@ impl Crate {
                         .flex_col()
                         .gap(px(12.0))
                         .child(div().text_size(px(20.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child("Couldn't load Home"))
-                        .child(div().text_size(px(13.0)).text_color(rgb(t.text2)).child(err))
+                        .child(div().text_size(px(13.0)).text_color(rgb(t.text2)).child(if err.contains("Connect") || err.contains("timed out") || err.contains("dns error") {
+                            "Can't reach your Plex server. Albums you keep offline still play: see Offline.".to_string()
+                        } else {
+                            err
+                        }))
                         .child(div().text_size(px(13.0)).text_color(rgb(t.muted)).child(if self.home_loading { "Trying again…" } else { "Crate keeps trying in the background." }))
                         .child(
                             div()

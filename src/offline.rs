@@ -22,6 +22,53 @@ pub struct KeptTrack {
     pub rating_key: String,
     pub part_key: String,
     pub title: String,
+    /// Enough to play the album with the server unreachable (older index
+    /// entries lack these until the album is next loaded from the server).
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub track_no: u32,
+    #[serde(default)]
+    pub disc: u32,
+}
+
+impl KeptTrack {
+    fn from_track(t: &Track) -> Self {
+        KeptTrack {
+            rating_key: t.rating_key.clone(),
+            part_key: t.part_key.clone(),
+            title: t.title.clone(),
+            artist: t.artist.clone(),
+            duration_ms: t.duration_ms,
+            track_no: t.track_no,
+            disc: t.disc,
+        }
+    }
+}
+
+impl KeptAlbum {
+    /// The album's tracks from the index, for playing without the server.
+    pub fn to_tracks(&self) -> Vec<Track> {
+        self.tracks
+            .iter()
+            .map(|k| Track {
+                rating_key: k.rating_key.clone(),
+                title: k.title.clone(),
+                artist: if k.artist.is_empty() { self.artist.clone() } else { k.artist.clone() },
+                album_artist: self.artist.clone(),
+                duration_ms: k.duration_ms,
+                part_key: k.part_key.clone(),
+                album_key: self.key.clone(),
+                album_title: self.title.clone(),
+                thumb: self.thumb.clone(),
+                track_no: k.track_no,
+                disc: k.disc,
+                playlist_item: 0,
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -235,7 +282,7 @@ impl Crate {
             tracks: tracks
                 .iter()
                 .filter(|t| file_for(&t.part_key).is_some())
-                .map(|t| KeptTrack { rating_key: t.rating_key.clone(), part_key: t.part_key.clone(), title: t.title.clone() })
+                .map(KeptTrack::from_track)
                 .collect(),
             complete: false,
             bytes: 0,
@@ -251,6 +298,28 @@ impl Crate {
         self.offline.queue.push_back(album.rating_key);
         self.pump_offline(cx);
         cx.notify();
+    }
+
+    /// Fill in kept tracks' details from a fresh server listing (albums kept
+    /// before the index carried them).
+    pub(crate) fn refresh_kept_details(&mut self, album_key: &str, tracks: &[Track]) {
+        let Some(a) = self.offline.index.albums.iter_mut().find(|a| a.key == album_key) else { return };
+        let mut changed = false;
+        for k in &mut a.tracks {
+            if let Some(t) = tracks.iter().find(|t| t.rating_key == k.rating_key) {
+                let fresh = KeptTrack::from_track(t);
+                if (fresh.artist.as_str(), fresh.duration_ms, fresh.track_no, fresh.disc) != (k.artist.as_str(), k.duration_ms, k.track_no, k.disc) {
+                    k.artist = fresh.artist;
+                    k.duration_ms = fresh.duration_ms;
+                    k.track_no = fresh.track_no;
+                    k.disc = fresh.disc;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.save_offline();
+        }
     }
 
     pub(crate) fn remove_offline(&mut self, key: &str, cx: &mut Context<Self>) {

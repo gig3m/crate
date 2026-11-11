@@ -917,12 +917,22 @@ impl Crate {
         cx.spawn(async move |this, cx| {
             match rx.await {
                 Ok(Ok(t)) => {
-                    this.update(cx, |this, cx| f(this, album, t, cx)).ok();
+                    this.update(cx, |this, cx| {
+                        this.refresh_kept_details(&album.rating_key, &t);
+                        f(this, album, t, cx)
+                    })
+                    .ok();
                 }
                 Ok(Err(e)) => {
                     eprintln!("[crate] tracks: {e:#}");
                     let title = album.title.clone();
                     this.update(cx, |this, cx| {
+                        // Kept offline: play the copy on disk without the server.
+                        if let Some(kept) = this.offline.index.get(&album.rating_key).filter(|k| k.complete).cloned() {
+                            this.say(format!("Server unreachable: using the offline copy of {title}"));
+                            f(this, album, kept.to_tracks(), cx);
+                            return;
+                        }
                         this.status = format!("Couldn't load {title}: {e:#}").into();
                         cx.notify();
                     })
