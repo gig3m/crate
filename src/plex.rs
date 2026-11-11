@@ -1212,7 +1212,7 @@ impl Client {
                 if t["grandparentRatingKey"].as_str() == Some(key) {
                     continue;
                 }
-                let credited = t["originalTitle"].as_str().is_some_and(|o| credit_names(o).contains(&lname))
+                let credited = t["originalTitle"].as_str().is_some_and(|o| credit_has(&o.to_lowercase(), &lname))
                     || t["title"].as_str().is_some_and(|s| title_credits(s, &lname));
                 if credited
                     && let Some(album) = t["parentRatingKey"].as_str()
@@ -1276,55 +1276,71 @@ impl Client {
     }
 }
 
-/// Names in a track-artist credit: "A, B & C feat. D" -> [a, b, c, d].
-fn credit_names(credit: &str) -> Vec<String> {
-    let mut s = credit.to_lowercase();
-    for sep in [" feat. ", " feat ", " ft. ", " featuring ", " & ", " and ", " x ", " with ", "; ", " / ", "/", ", "] {
-        s = s.replace(sep, "\u{1}");
+/// `name` (lowercase) appears in `credit` (lowercase) as a whole credited
+/// name: preceded by the start or a credit separator and followed by the end
+/// or one. Works for names that contain separators themselves ("earth, wind
+/// & fire", "ac/dc"), and checks every occurrence ("drakeo & drake").
+fn credit_has(credit: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
     }
-    s.split('\u{1}').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect()
+    const BEFORE: [&str; 11] = [", ", "& ", " and ", " x ", "/", "; ", "(", "[", "feat. ", "ft. ", "featuring "];
+    const AFTER: [&str; 12] = [",", " & ", " and ", " x ", "/", ";", ")", "]", " feat", " ft.", " with ", " - "];
+    credit.match_indices(name).any(|(i, _)| {
+        let (pre, post) = (&credit[..i], &credit[i + name.len()..]);
+        let pre_ok = pre.trim_end().is_empty() || BEFORE.iter().any(|b| pre.ends_with(b)) || pre.ends_with("with ");
+        let post_ok = post.trim().is_empty() || AFTER.iter().any(|a| post.starts_with(a));
+        pre_ok && post_ok
+    })
 }
 
 /// A title credits `name` (lowercase) as a guest: "(feat. Name)", "[ft. Name]",
-/// "- feat. Name", ending the credit list after the name; a bare "with"
-/// only inside brackets ("(with Name)"), since "Stay with Me" isn't a credit.
+/// "- feat. Name", the name anywhere in that credit list; a bare "with" only
+/// inside brackets ("(with Name)"), since "Stay with Me" isn't a credit.
 fn title_credits(title: &str, name: &str) -> bool {
     let t = title.to_lowercase();
-    let boundary = |rest: &str| {
-        rest.is_empty() || rest.starts_with(')') || rest.starts_with(']') || rest.starts_with(',') || rest.starts_with(" &") || rest.starts_with(" and ") || rest.starts_with(" x ")
-    };
-    let mut hits = Vec::new();
+    let mut starts = Vec::new();
     for f in ["feat. ", "feat ", "ft. ", "featuring "] {
-        hits.extend(t.match_indices(f).map(|(i, _)| i + f.len()));
+        for (i, _) in t.match_indices(f) {
+            // A word boundary before the marker ("defeat " isn't one).
+            if i == 0 || t[..i].ends_with([' ', '(', '[', '-']) {
+                starts.push(i + f.len());
+            }
+        }
     }
     for f in ["(with ", "[with "] {
-        hits.extend(t.match_indices(f).map(|(i, _)| i + f.len()));
+        starts.extend(t.match_indices(f).map(|(i, _)| i + f.len()));
     }
-    hits.into_iter().any(|start| {
-        // The name may be any one of a credit list: "feat. A, B & Name".
+    starts.into_iter().any(|start| {
+        // The credit runs to a closing bracket or a " - " suffix.
         let tail = &t[start..];
-        let end = tail.find([')', ']']).unwrap_or(tail.len());
-        credit_names(&tail[..end]).iter().any(|n| n == name) && {
-            let at = tail.find(name).map(|i| i + name.len()).unwrap_or(0);
-            boundary(&tail[at..])
-        }
+        let end = [tail.find([')', ']']), tail.find(" - ")].into_iter().flatten().min().unwrap_or(tail.len());
+        credit_has(&tail[..end], name)
     })
 }
 
 #[cfg(test)]
 mod credit_tests {
-    use super::{credit_names, title_credits};
+    use super::{credit_has, title_credits};
 
     #[test]
     fn credits() {
-        assert_eq!(credit_names("Jay-Z & Kanye West feat. Frank Ocean"), vec!["jay-z", "kanye west", "frank ocean"]);
+        assert!(credit_has("jay-z & kanye west feat. frank ocean", "kanye west"));
+        assert!(credit_has("earth, wind & fire", "earth, wind & fire"));
+        assert!(credit_has("ac/dc", "ac/dc"));
+        assert!(!credit_has("blair", "air"));
+        assert!(!credit_has("drake bell", "drake"));
         assert!(title_credits("Home (feat. Jon Batiste)", "jon batiste"));
         assert!(title_credits("Song (feat. A, B & Jon Batiste)", "jon batiste"));
+        assert!(title_credits("September (feat. Earth, Wind & Fire)", "earth, wind & fire"));
+        assert!(title_credits("Song (feat. Tyler, The Creator)", "tyler, the creator"));
+        assert!(title_credits("Song (feat. Drakeo & Drake)", "drake"));
+        assert!(title_credits("Song - feat. Common - Remastered", "common"));
         assert!(!title_credits("Track (feat. Drakeo the Ruler)", "drake"));
         assert!(!title_credits("Stay with Me", "me"));
         assert!(!title_credits("To Sir with Love", "love"));
+        assert!(!title_credits("Defeat Me", "me"));
         assert!(title_credits("Glory (with Common)", "common"));
-        assert!(!credit_names("Blair").contains(&"air".to_string()));
     }
 }
 

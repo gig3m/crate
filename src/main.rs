@@ -1003,9 +1003,13 @@ impl Crate {
             }
             View::Artist { key, info, .. } => {
                 let (key, missing) = (key.clone(), info.is_none());
+                let title = info.as_ref().map(|i| i.title.clone());
                 // Lookups that failed on the first visit get another try.
                 self.request_artist_kinds(key.clone(), cx);
                 self.request_sonic_artists(key.clone(), cx);
+                if let Some(title) = title {
+                    self.request_appears_on(key.clone(), title, cx);
+                }
                 if missing {
                     self.load_artist_info(key, cx);
                 }
