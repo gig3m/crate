@@ -94,15 +94,22 @@ impl Crate {
         for k in &keys {
             self.edition_formats.insert(k.clone(), (0, String::new()));
         }
+        let pending = keys.clone();
         let rx = crate::plex_call(move |c| async move { c.edition_info(keys).await });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(found)) = rx.await {
-                this.update(cx, |this, cx| {
-                    this.edition_formats.extend(found.into_iter().map(|(k, n, f)| (k, (n, f))));
-                    cx.notify();
-                })
-                .ok();
-            }
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                // Drop the placeholders, then keep only real answers, so a failed or
+                // empty fetch is retried the next time the album opens.
+                for k in &pending {
+                    this.edition_formats.remove(k);
+                }
+                if let Ok(Ok(found)) = res {
+                    this.edition_formats.extend(found.into_iter().filter(|(_, n, f)| *n > 0 || !f.is_empty()).map(|(k, n, f)| (k, (n, f))));
+                }
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -567,49 +574,72 @@ impl Crate {
     }
 }
 
-/// An album title without bracketed suffixes, lowercased: "By the Way
-/// (Deluxe Edition)" and "By the Way" share "by the way".
-fn edition_base(title: &str) -> String {
-    let mut out = String::new();
-    let mut depth = 0i32;
-    for c in title.chars() {
-        match c {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = (depth - 1).max(0),
-            _ if depth == 0 => out.push(c),
-            _ => {}
+/// Words that mark a release variant rather than a different record.
+const EDITION_WORDS: [&str; 17] = [
+    "deluxe", "edition", "version", "remaster", "anniversary", "expanded", "bonus", "special", "standard", "reissue", "collector",
+    "mono", "stereo", "explicit", "clean", "redux", "legacy",
+];
+
+/// Split trailing edition markers off a title: "(Deluxe Edition)",
+/// "[Remastered]", " - Remastered 2009", ": Special Edition". Only segments
+/// with an edition word count, so "Weezer (Blue Album)" stays its own record.
+/// Returns (base, markers in title order).
+fn edition_split(title: &str) -> (String, Vec<String>) {
+    let mut rest = title.trim().to_string();
+    let mut marks = Vec::new();
+    loop {
+        let is_edition = |s: &str| {
+            let l = s.to_lowercase();
+            EDITION_WORDS.iter().any(|w| l.contains(w))
+        };
+        // A trailing bracketed group, matched from its closing bracket.
+        let bracket = rest.chars().last().filter(|c| matches!(c, ')' | ']')).and_then(|close| {
+            let open = if close == ')' { '(' } else { '[' };
+            let mut depth = 0;
+            for (i, c) in rest.char_indices().rev() {
+                if c == close {
+                    depth += 1;
+                } else if c == open {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+            }
+            None
+        });
+        if let Some(i) = bracket {
+            let inner = rest[i + 1..rest.len() - 1].trim().to_string();
+            if is_edition(&inner) {
+                marks.push(inner);
+                rest = rest[..i].trim().to_string();
+                continue;
+            }
+            break;
         }
+        // A " - suffix" or ": suffix".
+        if let Some((i, sep)) = [" - ", ": "].iter().filter_map(|sep| rest.rfind(sep).map(|i| (i, sep.len()))).max_by_key(|(i, _)| *i) {
+            let suffix = rest[i + sep..].trim().to_string();
+            if is_edition(&suffix) && i > 0 {
+                marks.push(suffix);
+                rest = rest[..i].trim().to_string();
+                continue;
+            }
+        }
+        break;
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    marks.reverse();
+    (rest.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase(), marks)
 }
 
-/// What makes an edition different: its bracketed suffixes, or "Original".
+fn edition_base(title: &str) -> String {
+    edition_split(title).0
+}
+
+/// What makes an edition different: its markers, or "Original".
 fn edition_label(title: &str) -> String {
-    let mut parts = Vec::new();
-    let mut cur = String::new();
-    let mut depth = 0i32;
-    for c in title.chars() {
-        match c {
-            '(' | '[' => {
-                if depth > 0 {
-                    cur.push(c);
-                }
-                depth += 1;
-            }
-            ')' | ']' => {
-                depth = (depth - 1).max(0);
-                if depth == 0 {
-                    parts.push(std::mem::take(&mut cur).trim().to_string());
-                } else {
-                    cur.push(c);
-                }
-            }
-            _ if depth > 0 => cur.push(c),
-            _ => {}
-        }
-    }
-    let parts: Vec<String> = parts.into_iter().filter(|p| !p.is_empty()).collect();
-    if parts.is_empty() { "Original".into() } else { parts.join(" · ") }
+    let marks = edition_split(title).1;
+    if marks.is_empty() { "Original".into() } else { marks.join(" · ") }
 }
 
 #[cfg(test)]
@@ -623,6 +653,17 @@ mod edition_tests {
         assert_eq!(edition_label("By the Way (Deluxe Edition)"), "Deluxe Edition");
         assert_eq!(edition_label("Diorama [Remastered] (U.S. Version)"), "Remastered · U.S. Version");
         assert_eq!(edition_label("Hoobastank"), "Original");
-        assert_eq!(edition_base("(What's the Story) Morning Glory?"), "morning glory?");
+        // Different records that only differ in brackets stay apart.
+        assert_eq!(edition_base("Weezer (Blue Album)"), "weezer (blue album)");
+        assert_ne!(edition_base("Weezer (Green Album)"), edition_base("Weezer"));
+        assert_eq!(edition_base("(What's the Story) Morning Glory?"), "(what's the story) morning glory?");
+        // Dash and colon suffixes.
+        assert_eq!(edition_base("Abbey Road - Remastered 2009"), "abbey road");
+        assert_eq!(edition_label("Abbey Road - Remastered 2009"), "Remastered 2009");
+        assert_eq!(edition_base("Nevermind: Deluxe Edition"), "nevermind");
+        // Unbalanced or non-edition brackets don't make a fake edition.
+        assert_eq!(edition_label("Live (Live"), "Original");
+        assert_eq!(edition_base("Live (Live"), "live (live");
+        assert_eq!(edition_label("Favourite Worst Nightmare (Standard Version)"), "Standard Version");
     }
 }
