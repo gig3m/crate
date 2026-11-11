@@ -160,10 +160,15 @@ impl Crate {
                 match res {
                     Ok(Ok(())) => {
                         this.say(format!("Renamed to \u{201c}{title}\u{201d}"));
-                        if let View::Playlist { key: cur, title: t, .. } = &mut this.view
-                            && *cur == key
-                        {
-                            *t = title.clone();
+                        for v in std::iter::once(&mut this.view).chain(this.back.iter_mut()).chain(this.fwd.iter_mut()) {
+                            if let View::Playlist { key: cur, title: t, detail } = v
+                                && *cur == key
+                            {
+                                *t = title.clone();
+                                if let Some(d) = detail {
+                                    Arc::make_mut(d).title = title.clone();
+                                }
+                            }
                         }
                         this.forget_playlist_history(&key);
                         if matches!(&this.view, View::Playlist { key: cur, .. } if *cur == key) {
@@ -189,26 +194,47 @@ impl Crate {
     /// Delete takes two clicks: the first arms it for a few seconds.
     fn delete_playlist_clicked(&mut self, key: String, title: String, cx: &mut Context<Self>) {
         let armed = self.playlist_delete_armed.as_ref().is_some_and(|(k, at)| *k == key && at.elapsed() < std::time::Duration::from_secs(4));
+        if self.playlist_busy {
+            self.say("Still saving the last playlist change…");
+            return;
+        }
         if !armed {
             self.playlist_delete_armed = Some((key, std::time::Instant::now()));
             self.say(format!("Click Delete again to delete \u{201c}{title}\u{201d} (its tracks stay in your library)"));
+            // Repaint when the arm runs out, so the button reads Delete again.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(4050)).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
             cx.notify();
             return;
         }
         self.playlist_delete_armed = None;
+        self.playlist_busy = true;
         let k = key.clone();
         let rx = crate::plex_call(move |c| async move { c.delete_playlist(&k).await });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| {
+                this.playlist_busy = false;
                 match res {
                     Ok(Ok(())) => {
                         this.say(format!("Deleted \u{201c}{title}\u{201d}"));
-                        // Drop it from history, and leave its page.
-                        this.back.retain(|v| !matches!(v, View::Playlist { key: k, .. } if *k == key));
-                        this.fwd.retain(|v| !matches!(v, View::Playlist { key: k, .. } if *k == key));
-                        if matches!(&this.view, View::Playlist { key: cur, .. } if *cur == key) {
-                            this.view = View::Soon("playlists");
+                        // Drop it from history, and leave its page (closing a
+                        // naming bar opened there) for the Playlists page.
+                        let gone = |v: &View| matches!(v, View::Playlist { key: k, .. } if *k == key);
+                        this.back.retain(|v| !gone(v));
+                        this.fwd.retain(|v| !gone(v));
+                        if gone(&this.view) {
+                            if matches!(this.back.last(), Some(View::Soon("playlists"))) {
+                                this.go_back_pub(cx);
+                            } else {
+                                this.go_pub(View::Soon("playlists"));
+                            }
+                            // Navigating pushed the deleted page into history.
+                            this.back.retain(|v| !gone(v));
+                            this.fwd.retain(|v| !gone(v));
                         }
                         this.reload_playlists(cx);
                     }

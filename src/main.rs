@@ -1016,6 +1016,14 @@ impl Crate {
         });
     }
 
+    pub(crate) fn go_pub(&mut self, v: View) {
+        self.go(v);
+    }
+
+    pub(crate) fn go_back_pub(&mut self, cx: &mut Context<Self>) {
+        self.go_back(cx);
+    }
+
     /// Navigate, recording history.
     fn go(&mut self, v: View) {
         let old = std::mem::replace(&mut self.view, v);
