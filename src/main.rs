@@ -110,6 +110,8 @@ struct Crate {
     playlist_load_gen: u64,
     /// (playlist key, error) when its page failed to load.
     playlist_error: Option<(String, String)>,
+    /// Playlist item ids being removed: kept off any page load meanwhile.
+    playlist_removing: HashSet<u64>,
     /// A queue waiting on loudness before it starts (its queue_seq); cleared
     /// by any transport action or explicit start, which supersede it.
     pending_start: Option<u64>,
@@ -719,6 +721,7 @@ impl Crate {
             playlist_scroll: UniformListScrollHandle::new(),
             playlist_load_gen: 0,
             playlist_error: None,
+            playlist_removing: HashSet::new(),
             eq_preset,
             eq_custom,
             eq_sliders,

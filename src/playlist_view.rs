@@ -26,7 +26,11 @@ impl Crate {
             self.playlist_error = None;
         }
         let k = key.clone();
-        let rx = crate::plex_call(move |c| async move { c.playlist_detail(&k, LIMIT).await });
+        let rx = crate::plex_call(move |c| async move {
+            tokio::time::timeout(std::time::Duration::from_secs(30), c.playlist_detail(&k, LIMIT))
+                .await
+                .map_err(|_| anyhow::anyhow!("Plex didn't answer"))?
+        });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| {
@@ -35,7 +39,17 @@ impl Crate {
                     return;
                 }
                 match res {
-                    Ok(Ok(d)) => {
+                    Ok(Ok(mut d)) => {
+                        // Removals still in flight stay off the page.
+                        if !this.playlist_removing.is_empty() {
+                            let keep: Vec<bool> = d.item_ids.iter().map(|id| !this.playlist_removing.contains(id)).collect();
+                            let mut it = keep.iter();
+                            d.tracks.retain(|_| *it.next().unwrap_or(&true));
+                            let dropped = keep.iter().filter(|k| !**k).count();
+                            d.item_ids.retain(|id| !this.playlist_removing.contains(id));
+                            d.count = d.count.saturating_sub(dropped as u64);
+                            d.loaded = d.loaded.saturating_sub(dropped);
+                        }
                         this.request_thumb(&d.thumb);
                         if let View::Playlist { key: cur, detail, .. } = &mut this.view
                             && *cur == key
@@ -43,10 +57,8 @@ impl Crate {
                             *detail = Some(Arc::new(d));
                         }
                     }
-                    Ok(Err(e)) => {
-                        this.playlist_error = Some((key, format!("{e:#}")));
-                    }
-                    Err(_) => {}
+                    Ok(Err(e)) => this.playlist_error = Some((key, format!("{e:#}"))),
+                    Err(_) => this.playlist_error = Some((key, "the request was dropped".into())),
                 }
                 cx.notify();
             })
@@ -110,19 +122,16 @@ impl Crate {
             d.count = d.count.saturating_sub(1);
             d.loaded = d.loaded.saturating_sub(1);
         }
-        // Copies of this page in history are stale now: refetch on return.
-        for v in self.back.iter_mut().chain(self.fwd.iter_mut()) {
-            if let View::Playlist { key: k, detail, .. } = v
-                && *k == key
-            {
-                *detail = None;
-            }
-        }
+        self.playlist_removing.insert(item_id);
+        self.forget_playlist_history(&key);
         let k = key.clone();
         let rx = crate::plex_call(move |c| async move { c.remove_from_playlist(&k, item_id).await });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| {
+                this.playlist_removing.remove(&item_id);
+                // Copies pushed to history while this was in flight are stale too.
+                this.forget_playlist_history(&key);
                 match res {
                     Ok(Ok(())) => this.say(format!("Removed \u{201c}{title}\u{201d}")),
                     Ok(Err(e)) => this.say(format!("Couldn't remove \u{201c}{title}\u{201d}: {e:#}")),
@@ -138,6 +147,17 @@ impl Crate {
             .ok();
         })
         .detach();
+    }
+
+    /// Copies of a playlist page in Back/Forward history refetch on return.
+    fn forget_playlist_history(&mut self, key: &str) {
+        for v in self.back.iter_mut().chain(self.fwd.iter_mut()) {
+            if let View::Playlist { key: k, detail, .. } = v
+                && k == key
+            {
+                *detail = None;
+            }
+        }
     }
 
     pub(crate) fn playlist_view(&self, key: &str, title: &str, detail: Option<&PlaylistDetail>, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
