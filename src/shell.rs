@@ -42,6 +42,7 @@ impl Crate {
             "albums" => {
                 if !self.lib_filters.is_empty() {
                     self.lib_filters.clear();
+                    self.selection.clear();
                     self.refresh_library(cx);
                 }
                 View::Library

@@ -807,6 +807,9 @@ impl Crate {
             let cur = std::mem::replace(&mut self.view, v);
             self.fwd.push(cur);
             self.album_scroll = gpui::ScrollHandle::new();
+            if !matches!(self.view, View::Library) {
+                self.selection.clear();
+            }
             self.reload_view(cx);
             cx.notify();
         }
@@ -844,6 +847,9 @@ impl Crate {
             let cur = std::mem::replace(&mut self.view, v);
             self.back.push(cur);
             self.album_scroll = gpui::ScrollHandle::new();
+            if !matches!(self.view, View::Library) {
+                self.selection.clear();
+            }
             self.reload_view(cx);
             cx.notify();
         }

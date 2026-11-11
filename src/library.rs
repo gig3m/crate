@@ -70,8 +70,6 @@ impl Crate {
     /// (date added, no filters) is the cached list as-is.
     pub(crate) fn refresh_library(&mut self, cx: &mut Context<Self>) {
         self.lib_gen += 1;
-        // A new sort or filter changes what's on screen: start a fresh selection.
-        self.selection.clear();
         self.scroll = gpui::UniformListScrollHandle::new();
         if self.lib_sort == LibSort::Added && self.lib_filters.is_empty() {
             self.lib_view = None;
@@ -109,6 +107,8 @@ impl Crate {
     pub(crate) fn add_filter(&mut self, f: LibFilter, cx: &mut Context<Self>) {
         self.lib_filters.retain(|x| x.kind != f.kind);
         self.lib_filters.push(f);
+        // What's on screen changes: start a fresh selection.
+        self.selection.clear();
         self.refresh_library(cx);
         if !matches!(self.view, crate::View::Library) {
             self.go(crate::View::Library);
@@ -140,6 +140,7 @@ impl Crate {
                     menu = menu.item(PopupMenuItem::new(s.label()).checked(s == sort).on_click(move |_, _, cx| {
                         this.update(cx, |this, cx| {
                             this.lib_sort = s;
+                            this.selection.clear();
                             this.refresh_library(cx);
                         })
                         .ok();
@@ -207,6 +208,7 @@ impl Crate {
                             .child(icons::icon("close", 12.0, t.muted))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.lib_filters.retain(|x| x.kind != kind);
+                                this.selection.clear();
                                 this.refresh_library(cx);
                             })),
                     )
@@ -489,8 +491,8 @@ impl Crate {
                 .child(
                     div()
                         .id("sel-bar")
-                        // Clicks on the bar must not reach the album underneath.
-                        .occlude()
+                        // Clicks on the bar must not reach the album underneath (scrolling still does).
+                        .block_mouse_except_scroll()
                         .flex()
                         .items_center()
                         .gap(px(6.0))
@@ -553,18 +555,22 @@ impl Crate {
                 }
             }
             anyhow::ensure!(!all.is_empty() || failed == 0, "{failed} album(s) couldn't be loaded");
-            Ok(all)
+            Ok((all, failed))
         });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| match res {
                 _ if this.play_intent != intent => {}
-                Ok(Ok(mut tracks)) if !tracks.is_empty() => {
+                Ok(Ok((mut tracks, failed))) if !tracks.is_empty() => {
                     if shuffle {
                         crate::shuffle(&mut tracks);
                     }
                     this.selection.clear();
                     this.start_queue(name, None, tracks, 0, cx);
+                    if failed > 0 {
+                        this.status = format!("Skipped {failed} album(s) that couldn't be loaded").into();
+                        cx.notify();
+                    }
                 }
                 Ok(Ok(_)) => {
                     this.status = "Those albums have no tracks".into();
@@ -590,7 +596,8 @@ impl Crate {
             cx.notify();
             return;
         }
-        self.status = format!("Keeping {} albums offline…", albums.len()).into();
+        let n = albums.len();
+        self.status = format!("Keeping {n} album{} offline…", if n == 1 { "" } else { "s" }).into();
         cx.notify();
         let keys: Vec<String> = albums.iter().map(|a| a.rating_key.clone()).collect();
         let rx = crate::plex_call(move |c| async move {
@@ -603,17 +610,26 @@ impl Crate {
             Ok(out)
         });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(found)) = rx.await {
-                this.update(cx, |this, cx| {
-                    for (k, tracks) in found {
-                        if let Some(a) = albums.iter().find(|a| a.rating_key == k).cloned() {
-                            this.keep_offline(a, tracks, cx);
-                        }
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                let found = match res {
+                    Ok(Ok(f)) => f,
+                    _ => Vec::new(),
+                };
+                let failed = n - found.len();
+                for (k, tracks) in found {
+                    if let Some(a) = albums.iter().find(|a| a.rating_key == k).cloned() {
+                        this.keep_offline(a, tracks, cx);
                     }
-                    cx.notify();
-                })
-                .ok();
-            }
+                }
+                this.status = if failed > 0 {
+                    format!("Couldn't load {failed} of {n} album(s) to keep offline").into()
+                } else {
+                    format!("Keeping {n} album{} offline: see Offline", if n == 1 { "" } else { "s" }).into()
+                };
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
