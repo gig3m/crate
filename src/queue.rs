@@ -112,9 +112,18 @@ impl Crate {
     /// the end of the queue. Nothing playing: these start a queue.
     pub(crate) fn enqueue(&mut self, tracks: Vec<Track>, next: bool, label: String, cx: &mut Context<Self>) {
         if tracks.is_empty() {
+            self.status = format!("{label}: nothing to queue").into();
+            cx.notify();
             return;
         }
         let n = tracks.len();
+        if std::env::var_os("CRATE_TRACE").is_some() {
+            let st = self.now.as_ref().map(|n| (n.idx, n.tracks.len(), n.finished, n.stopped, n.engine_end));
+            eprintln!("[crate] enqueue {n} next={next} now={st:?} engine={} closed={}", self.engine.is_some(), self.engine.as_ref().is_some_and(|e| e.is_closed()));
+        }
+        for t in &tracks {
+            self.request_thumb(&t.thumb.clone());
+        }
         if self.now.is_none() {
             self.start_queue(label, None, tracks, 0, cx);
             return;
@@ -123,7 +132,9 @@ impl Crate {
         // track in between, the engine refuses it and we redo it from the new point.
         let mut placed = None;
         for _ in 0..5 {
-            let started = self.engine.as_ref().map(|e| e.started());
+            // A closed engine (its queue ran out) takes no more tracks: treat it
+            // as none; the poll loop or the resume below plays what's added.
+            let started = self.engine.as_ref().filter(|e| !e.is_closed()).map(|e| e.started());
             let Some(now) = self.now.as_mut() else { return };
             let opened = now.start_idx + started.unwrap_or(0);
             let at = if next { (now.idx + 1).max(opened) } else { now.tracks.len() }.min(now.tracks.len());
@@ -132,7 +143,8 @@ impl Crate {
             let cur_key = now.tracks.get(now.idx).map(|t| t.rating_key.clone());
             let opos = if next { cur_key.and_then(|k| now.orig_order.iter().position(|o| *o == k)).map(|p| p + 1).unwrap_or(now.orig_order.len()) } else { now.orig_order.len() };
             now.orig_order.splice(opos..opos, tracks.iter().map(|t| t.rating_key.clone()));
-            if now.engine_end >= at {
+            // Tracks before `at` that were handed to the engine shift with the insert.
+            if now.engine_end > at {
                 now.engine_end += n;
             }
             match started {
@@ -150,7 +162,7 @@ impl Crate {
                     if let Some(now) = self.now.as_mut() {
                         now.tracks.drain(at..at + n);
                         now.orig_order.drain(opos..opos + n);
-                        if now.engine_end >= at + n {
+                        if now.engine_end > at + n {
                             now.engine_end -= n;
                         }
                     }
@@ -163,13 +175,16 @@ impl Crate {
             return;
         };
         self.status = format!("{} {label}", if next { "Playing next:" } else { "Added to queue:" }).into();
-        // The engine ran out before this arrived: carry on with the new tracks.
+        // The queue already ran out (not stopped): carry on with the new tracks.
         if let Some(now) = self.now.as_ref()
             && now.finished
             && !now.stopped
-            && self.engine.is_none()
         {
             self.play_from(at, 0, cx);
+        } else if self.leveling != crate::theme::Leveling::Off {
+            // Loudness for the new tracks, then retune the engine's upcoming ones.
+            let all = self.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default();
+            self.fill_gains(&all, at, cx);
         }
         cx.notify();
     }

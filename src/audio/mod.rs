@@ -262,6 +262,11 @@ impl Engine {
         true
     }
 
+    /// The decoder reached the end of its queue: it takes no more tracks.
+    pub fn is_closed(&self) -> bool {
+        self.queue.lock().unwrap().closed
+    }
+
     /// How many tracks the decoder has opened so far.
     pub fn started(&self) -> usize {
         self.queue.lock().unwrap().started
