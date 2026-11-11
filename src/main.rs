@@ -113,6 +113,7 @@ struct Crate {
     eq_autoeq: Option<(String, [f32; 10])>,
     autoeq_picker: Option<autoeq::Picker>,
     autoeq_index: Option<Arc<Vec<autoeq::Entry>>>,
+    autoeq_pick_gen: u64,
     /// Track bar visualizer (style, colors, live-view state, drag).
     viz: std::cell::RefCell<viz::Viz>,
     /// Bumped per playlist page load; stale replies are dropped.
@@ -741,6 +742,7 @@ impl Crate {
             eq_autoeq: saved_autoeq,
             autoeq_picker: None,
             autoeq_index: None,
+            autoeq_pick_gen: 0,
             playlist_load_gen: 0,
             playlist_error: None,
             playlist_removing: HashSet::new(),

@@ -253,8 +253,10 @@ pub fn saved_autoeq() -> Option<(String, [f32; 10])> {
 }
 
 pub fn save_autoeq(name: &str, gains: &[f32; 10]) -> std::io::Result<()> {
-    save_key("eq_autoeq_name", toml::Value::String(name.into()))?;
-    save_key("eq_autoeq", toml::Value::Array(gains.iter().map(|g| toml::Value::Float(((*g as f64) * 10.0).round() / 10.0)).collect()))
+    save_keys(vec![
+        ("eq_autoeq_name", toml::Value::String(name.into())),
+        ("eq_autoeq", toml::Value::Array(gains.iter().map(|g| toml::Value::Float(((*g as f64) * 10.0).round() / 10.0)).collect())),
+    ])
 }
 
 pub fn save_leveling(l: Leveling) -> std::io::Result<()> {
@@ -269,6 +271,11 @@ pub fn save_volume(v: f32) -> std::io::Result<()> {
 /// that doesn't parse is left alone (an error, not an empty rewrite), and the
 /// write goes through a temp file and rename so a crash can't truncate it.
 fn save_key(key: &str, value: toml::Value) -> std::io::Result<()> {
+    save_keys(vec![(key, value)])
+}
+
+/// Set several keys in one atomic write.
+fn save_keys(pairs: Vec<(&str, toml::Value)>) -> std::io::Result<()> {
     let path = config_path();
     let raw = match std::fs::read_to_string(&path) {
         Ok(r) => r,
@@ -277,7 +284,9 @@ fn save_key(key: &str, value: toml::Value) -> std::io::Result<()> {
     };
     let mut map: toml::Table =
         toml::from_str(&raw).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{} doesn't parse: {e}", path.display())))?;
-    map.insert(key.into(), value);
+    for (key, value) in pairs {
+        map.insert(key.into(), value);
+    }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

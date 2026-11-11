@@ -27,8 +27,11 @@ pub(crate) fn parse_index(md: &str) -> Vec<Entry> {
         .filter_map(|l| {
             let l = l.strip_prefix("- [")?;
             let (name, rest) = l.split_once("](./")?;
-            let (path, rest) = rest.split_once(')')?;
-            let source = rest.trim().strip_prefix("by ")?.split(" on ").next()?.trim().to_string();
+            // Names and paths can hold parentheses: the link ends at ") by ".
+            let (path, by) = rest.rsplit_once(") by ")?;
+            // "oratory1990" or "crinacle on GRAS 43AG-7": the rig tells
+            // apart measurements from the same source.
+            let source = by.trim().to_string();
             Some(Entry { name: name.to_string(), source, path: path.to_string() })
         })
         .collect()
@@ -43,7 +46,8 @@ pub(crate) fn parse_fixed_band(txt: &str) -> Option<[f32; 10]> {
         let fc = w.iter().position(|x| *x == "Fc").and_then(|i| w.get(i + 1)).and_then(|v| v.parse::<f32>().ok());
         let g = w.iter().position(|x| *x == "Gain").and_then(|i| w.get(i + 1)).and_then(|v| v.parse::<f32>().ok());
         if let (Some(fc), Some(g)) = (fc, g)
-            && let Some(i) = crate_audio::audio::eq::BANDS.iter().position(|b| (b - fc).abs() < 1.0)
+            // Within 5% of a band (62 vs 63 Hz, 16 vs 16.1 kHz spellings).
+            && let Some(i) = crate_audio::audio::eq::BANDS.iter().position(|b| (b - fc).abs() <= b * 0.05)
         {
             gains[i] = g.clamp(-12.0, 12.0);
         }
@@ -67,11 +71,12 @@ pub(crate) fn search(index: &[Entry], q: &str, limit: usize) -> Vec<Entry> {
                 return None;
             }
             let rank = if n == q { 0 } else if n.starts_with(&q) { 1 } else { 2 };
-            let src = SOURCES.iter().position(|s| *s == e.source).unwrap_or(SOURCES.len());
+            let base = e.source.split(" on ").next().unwrap_or_default();
+            let src = SOURCES.iter().position(|s| *s == base).unwrap_or(SOURCES.len());
             Some((rank, src, e))
         })
         .collect();
-    hits.sort_by(|a, b| (a.0, a.2.name.len(), a.1).cmp(&(b.0, b.2.name.len(), b.1)));
+    hits.sort_by_key(|h| (h.0, h.2.name.len(), h.1));
     hits.into_iter().take(limit).map(|h| h.2.clone()).collect()
 }
 
@@ -95,12 +100,29 @@ async fn load_index() -> anyhow::Result<Vec<Entry>> {
             return Ok(v);
         }
     }
-    let md = fetch_text(format!("{RAW}/INDEX.md")).await?;
-    let v = parse_index(&md);
-    anyhow::ensure!(!v.is_empty(), "the AutoEq index came back empty");
-    let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
-    let _ = std::fs::write(&path, md);
-    Ok(v)
+    let fetched = async {
+        let md = fetch_text(format!("{RAW}/INDEX.md")).await?;
+        let v = parse_index(&md);
+        anyhow::ensure!(!v.is_empty(), "the AutoEq index came back empty");
+        anyhow::Ok((md, v))
+    }
+    .await;
+    match fetched {
+        Ok((md, v)) => {
+            // Atomic: a crash mid-write never leaves a truncated index.
+            let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+            let tmp = path.with_extension("md.tmp");
+            if std::fs::write(&tmp, md).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+            Ok(v)
+        }
+        // GitHub unreachable: an old list beats none.
+        Err(e) => match std::fs::read_to_string(&path).map(|md| parse_index(&md)) {
+            Ok(v) if !v.is_empty() => Ok(v),
+            _ => Err(e),
+        },
+    }
 }
 
 /// Run a non-Plex request on the tokio side.
@@ -188,11 +210,17 @@ impl Crate {
         let rx = io_call(fetch_text(url));
         let label = format!("{} · {}", e.name, e.source);
         self.say(format!("Loading AutoEQ for {label}…"));
+        // The last row clicked wins, whatever order replies arrive in.
+        self.autoeq_pick_gen += 1;
+        let gen_ = self.autoeq_pick_gen;
         let window_handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             cx.update_window(window_handle, |_, window, cx| {
                 this.update(cx, |this, cx| {
+                    if this.autoeq_pick_gen != gen_ {
+                        return;
+                    }
                     match res {
                         Ok(Ok(txt)) => match parse_fixed_band(&txt) {
                             Some(g) => {
@@ -229,7 +257,11 @@ mod tests {
         let md = "# Index\n\n- [Sennheiser HD 600](./oratory1990/over-ear/Sennheiser%20HD%20600) by oratory1990\n- [Sennheiser HD 600](./crinacle/GRAS%2043AG-7%20over-ear/Sennheiser%20HD%20600) by crinacle on GRAS 43AG-7\n- [Sennheiser HD 6XX](./oratory1990/over-ear/Sennheiser%20HD%206XX) by oratory1990\n";
         let idx = parse_index(md);
         assert_eq!(idx.len(), 3);
-        assert_eq!(idx[1].source, "crinacle");
+        let paren = parse_index("- [1MORE Aero (ANC Off)](./HypetheSonics/GRAS%20RA0045%20in-ear/1MORE%20Aero%20(ANC%20Off)) by HypetheSonics on GRAS RA0045");
+        assert_eq!(paren.len(), 1);
+        assert_eq!(paren[0].path, "HypetheSonics/GRAS%20RA0045%20in-ear/1MORE%20Aero%20(ANC%20Off)");
+        assert_eq!(paren[0].name, "1MORE Aero (ANC Off)");
+        assert_eq!(idx[1].source, "crinacle on GRAS 43AG-7");
         assert_eq!(idx[0].path, "oratory1990/over-ear/Sennheiser%20HD%20600");
         let hits = search(&idx, "hd 600", 8);
         assert_eq!(hits.len(), 2);
