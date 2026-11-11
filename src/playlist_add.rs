@@ -23,6 +23,10 @@ pub(crate) struct Naming {
 impl Crate {
     /// Open the naming bar with `default` selected, ready to type over.
     pub(crate) fn start_naming(&mut self, what: NameFor, default: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.playlist_busy {
+            self.say("Still saving the last playlist…");
+            return;
+        }
         let input = cx.new(|cx| InputState::new(window, cx).default_value(default));
         cx.subscribe(&input, |this, _, ev: &InputEvent, cx| {
             if let InputEvent::PressEnter { .. } = ev {
@@ -51,30 +55,36 @@ impl Crate {
         if title.is_empty() {
             return;
         }
+        if self.playlist_busy {
+            return;
+        }
         let Some(n) = self.naming.take() else { return };
         self.refocus = true;
+        self.playlist_busy = true;
         let section = crate::section();
-        let (rx, smart) = match n.what {
+        let (rx, albums) = match n.what {
             NameFor::Albums(keys) => {
-                let t = title.clone();
-                (crate::plex_call(move |c| async move { c.create_playlist(&t, &keys).await }), false)
+                let (t, k) = (title.clone(), keys.clone());
+                (crate::plex_call(move |c| async move { c.create_playlist(&t, &k).await }), Some(keys))
             }
             NameFor::Smart(query) => {
                 let t = title.clone();
-                (crate::plex_call(move |c| async move { c.create_smart_playlist(&section, &t, &query).await }), true)
+                (crate::plex_call(move |c| async move { c.create_smart_playlist(&section, &t, &query).await }), None)
             }
         };
         self.say(format!("Creating \u{201c}{title}\u{201d}…"));
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| {
+                this.playlist_busy = false;
                 match res {
                     Ok(Ok((_, n))) => {
-                        // Done with the selection (kept on failure, to retry).
-                        if !smart {
+                        // Done with the selection (kept on failure, to retry),
+                        // unless it has changed since.
+                        if albums.as_ref().is_some_and(|k| *k == this.selection) {
                             this.selection.clear();
                         }
-                        let kind = if smart { "Smart playlist" } else { "Playlist" };
+                        let kind = if albums.is_none() { "Smart playlist" } else { "Playlist" };
                         this.say(format!("{kind} \u{201c}{title}\u{201d} created · {n} tracks"));
                         this.reload_playlists(cx);
                     }
@@ -91,14 +101,20 @@ impl Crate {
 
     /// Append the selected albums to an existing playlist.
     pub(crate) fn add_selection_to_playlist(&mut self, playlist: String, title: String, cx: &mut Context<Self>) {
+        if self.playlist_busy {
+            self.say("Still saving the last playlist…");
+            return;
+        }
         let keys = std::mem::take(&mut self.selection);
         if keys.is_empty() {
             return;
         }
+        self.playlist_busy = true;
         let rx = crate::plex_call(move |c| async move { c.add_to_playlist(&playlist, &keys).await });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| {
+                this.playlist_busy = false;
                 match res {
                     Ok(Ok(0)) => this.say(format!("Already in \u{201c}{title}\u{201d}: Plex skips tracks a playlist has")),
                     Ok(Ok(n)) => {

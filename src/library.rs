@@ -69,8 +69,11 @@ impl Crate {
     /// Re-query the album order for the current sort and filters. The default
     /// (date added, no filters) is the cached list as-is.
     pub(crate) fn refresh_library(&mut self, cx: &mut Context<Self>) {
-        // A smart playlist being named was for the filters as they were.
-        if matches!(self.naming, Some(crate::playlist_add::Naming { what: crate::playlist_add::NameFor::Smart(_), .. })) {
+        // A smart playlist being named was for the filters as they were:
+        // close it if they changed (not for a re-sort or a reload).
+        if let Some(crate::playlist_add::Naming { what: crate::playlist_add::NameFor::Smart(q), .. }) = &self.naming
+            && *q != self.filter_query()
+        {
             self.naming = None;
             self.refocus = true;
         }
@@ -287,7 +290,7 @@ impl Crate {
                             .hover(|d| d.bg(rgb(t.raised)))
                             .child("Save as smart playlist")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                let query = this.lib_filters.iter().map(|f| f.query.as_str()).collect::<Vec<_>>().join("&");
+                                let query = this.filter_query();
                                 let name = this.smart_playlist_name();
                                 this.start_naming(crate::playlist_add::NameFor::Smart(query), name, window, cx);
                             })),
@@ -590,6 +593,11 @@ impl Crate {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// The current filters as one Plex album query.
+    pub(crate) fn filter_query(&self) -> String {
+        self.lib_filters.iter().map(|f| f.query.as_str()).collect::<Vec<_>>().join("&")
     }
 
     /// The selected albums, in the order they were picked.

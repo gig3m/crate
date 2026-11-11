@@ -101,6 +101,8 @@ struct Crate {
     remote_kbps: u32,
     /// The "name your new playlist" bar, while open.
     naming: Option<playlist_add::Naming>,
+    /// A playlist create/add is in flight (one at a time).
+    playlist_busy: bool,
     /// A queue waiting on loudness before it starts (its queue_seq); cleared
     /// by any transport action or explicit start, which supersede it.
     pending_start: Option<u64>,
@@ -701,6 +703,7 @@ impl Crate {
             fade_secs: theme::saved_fade(),
             remote_kbps: theme::saved_remote_kbps(),
             naming: None,
+            playlist_busy: false,
             eq_preset,
             eq_custom,
             eq_sliders,
@@ -1014,6 +1017,7 @@ impl Crate {
         self.cursor = None;
             if !matches!(self.view, View::Library) {
                 self.selection.clear();
+                self.naming = None;
             }
             self.reload_view(cx);
             cx.notify();
@@ -1059,6 +1063,7 @@ impl Crate {
         self.cursor = None;
             if !matches!(self.view, View::Library) {
                 self.selection.clear();
+                self.naming = None;
             }
             self.reload_view(cx);
             cx.notify();
@@ -2057,7 +2062,7 @@ impl Render for Crate {
                                 this.start_naming(playlist_add::NameFor::Albums(keys), name, window, cx);
                             }
                             "smart" => {
-                                let query = this.lib_filters.iter().map(|f| f.query.as_str()).collect::<Vec<_>>().join("&");
+                                let query = this.filter_query();
                                 let name = this.smart_playlist_name();
                                 this.start_naming(playlist_add::NameFor::Smart(query), name, window, cx);
                             }
