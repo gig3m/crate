@@ -87,7 +87,8 @@ impl Stats {
 #[derive(Debug)]
 pub enum Event {
     /// `at_us`: where this track begins on the played-time clock (`Stats::played_us`).
-    TrackStarted { index: usize, label: String, source_rate: u32, bits: u32, at_frame: u64, at_us: u64 },
+    /// `gain` is the leveling factor the decoder applies to this track's samples.
+    TrackStarted { index: usize, label: String, source_rate: u32, bits: u32, at_frame: u64, at_us: u64, gain: f32 },
     Reconnected { from: u32, to: u32, silent_ms: f64 },
     FirstAudio { ms_since_play: f64 },
     Finished,
@@ -385,6 +386,7 @@ fn decoder_thread(
             bits,
             at_frame: queued_frames,
             at_us: queued_us,
+            gain,
         });
         if index == 0 && start_ms > 0 {
             use symphonia::core::formats::{SeekMode, SeekTo};

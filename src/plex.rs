@@ -560,7 +560,14 @@ impl Client {
         let num = |v: &serde_json::Value| v.as_str().and_then(|x| x.parse::<f32>().ok()).or(v.as_f64().map(|f| f as f32)).filter(|f| f.is_finite());
         let mut out = Vec::with_capacity(keys.len());
         for chunk in keys.chunks(50) {
-            let v: serde_json::Value = self.get(&format!("/library/metadata/{}", chunk.join(","))).await?.json().await.context("gains")?;
+            // A failed batch loses only its own tracks (they play at unity).
+            let v: serde_json::Value = match async { anyhow::Ok(self.get(&format!("/library/metadata/{}", chunk.join(","))).await?.json().await?) }.await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[crate] loudness batch: {e:#}");
+                    continue;
+                }
+            };
             for m in v["MediaContainer"]["Metadata"].as_array().into_iter().flatten() {
                 let Some(key) = m["ratingKey"].as_str() else { continue };
                 let streams = m["Media"][0]["Part"][0]["Stream"].as_array().cloned().unwrap_or_default();

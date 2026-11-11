@@ -31,15 +31,7 @@ impl Crate {
 
     /// Engine items for `tracks`, with leveling gains.
     pub(crate) fn sources(&self, tracks: &[Track]) -> Vec<Item> {
-        let mut applied = self.applied_gain.borrow_mut();
-        tracks
-            .iter()
-            .map(|t| {
-                let gain = self.level_gain(t);
-                applied.insert(t.rating_key.clone(), gain);
-                Item { src: self.source(t), gain }
-            })
-            .collect()
+        tracks.iter().map(|t| Item { src: self.source(t), gain: self.level_gain(t) }).collect()
     }
 
     fn source(&self, t: &Track) -> Source {
@@ -199,8 +191,10 @@ pub(crate) fn linear_gain(g: &crate::plex::Gain, use_album: bool) -> f32 {
     let (db, peak) = if use_album { (g.album_db.or(g.track_db), g.album_peak.or(g.track_peak)) } else { (g.track_db.or(g.album_db), g.track_peak.or(g.album_peak)) };
     let Some(db) = db else { return 1.0 };
     let mut lin = 10f32.powf(db.clamp(-24.0, 12.0) / 20.0);
-    if let Some(p) = peak.filter(|p| *p > 0.0) {
-        lin = lin.min(1.0 / p);
+    match peak.filter(|p| *p > 0.0) {
+        Some(p) => lin = lin.min(1.0 / p),
+        // Without a peak a boost could clip: attenuate only.
+        None => lin = lin.min(1.0),
     }
     if (lin - 1.0).abs() < 1e-4 { 1.0 } else { lin }
 }
@@ -223,5 +217,7 @@ mod gain_tests {
         // Nothing analyzed: unity, exactly.
         assert_eq!(linear_gain(&Gain::default(), false), 1.0);
         assert_eq!(linear_gain(&Gain { track_db: Some(0.0), ..Default::default() }, false), 1.0);
+        // No peak known: never boost.
+        assert_eq!(linear_gain(&Gain { track_db: Some(6.0), ..Default::default() }, false), 1.0);
     }
 }

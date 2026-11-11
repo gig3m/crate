@@ -336,7 +336,6 @@ impl Crate {
             }
             1 => {
                 let fmt = n.formats.get(&n.idx).copied();
-                let tr_key = n.tracks.get(n.idx).map(|t| t.rating_key.clone()).unwrap_or_default();
                 let codec = detail.as_ref().map(|d| d.codec.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| "Audio".into());
                 let source = match fmt {
                     Some((rate, bits)) => {
@@ -346,7 +345,8 @@ impl Crate {
                     None => codec.clone(),
                 };
                 let native = fmt.is_some_and(|(rate, _)| n.graph_rate == rate);
-                let level = self.applied_gain.borrow().get(&tr_key).copied().unwrap_or(1.0);
+                // Reported by the engine for this playback: what's actually audible.
+                let level = n.level.get(&n.idx).copied().unwrap_or(1.0);
                 let bitperfect = native && self.volume >= 1.0 && level == 1.0;
                 let output = match fmt {
                     Some((rate, _)) if n.graph_rate == rate => format!("PipeWire · {} kHz matched", khz(rate)),

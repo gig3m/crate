@@ -84,8 +84,9 @@ struct Crate {
     /// Loudness leveling setting, and Plex's loudness analysis by track key.
     leveling: theme::Leveling,
     gains: HashMap<String, plex::Gain>,
-    /// Gain each track was last handed to the engine with (what's audible).
-    applied_gain: std::cell::RefCell<HashMap<String, f32>>,
+    /// A queue waiting on loudness before it starts (its queue_seq); cleared
+    /// by any transport action or explicit start, which supersede it.
+    pending_start: Option<u64>,
     /// (queue context, note): shown with "Playing …" when that queue starts.
     play_note: Option<(String, String)>,
     art: HashMap<String, Arc<Image>>,
@@ -199,6 +200,8 @@ struct Now {
     /// Album rating key when an album is the context.
     context_key: Option<String>,
     tracks: Vec<Track>,
+    /// index -> leveling gain the decoder applied, from engine TrackStarted events.
+    level: HashMap<usize, f32>,
     /// index -> (source rate, bits), from engine TrackStarted events.
     formats: HashMap<usize, (u32, u32)>,
     /// Album track index the current engine started at, and the offset into it.
@@ -604,7 +607,7 @@ impl Crate {
             play_note: None,
             leveling: theme::saved_leveling(),
             gains: HashMap::new(),
-            applied_gain: std::cell::RefCell::new(HashMap::new()),
+            pending_start: None,
             art: HashMap::new(),
             requested: HashSet::new(),
             art_tx,
@@ -991,6 +994,7 @@ impl Crate {
             context_key,
             tracks,
             formats: HashMap::new(),
+            level: HashMap::new(),
             start_idx: 0,
             start_ms: 0,
             boundaries: Vec::new(),
@@ -1013,12 +1017,20 @@ impl Crate {
         });
         // With leveling on, the first track needs its gain before it starts
         // (bounded: Plex answers in tens of ms on a LAN; give up after 1.5 s).
-        let missing = self.missing_gains(self.now.as_ref().map(|n| &n.tracks[..]).unwrap_or_default());
+        let tracks = self.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default();
+        let mut missing = self.missing_gains(&tracks, start);
         if missing.is_empty() {
             self.play_from(start, 0, cx);
             return;
         }
+        // Wait only for the first batch (the tracks about to play); the rest fill in behind.
+        missing.truncate(50);
         let seq = self.queue_seq;
+        // The old queue's audio stops now, not when the new one starts, and its
+        // poll loop ends so its events can't land on the new queue.
+        self.engine = None;
+        self.play_gen += 1;
+        self.pending_start = Some(seq);
         let rx = plex_call(move |c| async move {
             tokio::time::timeout(Duration::from_millis(1500), c.track_gains(missing)).await.map_err(|_| anyhow::anyhow!("timed out"))?
         });
@@ -1030,9 +1042,12 @@ impl Crate {
                     Ok(Err(e)) => eprintln!("[crate] loudness: {e:#}"),
                     Err(_) => {}
                 }
-                // Only if this queue is still the one waiting to start.
-                if this.queue_seq == seq && this.engine.is_none() {
+                // Only if this queue is still the one waiting (nothing stopped,
+                // paused, skipped or replaced it meanwhile).
+                if this.pending_start == Some(seq) && this.engine.is_none() {
                     this.play_from(start, 0, cx);
+                    let rest = this.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default();
+                    this.fill_gains(&rest, start, cx);
                 }
             })
             .ok();
@@ -1041,24 +1056,25 @@ impl Crate {
     }
 
     /// Track keys among `tracks` whose loudness isn't known yet (none when
-    /// leveling is off). Bounded so a huge playlist doesn't stall a start.
-    fn missing_gains(&self, tracks: &[Track]) -> Vec<String> {
+    /// leveling is off), from `from` onward first, then the ones before it.
+    fn missing_gains(&self, tracks: &[Track], from: usize) -> Vec<String> {
         if self.leveling == theme::Leveling::Off {
             return Vec::new();
         }
+        let from = from.min(tracks.len());
         let mut seen = std::collections::HashSet::new();
-        tracks
+        tracks[from..]
             .iter()
+            .chain(&tracks[..from])
             .filter(|t| !self.gains.contains_key(&t.rating_key) && seen.insert(t.rating_key.as_str()))
-            .take(300)
             .map(|t| t.rating_key.clone())
             .collect()
     }
 
     /// Fetch loudness for `tracks` in the background, then re-hand the engine
     /// its unopened tracks with their gains (the playing one keeps its gain).
-    fn fill_gains(&mut self, tracks: &[Track], cx: &mut Context<Self>) {
-        let missing = self.missing_gains(tracks);
+    fn fill_gains(&mut self, tracks: &[Track], from: usize, cx: &mut Context<Self>) {
+        let missing = self.missing_gains(tracks, from);
         if missing.is_empty() {
             self.sync_upcoming();
             return;
@@ -1087,8 +1103,8 @@ impl Crate {
         if let Err(e) = theme::save_leveling(l) {
             self.status = format!("Couldn't save the leveling setting: {e}").into();
         }
-        let tracks = self.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default();
-        self.fill_gains(&tracks, cx);
+        let (tracks, idx) = self.now.as_ref().map(|n| (n.tracks.clone(), n.idx)).unwrap_or_default();
+        self.fill_gains(&tracks, idx, cx);
         cx.notify();
     }
 
@@ -1098,6 +1114,8 @@ impl Crate {
 
     /// (Re)start the engine at album track `idx`, `ms` into it.
     fn play_from(&mut self, idx: usize, ms: u64, cx: &mut Context<Self>) {
+        // An explicit start supersedes a queue waiting on loudness.
+        self.pending_start = None;
         let Some(now) = self.now.as_mut() else { return };
         if idx >= now.tracks.len() {
             return;
@@ -1173,6 +1191,8 @@ impl Crate {
             Transport::SetRepeat(r) => return self.set_modes(None, Some(r), cx),
             _ => {}
         }
+        // Any transport action supersedes a queue still waiting on loudness.
+        self.pending_start = None;
         let Some(now) = self.now.as_mut() else { return };
         let (idx, elapsed, n) = (now.idx, now.elapsed_ms, now.tracks.len());
         eprintln!("[crate] transport {t:?}");
@@ -1192,6 +1212,11 @@ impl Crate {
                 now.paused = want_pause;
                 if let Some(e) = &self.engine {
                     e.set_active(!want_pause);
+                } else if !want_pause {
+                    // No engine (a queue still waiting on loudness, or paused while
+                    // waiting): play starts it here.
+                    self.play_from(idx, elapsed, cx);
+                    return;
                 }
                 let _ = self.mpris.send(MprisUpdate::Status { playing: !want_pause, stopped: false });
                 cx.notify();
@@ -1234,7 +1259,7 @@ impl Crate {
         let mut failed = false;
         while let Ok(ev) = engine.events.try_recv() {
             match ev {
-                AudioEvent::TrackStarted { index, label, source_rate, bits, at_us, .. } => {
+                AudioEvent::TrackStarted { index, label, source_rate, bits, at_us, gain, .. } => {
                     // The engine's queue must match ours, or the UI shows the wrong track.
                     let want = now.tracks.get(now.start_idx + index).and_then(|t| t.part_key.split('/').nth(3)).unwrap_or("?");
                     if !label.contains(&format!("part-{want}.")) {
@@ -1243,6 +1268,8 @@ impl Crate {
                         eprintln!("[crate] engine opened {label} for #{}", now.start_idx + index);
                     }
                     now.formats.insert(now.start_idx + index, (source_rate, bits));
+                    // What the decoder really applies to this playback (not what we last asked for).
+                    now.level.insert(now.start_idx + index, gain);
                     if now.boundaries.len() == index {
                         now.boundaries.push(at_us);
                     }
@@ -1339,7 +1366,7 @@ impl Crate {
                             {
                                 n.engine_end = n.tracks.len();
                                 // Appended at unity if their loudness isn't known yet; retune once it is.
-                                this.fill_gains(&more, cx);
+                                this.fill_gains(&more, 0, cx);
                             }
                             for th in thumbs {
                                 this.request_thumb(&th);
@@ -1751,6 +1778,11 @@ impl Render for Crate {
                             "enter" => this.activate_cursor(cx),
                             "x" => this.toggle_cursor_mark(cx),
                             "r" => this.radio_from_selection(cx),
+                            k if k.starts_with("play:") => {
+                                if let Some(ix) = this.albums.iter().position(|a| a.rating_key == k[5..]) {
+                                    this.play_album(ix, cx);
+                                }
+                            }
                             _ => eprintln!("[crate] CRATE_KEYS: unknown {k}"),
                         }
                         eprintln!("[crate] key {k}: cursor {:?} selection {}", this.cursor, this.selection.len());
