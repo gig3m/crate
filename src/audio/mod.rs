@@ -851,11 +851,18 @@ fn pw_thread(
                         }
                     }
                     let Some(mut buffer) = stream.dequeue_buffer() else { return };
+                    // Frames the graph wants this cycle (about one quantum).
+                    // Filling the whole buffer instead (sized for the largest
+                    // quantum: 12288 frames measured) queues ~a quarter second
+                    // per callback, which the output tap and the played-time
+                    // clock then run ahead of. 0 = not told: fill it all.
+                    let requested = buffer.requested() as usize;
                     let stride = 4 * CHANNELS;
                     let data = &mut buffer.datas_mut()[0];
                     let mut written = 0usize;
                     if let Some(slice) = data.data() {
-                        let cap = slice.len() / stride;
+                        let room = slice.len() / stride;
+                        let cap = if requested > 0 { requested.min(room) } else { room };
                         let mut frames = 0;
                         // Uncontended except during a rebuild, when this stream is gone.
                         // EQ settings: recompute filters only when they or the rate change.

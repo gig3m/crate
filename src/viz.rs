@@ -216,9 +216,18 @@ fn spectrum(stereo: &[f32], rate: f32) -> Vec<f32> {
         .map(|b| {
             let f0 = lo * (hi / lo).powf(b as f32 / BARS as f32);
             let f1 = lo * (hi / lo).powf((b + 1) as f32 / BARS as f32);
-            let k0 = ((f0 / rate * n as f32) as usize).clamp(1, n / 2 - 1);
-            let k1 = ((f1 / rate * n as f32).ceil() as usize).clamp(k0 + 1, n / 2);
-            let m = mag[k0..k1].iter().fold(0.0f32, |a, &x| a.max(x));
+            let (p0, p1) = (f0 / rate * n as f32, f1 / rate * n as f32);
+            let m = if p1 - p0 < 1.0 {
+                // Narrower than a bin (the bass): read the curve at the band's
+                // centre, so neighbouring bars don't repeat one bin as steps.
+                let c = ((p0 * p1).sqrt()).clamp(1.0, (n / 2 - 2) as f32);
+                let (i, t) = (c as usize, c.fract());
+                mag[i] * (1.0 - t) + mag[i + 1] * t
+            } else {
+                let k0 = (p0 as usize).clamp(1, n / 2 - 1);
+                let k1 = (p1.ceil() as usize).clamp(k0 + 1, n / 2);
+                mag[k0..k1].iter().fold(0.0f32, |a, &x| a.max(x))
+            };
             // Tilt up the highs a little: music falls off with frequency.
             db_frac(m * (1.0 + b as f32 / BARS as f32 * 3.0), 54.0)
         })
@@ -547,6 +556,23 @@ impl Viz {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bass_bars_are_not_steps() {
+        // A 70 Hz tone at 44.1 kHz: bars around it rise then fall with no run
+        // of identical neighbours (one bin repeated).
+        let rate = 44_100.0;
+        let stereo: Vec<f32> = (0..super::FFT).flat_map(|i| {
+            let v = 0.5 * (std::f32::consts::TAU * 70.0 * i as f32 / rate).sin();
+            [v, v]
+        }).collect();
+        let bands = super::spectrum(&stereo, rate);
+        let low = &bands[..20];
+        let repeats = low.windows(2).filter(|w| (w[0] - w[1]).abs() < 1e-6 && w[0] > 0.0).count();
+        assert_eq!(repeats, 0, "{low:?}");
+        let peak = low.iter().cloned().fold(0.0f32, f32::max);
+        assert!(peak > 0.8, "{low:?}");
+    }
+
     #[test]
     fn fft_finds_a_tone() {
         // 1 kHz at 48 kHz: the spectrum's loudest band contains 1 kHz.
