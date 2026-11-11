@@ -1812,7 +1812,8 @@ impl Crate {
                     if !matches!(t, Transport::Pause) {
                         // Stopped there on purpose: the engine was given nothing
                         // past this track though more is queued.
-                        let stopped_here = self.stop_after == Some(idx) || (now.engine_end == idx + 1 && idx + 1 < n && self.repeat != queue::Repeat::One);
+                        // (Not after Stop or an error mid-track: that track resumes.)
+                        let stopped_here = !now.stopped && (self.stop_after == Some(idx) || (now.engine_end == idx + 1 && idx + 1 < n && self.repeat != queue::Repeat::One));
                         self.stop_after = None;
                         let from = if idx + 1 >= n {
                             0

@@ -298,7 +298,8 @@ impl Crate {
             idx
         };
         let (was, label) = (self.stop_after, if album { "this album" } else { "this track" });
-        self.stop_after = if was == Some(end) && self.stop_after_album == album { None } else { Some(end) };
+        // The lit button always cancels, wherever its mark has moved since.
+        self.stop_after = if was.is_some() && self.stop_after_album == album { None } else { Some(end) };
         self.stop_after_album = album;
         self.sync_upcoming();
         self.say(if self.stop_after.is_some() { format!("Stopping after {label}") } else { "Won't stop early".to_string() });
@@ -405,7 +406,8 @@ impl Crate {
                         }
                         let current = this.now.as_ref().is_some_and(|n| n.queue_id == qid);
                         // Start only if still waiting (nothing paused, stopped or started it).
-                        if current && this.pending_start == Some(qid) && this.now.as_ref().is_some_and(|n| n.finished && !n.stopped) {
+                        let stopped = this.stop_after.is_some_and(|s| this.now.as_ref().is_some_and(|n| n.engine_end > s));
+                        if current && !stopped && this.pending_start == Some(qid) && this.now.as_ref().is_some_and(|n| n.finished && !n.stopped) {
                             this.play_from(at, 0, cx);
                         }
                         // Either way, while it's the current queue: retune and load the rest.
@@ -493,7 +495,8 @@ impl Crate {
         self.shuffle = !self.shuffle;
         // The upcoming order is about to change: a stop past the current
         // track no longer points at what was asked for.
-        if self.stop_after.is_some_and(|s| self.now.as_ref().is_some_and(|n| s > n.idx)) {
+        let reshuffled_from = self.first_editable();
+        if self.stop_after.is_some_and(|s| s >= reshuffled_from) {
             self.stop_after = None;
         }
         // Reorder and hand over against the SAME `started`: if the decoder opens a
