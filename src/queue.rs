@@ -135,8 +135,10 @@ impl Crate {
             // A closed engine (its queue ran out) takes no more tracks: treat it
             // as none; the poll loop or the resume below plays what's added.
             let started = self.engine.as_ref().filter(|e| !e.is_closed()).map(|e| e.started());
+            // What the decoder got through, even if it's closed: never insert before that.
+            let decoded = self.engine.as_ref().map(|e| e.started()).unwrap_or(0);
             let Some(now) = self.now.as_mut() else { return };
-            let opened = now.start_idx + started.unwrap_or(0);
+            let opened = now.start_idx + decoded;
             let at = if next { (now.idx + 1).max(opened) } else { now.tracks.len() }.min(now.tracks.len());
             now.tracks.splice(at..at, tracks.iter().cloned());
             // Shuffle-off order: right after the current track, or at the end.
@@ -180,7 +182,36 @@ impl Crate {
             && now.finished
             && !now.stopped
         {
-            self.play_from(at, 0, cx);
+            let (all, qid) = (now.tracks.clone(), now.queue_id);
+            let missing: Vec<String> = self.missing_gains(&all[at.min(all.len())..(at + 50).min(all.len())], 0);
+            if missing.is_empty() {
+                self.play_from(at, 0, cx);
+            } else {
+                // Leveling: the first new track needs its gain before it starts (bounded).
+                let rx = crate::plex_call(move |c| async move {
+                    tokio::time::timeout(std::time::Duration::from_millis(1500), c.track_gains(missing)).await.map_err(|_| anyhow::anyhow!("timed out"))?
+                });
+                cx.spawn(async move |this, cx| {
+                    let res = rx.await;
+                    this.update(cx, |this, cx| {
+                        if let Ok(Ok(found)) = res {
+                            this.gains.extend(found);
+                        }
+                        // Still the same finished queue, and nothing else started it.
+                        if let Some(n) = this.now.as_ref()
+                            && n.queue_id == qid
+                            && n.finished
+                            && !n.stopped
+                        {
+                            this.play_from(at, 0, cx);
+                            let all = this.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default();
+                            this.fill_gains(&all, at, cx);
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
         } else if self.leveling != crate::theme::Leveling::Off {
             // Loudness for the new tracks, then retune the engine's upcoming ones.
             let all = self.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default();
