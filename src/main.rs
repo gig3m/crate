@@ -9,6 +9,7 @@
 //!   AULOS_BENCH   (set: auto-scroll, print frame stats, quit)
 
 mod album;
+mod artist;
 mod home;
 mod icons;
 mod mpris;
@@ -121,6 +122,11 @@ struct Now {
     paused: bool,
     finished: bool,
     sent_idx: Option<usize>,
+    /// Station key to fetch more tracks from as the queue runs low (radio).
+    refill: Option<String>,
+    refilling: bool,
+    /// One past the last queue index the current engine was given.
+    engine_end: usize,
 }
 
 struct Bench {
@@ -245,6 +251,9 @@ impl Aulos {
                         if !std::mem::replace(&mut first, false) {
                             cx.notify();
                             return;
+                        }
+                        if let Ok(key) = std::env::var("AULOS_RADIO") {
+                            this.play_radio(&key, "Radio".into(), cx);
                         }
                         if let Some(ix) = this.autoplay.take() {
                             this.play_album(ix, cx);
@@ -493,9 +502,7 @@ impl Aulos {
         cx.spawn(async move |this, cx| match rx.await {
             Ok(Ok(info)) => {
                 this.update(cx, |this, cx| {
-                    if !info.thumb.is_empty() && this.requested.insert(info.thumb.clone()) {
-                        let _ = this.art_tx.send(ArtRequest { thumb: info.thumb.clone() });
-                    }
+                    this.request_artist_art(&info);
                     if let View::Artist { key: k, info: slot, .. } = &mut this.view
                         && *k == key
                     {
@@ -606,6 +613,9 @@ impl Aulos {
             paused: false,
             finished: false,
             sent_idx: None,
+            refill: None,
+            refilling: false,
+            engine_end: 0,
         });
         self.play_from(start, 0, cx);
     }
@@ -644,6 +654,7 @@ impl Aulos {
                 now.elapsed_ms = ms;
                 now.paused = false;
                 now.finished = false;
+                now.engine_end = now.tracks.len();
                 self.status = format!("Playing {}", now.context).into();
                 let _ = self.mpris.send(MprisUpdate::Status { playing: true, stopped: false });
                 if ms > 0 {
@@ -798,6 +809,54 @@ impl Aulos {
             .detach();
         }
         let Some(now) = self.now.as_mut() else { return false };
+        // Radio: fetch the next window when two tracks from the end.
+        if let Some(key) = now.refill.clone()
+            && !now.refilling
+            && now.idx + 2 >= now.tracks.len()
+        {
+            now.refilling = true;
+            let rx = plex_call(move |c| async move { c.play_queue(&key).await });
+            cx.spawn(async move |this, cx| {
+                let res = rx.await;
+                this.update(cx, |this, cx| {
+                    let Some(now) = this.now.as_mut() else { return };
+                    now.refilling = false;
+                    match res {
+                        Ok(Ok((_, more))) => {
+                            let have: HashSet<String> = now.tracks.iter().map(|t| t.rating_key.clone()).collect();
+                            let more: Vec<Track> = more.into_iter().filter(|t| !have.contains(&t.rating_key)).collect();
+                            if more.is_empty() {
+                                now.refill = None; // station ran dry
+                            }
+                            let thumbs: Vec<String> = more.iter().map(|t| t.thumb.clone()).collect();
+                            now.tracks.extend(more);
+                            for th in thumbs {
+                                this.request_thumb(&th);
+                            }
+                            // The engine already ran out while we fetched: continue now.
+                            if let Some(n) = this.now.as_ref()
+                                && n.finished
+                                && n.engine_end < n.tracks.len()
+                            {
+                                let from = n.engine_end;
+                                this.play_from(from, 0, cx);
+                            }
+                            cx.notify();
+                        }
+                        Ok(Err(e)) => eprintln!("[aulos] refill: {e:#}"),
+                        Err(_) => {}
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        // The engine reached the end of its queue but the queue has grown.
+        if now.finished && !failed && now.engine_end < now.tracks.len() {
+            let from = now.engine_end;
+            self.play_from(from, 0, cx);
+            return false;
+        }
         let _ = self.mpris.send(MprisUpdate::Position(now.elapsed_ms));
         if now.finished {
             let _ = self.mpris.send(MprisUpdate::Status { playing: false, stopped: true });
@@ -973,134 +1032,6 @@ fn apply_component_theme(t: &Theme, window: Option<&mut Window>, cx: &mut App) {
 }
 
 impl Aulos {
-    fn artist_view(&self, key: &str, name: &str, info: Option<&ArtistInfo>, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let mut albums: Vec<(usize, Album)> = self
-            .albums
-            .iter()
-            .enumerate()
-            .filter(|(_, a)| a.artist_key == key)
-            .map(|(i, a)| (i, a.clone()))
-            .collect();
-        albums.sort_by(|a, b| b.1.year.cmp(&a.1.year));
-        let photo = match info.and_then(|i| self.art.get(&i.thumb).cloned()) {
-            Some(i) => img(i).size(px(200.0)).flex_none().rounded(px(100.0)).object_fit(ObjectFit::Cover).into_any_element(),
-            None => div().size(px(200.0)).flex_none().rounded(px(100.0)).bg(rgb(t.raised)).into_any_element(),
-        };
-        let header = div()
-            .flex()
-            .gap(px(28.0))
-            .items_end()
-            .child(photo)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0))
-                    .min_w_0()
-                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child("ARTIST"))
-                    .child(div().text_size(px(44.0)).font_weight(gpui::FontWeight::BOLD).text_color(rgb(t.text_strong)).child(
-                        if name.is_empty() { info.map(|i| i.title.clone()).unwrap_or_default() } else { name.to_string() },
-                    ))
-                    .child(div().text_size(px(15.0)).text_color(rgb(t.text)).child(format!("{} albums in your library", albums.len())))
-                    .child(
-                        div()
-                            .id("artist-back")
-                            .mt(px(8.0))
-                            .h(px(40.0))
-                            .px(px(16.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(20.0))
-                            .border_1()
-                            .border_color(rgb(t.border))
-                            .text_color(rgb(t.text))
-                            .cursor_pointer()
-                            .child("Back")
-                            .on_click(cx.listener(|this, _, _, cx| this.go_back(cx))),
-                    ),
-            );
-        let popular: Vec<gpui::AnyElement> = info
-            .map(|i| {
-                i.popular
-                    .iter()
-                    .take(8)
-                    .enumerate()
-                    .map(|(n, (tr, album_key, album_title, plays))| {
-                        let (ak, tk) = (album_key.clone(), tr.rating_key.clone());
-                        div()
-                            .id(("pop", n))
-                            .h(px(44.0))
-                            .px(px(12.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(16.0))
-                            .rounded(px(8.0))
-                            .cursor_pointer()
-                            .hover(|d| d.bg(rgb(t.raised)))
-                            .child(div().w(px(24.0)).text_size(px(13.0)).text_color(rgb(t.muted)).child(format!("{}", n + 1)))
-                            .child(div().flex_1().min_w_0().truncate().text_color(rgb(t.text)).child(tr.title.clone()))
-                            .child(div().w(px(260.0)).truncate().text_size(px(13.0)).text_color(rgb(t.muted)).child(album_title.clone()))
-                            .child(div().w(px(70.0)).text_size(px(12.0)).text_color(rgb(t.muted)).child(format!("{plays} plays")))
-                            .child(div().w(px(44.0)).text_size(px(13.0)).text_color(rgb(t.muted)).child(fmt_ms(tr.duration_ms)))
-                            .on_click(cx.listener(move |this, _, _, cx| this.play_track_in_album(&ak, tk.clone(), cx)))
-                            .into_any_element()
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let cards: Vec<gpui::AnyElement> = albums
-            .iter()
-            .map(|(ix, a)| {
-                let ix = *ix;
-                let cover = match self.art.get(&a.thumb).cloned() {
-                    Some(i) => img(i).size(px(ART)).rounded(px(8.0)).object_fit(ObjectFit::Cover).into_any_element(),
-                    None => div().size(px(ART)).rounded(px(8.0)).bg(rgb(t.raised)).into_any_element(),
-                };
-                div()
-                    .id(("aa", ix))
-                    .w(px(CARD_W))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .cursor_pointer()
-                    .child(cover)
-                    .child(div().text_size(px(14.0)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).truncate().child(a.title.clone()))
-                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(a.year.clone()))
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_album(ix, cx)))
-                    .into_any_element()
-            })
-            .collect();
-        let section = |title: &str| div().text_size(px(20.0)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child(title.to_string());
-        let mut col = div()
-            .id("artist-view")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.album_scroll)
-            .px(px(PAD_X))
-            .pt(px(28.0))
-            .pb(px(40.0))
-            .flex()
-            .flex_col()
-            .gap(px(28.0))
-            .child(header);
-        if !popular.is_empty() {
-            col = col.child(div().flex().flex_col().gap(px(6.0)).child(section("Popular in your library")).children(popular));
-        }
-        col = col.child(div().flex().flex_col().gap(px(14.0)).child(section("Albums")).child(div().flex().flex_wrap().gap(px(GAP)).children(cards)));
-        if let Some(i) = info.filter(|i| !i.summary.is_empty()) {
-            col = col.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .max_w(px(820.0))
-                    .child(section("About"))
-                    .child(div().text_size(px(14.0)).line_height(px(22.0)).text_color(rgb(t.text)).child(i.summary.clone())),
-            );
-        }
-        col.into_any_element()
-    }
 
     fn open_hub_item(&mut self, kind: &str, key: &str, title: &str, cx: &mut Context<Self>) {
         match kind {

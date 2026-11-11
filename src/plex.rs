@@ -165,6 +165,11 @@ pub struct ArtistInfo {
     pub thumb: String,
     /// Most-played tracks in this library: (track, album key, album title, plays).
     pub popular: Vec<(Track, String, String, u64)>,
+    pub genres: Vec<String>,
+    /// Plex's similar-artist names (from metadata, not sonic analysis).
+    pub similar: Vec<String>,
+    pub blur: Option<[u32; 4]>,
+    pub plays: u64,
 }
 
 pub struct ArtistRequest {
@@ -239,8 +244,6 @@ struct Meta {
     parent_rating_key: String,
     #[serde(rename = "viewCount", default)]
     view_count: Option<u64>,
-    #[serde(default)]
-    summary: String,
     #[serde(default)]
     year: Option<u32>,
     #[serde(default)]
@@ -599,8 +602,13 @@ impl Client {
     }
 
     pub async fn artist(&self, key: &str, section: &str) -> anyhow::Result<ArtistInfo> {
-        let meta: Envelope = self.get(&format!("/library/metadata/{key}")).await?.json().await.context("artist")?;
-        let m = meta.mc.metadata.into_iter().next().ok_or_else(|| anyhow::anyhow!("no such artist"))?;
+        let meta: serde_json::Value = self.get(&format!("/library/metadata/{key}")).await?.json().await.context("artist")?;
+        let m = &meta["MediaContainer"]["Metadata"][0];
+        anyhow::ensure!(m.is_object(), "no such artist");
+        let tags = |k: &str| -> Vec<String> {
+            m[k].as_array().map(|a| a.iter().filter_map(|t| t["tag"].as_str().map(String::from)).collect()).unwrap_or_default()
+        };
+        let hex = |k: &str| u32::from_str_radix(m["UltraBlurColors"][k].as_str()?, 16).ok();
         let top: Envelope = self
             .get(&format!(
                 "/library/sections/{section}/all?type=10&artist.id={key}&sort=viewCount:desc&X-Plex-Container-Start=0&X-Plex-Container-Size=10"
@@ -619,7 +627,16 @@ impl Client {
                 Some((t.into_track()?, key, title, plays))
             })
             .collect();
-        Ok(ArtistInfo { title: m.title, summary: m.summary, thumb: m.thumb.unwrap_or_default(), popular })
+        Ok(ArtistInfo {
+            title: m["title"].as_str().unwrap_or_default().to_string(),
+            summary: m["summary"].as_str().unwrap_or_default().replace("\\&", "&"),
+            thumb: m["thumb"].as_str().unwrap_or_default().to_string(),
+            popular,
+            genres: tags("Genre"),
+            similar: tags("Similar"),
+            blur: (|| Some([hex("topLeft")?, hex("topRight")?, hex("bottomRight")?, hex("bottomLeft")?]))(),
+            plays: m["viewCount"].as_u64().unwrap_or(0),
+        })
     }
 
     pub async fn art(&self, thumb: &str) -> anyhow::Result<Vec<u8>> {

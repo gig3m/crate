@@ -32,11 +32,17 @@ impl Aulos {
     pub(crate) fn play_station(&mut self, key: String, title: String, cx: &mut Context<Self>) {
         self.status = format!("Starting {title}…").into();
         cx.notify();
+        let key2 = key.clone();
         let rx = crate::plex_call(move |c| async move { c.play_queue(&key).await });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| match res {
-                Ok(Ok((_id, tracks))) if !tracks.is_empty() => this.start_queue(title, None, tracks, 0, cx),
+                Ok(Ok((_id, tracks))) if !tracks.is_empty() => {
+                    this.start_queue(title, None, tracks, 0, cx);
+                    if let Some(n) = this.now.as_mut() {
+                        n.refill = Some(key2);
+                    }
+                }
                 Ok(Ok(_)) => this.status = format!("{title} returned no tracks").into(),
                 Ok(Err(e)) => this.status = format!("{title}: {e:#}").into(),
                 Err(_) => {}
