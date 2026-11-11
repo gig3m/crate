@@ -352,7 +352,7 @@ impl Client {
             .header("Accept", "application/json")
             .header("X-Plex-Token", &self.token)
             .header("X-Plex-Product", "Crate")
-            .header("X-Plex-Client-Identifier", "crate")
+            .header("X-Plex-Client-Identifier", client_id())
             .send()
             .await?;
         anyhow::ensure!(res.status().is_success(), "{} -> {}", path, res.status());
@@ -509,7 +509,7 @@ impl Client {
             .header("Accept", "application/json")
             .header("X-Plex-Token", &self.token)
             .header("X-Plex-Product", "Crate")
-            .header("X-Plex-Client-Identifier", "crate")
+            .header("X-Plex-Client-Identifier", client_id())
             .send()
             .await?;
         anyhow::ensure!(res.status().is_success(), "playQueues -> {}", res.status());
@@ -525,7 +525,7 @@ impl Client {
             .header("X-Plex-Token", &self.token)
             .header("X-Plex-Product", "Crate")
             .header("X-Plex-Version", env!("CARGO_PKG_VERSION"))
-            .header("X-Plex-Client-Identifier", "crate")
+            .header("X-Plex-Client-Identifier", client_id())
             .header("X-Plex-Platform", "Linux")
             .header("X-Plex-Device-Name", host)
     }
@@ -865,6 +865,26 @@ fn urlencode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+/// A per-install client id, so two machines running Crate are two clients
+/// to the server (their sessions and plays don't collide). Kept in cache_dir().
+pub fn client_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let path = cache_dir().join("client-id");
+        if let Ok(id) = std::fs::read_to_string(&path)
+            && !id.trim().is_empty()
+        {
+            return id.trim().to_string();
+        }
+        let id = std::fs::read_to_string("/proc/sys/kernel/random/uuid")
+            .map(|u| format!("crate-{}", u.trim()))
+            .unwrap_or_else(|_| format!("crate-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(cache_dir());
+        let _ = std::fs::write(&path, &id);
+        id
+    })
 }
 
 /// ~/.cache/crate (or $XDG_CACHE_HOME/crate).

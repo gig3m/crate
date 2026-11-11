@@ -133,6 +133,8 @@ struct Crate {
     /// Album rating key -> details (None while loading).
     album_detail: HashMap<String, Option<plex::AlbumDetail>>,
     focus: gpui::FocusHandle,
+    /// Closes out the playing track's report when the app quits.
+    _on_quit: Option<gpui::Subscription>,
 }
 
 struct Now {
@@ -243,6 +245,19 @@ impl Crate {
             }
         })
         .detach();
+        let on_quit = cx.on_app_quit(|this: &mut Self, _cx| {
+            this.report_stop();
+            flush_writes(Duration::from_millis(1500));
+            async {}
+        });
+        // Closing the window drops this entity before app-quit hooks run, so
+        // close out the report here, while it still exists.
+        let weak = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            weak.update(cx, |this, _| this.report_stop()).ok();
+            flush_writes(Duration::from_millis(1500));
+            true
+        });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let (theme, theme_gen) = Theme::load();
@@ -496,6 +511,7 @@ impl Crate {
             artist_tx,
             mpris,
             focus,
+            _on_quit: Some(on_quit),
         }
     }
 
@@ -785,6 +801,13 @@ impl Crate {
         if idx >= now.tracks.len() {
             return;
         }
+        // Restarting or seeking back within the reported track starts a new
+        // listen: close the old one first so a finished listen still counts.
+        if now.rep_idx == Some(idx) && ms < now.elapsed_ms && now.rep_state != "stopped" {
+            send_timeline(now.tracks[idx].rating_key.clone(), "stopped", now.elapsed_ms, now.tracks[idx].duration_ms);
+            now.rep_state = "stopped";
+            now.rep_elapsed = 0;
+        }
         self.engine = None; // dropping stops the old one
         let (base, token) = self.plex.clone();
         let queue = now.tracks[idx..]
@@ -1063,7 +1086,8 @@ impl Crate {
         if let Some(tr) = n.rep_idx.and_then(|i| n.tracks.get(i))
             && n.rep_state != "stopped"
         {
-            send_timeline(tr.rating_key.clone(), "stopped", n.elapsed_ms.max(n.rep_elapsed), tr.duration_ms);
+            let at = if n.rep_idx == Some(n.idx) { n.elapsed_ms } else { n.rep_elapsed };
+            send_timeline(tr.rating_key.clone(), "stopped", at, tr.duration_ms);
             n.rep_state = "stopped";
         }
     }
@@ -1083,7 +1107,9 @@ impl Crate {
             .and_then(|d| d.as_ref())
             .and_then(|d| d.rating)
             .or_else(|| self.album_detail.values().flatten().find_map(|a| a.stats.get(&rk).and_then(|s| s.1)));
-        let new = if current.map(|r| (r / 2.0).round() as u8) == Some(stars) { None } else { Some(stars * 2) };
+        // Clear only when the click matches the stored value exactly; a half-star
+        // rating from another client (shown rounded down) gets set, not cleared.
+        let new = if current == Some(f32::from(stars * 2)) { None } else { Some(stars * 2) };
         if let Some(Some(d)) = self.track_detail.get_mut(&rk) {
             d.rating = new.map(f32::from);
         }
@@ -1097,24 +1123,14 @@ impl Crate {
 
     pub(crate) fn rate_album(&mut self, key: String, stars: u8, cx: &mut Context<Self>) {
         let Some(Some(d)) = self.album_detail.get_mut(&key) else { return };
-        let new = if d.rating.map(|r| (r / 2.0).round() as u8) == Some(stars) { None } else { Some(stars * 2) };
+        let new = if d.rating == Some(f32::from(stars * 2)) { None } else { Some(stars * 2) };
         d.rating = new.map(f32::from);
         self.rate_on_server(key, new, cx);
     }
 
     fn rate_on_server(&mut self, key: String, rating: Option<u8>, cx: &mut Context<Self>) {
         cx.notify();
-        let rx = plex_call(move |c| async move { c.rate(&key, rating).await });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Err(e)) = rx.await {
-                this.update(cx, |this, cx| {
-                    this.status = format!("Rating not saved: {e:#}").into();
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
-        .detach();
+        queue_write(Write::Rate(key, rating));
     }
 
     fn request_track_detail(&mut self, rk: String, cx: &mut Context<Self>) {
@@ -1456,30 +1472,58 @@ where
 
 /// More tracks for a radio: a Plex station/radio key, or `query:<filter>`
 /// for random tracks matching a library filter.
-/// Timeline reports go out one at a time, in order: if a new track's
-/// `playing` overtook the previous track's `stopped`, the server would close
-/// the old session itself and then count the late `stopped` as a second play.
-static TIMELINE: std::sync::OnceLock<mpsc::UnboundedSender<(String, &'static str, u64, u64)>> = std::sync::OnceLock::new();
+/// Writes to Plex (timeline reports, ratings) go out one at a time, in
+/// order: if a new track's `playing` overtook the previous track's `stopped`,
+/// the server would close the old session itself and then count the late
+/// `stopped` as a second play; two quick rating clicks must land in order.
+enum Write {
+    Timeline(String, &'static str, u64, u64),
+    Rate(String, Option<u8>),
+}
 
-fn send_timeline(rk: String, state: &'static str, time: u64, duration: u64) {
-    if rk.is_empty() || std::env::var_os("CRATE_NO_REPORT").is_some() {
-        return;
-    }
-    let tx = TIMELINE.get_or_init(|| {
-        let (tx, mut rx) = mpsc::unbounded_channel::<(String, &'static str, u64, u64)>();
+static WRITES: std::sync::OnceLock<mpsc::UnboundedSender<Write>> = std::sync::OnceLock::new();
+/// Writes queued or in flight, so quitting can wait for them.
+static PENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn queue_write(w: Write) {
+    let tx = WRITES.get_or_init(|| {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Write>();
         if let Some((handle, client)) = PLEX.get() {
             let client = client.clone();
             handle.spawn(async move {
-                while let Some((rk, st, t, d)) = rx.recv().await {
-                    if let Err(e) = client.timeline(&rk, st, t, d).await {
-                        eprintln!("[crate] timeline {st} {rk}: {e:#}");
+                while let Some(w) = rx.recv().await {
+                    let r = match &w {
+                        Write::Timeline(rk, st, t, d) => client.timeline(rk, st, *t, *d).await,
+                        Write::Rate(k, r) => client.rate(k, *r).await,
+                    };
+                    if let Err(e) = r {
+                        eprintln!("[crate] plex write: {e:#}");
                     }
+                    PENDING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 }
             });
         }
         tx
     });
-    let _ = tx.send((rk, state, time, duration));
+    PENDING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if tx.send(w).is_err() {
+        PENDING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn send_timeline(rk: String, state: &'static str, time: u64, duration: u64) {
+    if rk.is_empty() || std::env::var_os("CRATE_NO_REPORT").is_some() {
+        return;
+    }
+    queue_write(Write::Timeline(rk, state, time, duration));
+}
+
+/// Block (briefly) until queued Plex writes are out; used when quitting.
+fn flush_writes(limit: Duration) {
+    let t0 = Instant::now();
+    while PENDING.load(std::sync::atomic::Ordering::SeqCst) > 0 && t0.elapsed() < limit {
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn fetch_more(key: String) -> tokio::sync::oneshot::Receiver<anyhow::Result<Vec<Track>>> {
@@ -1539,6 +1583,8 @@ fn main() {
 
     gpui_platform::application().with_assets(icons::Icons).run(move |cx: &mut App| {
         gpui_component::init(cx);
+        // Closing the window quits (so the on-quit report goes out).
+        cx.on_window_closed(|cx, _| cx.quit()).detach();
         // Static Inter weights: GPUI on Linux renders a variable font at one weight.
         cx.text_system()
             .add_fonts(vec![
