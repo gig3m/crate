@@ -29,7 +29,6 @@ impl Aulos {
             (Some(_), Some(tr)) => (tr.title.clone().into(), format!("{} · {}", tr.artist, tr.album_title).into()),
             _ => ("Nothing playing".into(), "Pick an album to start".into()),
         };
-        let album_ix = track.and_then(|tr| self.albums.iter().position(|a| a.rating_key == tr.album_key));
         let left = div()
             .id("np")
             .flex_shrink(1.0)
@@ -38,7 +37,12 @@ impl Aulos {
             .flex()
             .items_center()
             .gap(px(14.0))
-            .when_some(album_ix, |d, ix| d.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.open_album(ix, cx))))
+            .when(now.is_some(), |d| {
+                d.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+                    this.now_playing = true;
+                    cx.notify();
+                }))
+            })
             .child(cover)
             .child(
                 div()
@@ -85,7 +89,7 @@ impl Aulos {
             .child(play)
             .child(icon_btn("next", "next", 20.0, t.text, Some(Transport::Next), cx))
             .child(icon_btn("repeat", "repeat", 17.0, t.line, None, cx));
-        let levels = now.and_then(|n| self.levels.get(&n.tracks[n.idx].rating_key));
+        let levels = now.and_then(|n| self.track_detail.get(&n.tracks[n.idx].rating_key)).and_then(|d| d.as_ref()).map(|d| &d.levels).filter(|l| !l.is_empty());
         let bars: Vec<_> = (0..BARS)
             .map(|i| {
                 let ms = len_ms * i as u64 / BARS as u64;

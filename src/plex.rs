@@ -155,6 +155,49 @@ pub struct AlbumDetail {
     pub stats: std::collections::HashMap<String, (u64, Option<f32>)>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TrackDetail {
+    pub levels: Vec<f32>,
+    pub file: String,
+    pub codec: String,
+    pub bitrate: Option<u64>,
+    pub plays: u64,
+    pub last_viewed: i64,
+    pub added: i64,
+    pub rating: Option<f32>,
+    pub moods: Vec<String>,
+    /// Integrated loudness (LUFS) and ReplayGain-style track gain (dB).
+    pub loudness: Option<f32>,
+    pub gain: Option<f32>,
+    /// (start ms, line); empty when the track has no timed lyrics.
+    pub lyrics: Vec<(u64, String)>,
+    pub lyrics_by: String,
+}
+
+/// `[mm:ss.xx]text` lines; tags like `[au:...]` are skipped.
+pub fn parse_lrc(text: &str) -> Vec<(u64, String)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut rest = line.trim();
+        let mut stamps = Vec::new();
+        while let Some(r) = rest.strip_prefix('[') {
+            let Some(end) = r.find(']') else { break };
+            let tag = &r[..end];
+            if let Some((mm, ss)) = tag.split_once(':')
+                && let (Ok(m), Ok(s)) = (mm.parse::<u64>(), ss.parse::<f64>())
+            {
+                stamps.push(m * 60_000 + (s * 1000.0).round() as u64);
+            }
+            rest = &r[end + 1..];
+        }
+        for t in stamps {
+            out.push((t, rest.trim().to_string()));
+        }
+    }
+    out.sort_by_key(|l| l.0);
+    out
+}
+
 pub struct HubsRequest {
     pub reply: oneshot::Sender<anyhow::Result<Home>>,
 }
@@ -528,21 +571,50 @@ impl Client {
         Ok(d)
     }
 
-    /// Loudness envelope for a track, normalized to 0..1 over `points` samples.
-    /// Empty when the server hasn't analyzed loudness for it.
-    pub async fn levels(&self, rating_key: &str, points: usize) -> anyhow::Result<Vec<f32>> {
+    /// Everything Now Playing shows about one track: loudness envelope
+    /// (0..1 over `points`), file, plays, loudness and timed lyrics.
+    pub async fn track_detail(&self, rating_key: &str, points: usize) -> anyhow::Result<TrackDetail> {
         let v: serde_json::Value = self.get(&format!("/library/metadata/{rating_key}")).await?.json().await.context("track")?;
-        let streams = v["MediaContainer"]["Metadata"][0]["Media"][0]["Part"][0]["Stream"].as_array().cloned().unwrap_or_default();
-        let Some(id) = streams.iter().find(|s| s["streamType"].as_i64() == Some(2)).and_then(|s| s["id"].as_i64()) else {
-            return Ok(vec![]);
+        let m = &v["MediaContainer"]["Metadata"][0];
+        let media = &m["Media"][0];
+        let part = &media["Part"][0];
+        let streams = part["Stream"].as_array().cloned().unwrap_or_default();
+        let audio = streams.iter().find(|s| s["streamType"].as_i64() == Some(2));
+        let num = |s: &serde_json::Value, k: &str| s[k].as_str().and_then(|x| x.parse::<f32>().ok()).or(s[k].as_f64().map(|f| f as f32));
+        let mut d = TrackDetail {
+            file: part["file"].as_str().unwrap_or_default().to_string(),
+            codec: media["audioCodec"].as_str().unwrap_or_default().to_uppercase(),
+            bitrate: media["bitrate"].as_u64(),
+            plays: m["viewCount"].as_u64().unwrap_or(0),
+            last_viewed: m["lastViewedAt"].as_i64().unwrap_or(0),
+            added: m["addedAt"].as_i64().unwrap_or(0),
+            rating: m["userRating"].as_f64().map(|r| r as f32),
+            moods: m["Mood"].as_array().map(|a| a.iter().filter_map(|t| t["tag"].as_str().map(String::from)).collect()).unwrap_or_default(),
+            loudness: audio.and_then(|a| num(a, "loudness")),
+            gain: audio.and_then(|a| num(a, "gain")),
+            ..Default::default()
         };
-        let l: serde_json::Value =
-            self.get(&format!("/library/streams/{id}/levels?subsample={points}")).await?.json().await.context("levels")?;
-        let db: Vec<f64> = l["MediaContainer"]["Level"].as_array().map(|a| a.iter().filter_map(|x| x["v"].as_f64()).collect()).unwrap_or_default();
-        let Some(max) = db.iter().cloned().reduce(f64::max) else { return Ok(vec![]) };
-        // Show the top 24 dB of the track's own range.
-        let floor = max - 24.0;
-        Ok(db.iter().map(|&d| (((d - floor) / (max - floor)).clamp(0.0, 1.0)) as f32).collect())
+        if let Some(id) = audio.and_then(|s| s["id"].as_i64())
+            && let Ok(res) = self.get(&format!("/library/streams/{id}/levels?subsample={points}")).await
+            && let Ok(l) = res.json::<serde_json::Value>().await
+        {
+            let db: Vec<f64> = l["MediaContainer"]["Level"].as_array().map(|a| a.iter().filter_map(|x| x["v"].as_f64()).collect()).unwrap_or_default();
+            if let Some(max) = db.iter().cloned().reduce(f64::max) {
+                // Show the top 24 dB of the track's own range.
+                let floor = max - 24.0;
+                d.levels = db.iter().map(|&x| (((x - floor) / (max - floor)).clamp(0.0, 1.0)) as f32).collect();
+            }
+        }
+        // Timed lyrics: a streamType 4 LRC stream (LyricFind via the server agent).
+        if let Some(key) = streams.iter().find(|s| s["streamType"].as_i64() == Some(4)).and_then(|s| s["key"].as_str())
+            && let Ok(res) = self.http.get(format!("{}{key}", self.base)).header("X-Plex-Token", &self.token).send().await
+            && res.status().is_success()
+            && let Ok(text) = res.text().await
+        {
+            d.lyrics = parse_lrc(&text);
+            d.lyrics_by = streams.iter().find(|s| s["streamType"].as_i64() == Some(4)).and_then(|s| s["provider"].as_str()).unwrap_or_default().to_string();
+        }
+        Ok(d)
     }
 
     /// Audio playlists, most recently played first.

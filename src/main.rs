@@ -15,6 +15,7 @@ mod icons;
 mod library;
 mod palette;
 mod mpris;
+mod now_playing;
 mod player_bar;
 mod shell;
 mod plex;
@@ -38,7 +39,7 @@ use aulos_spike::audio::{Engine, Event as AudioEvent, Source};
 use mpris::{Transport, Update as MprisUpdate};
 use plex::{Album, ArtRequest, ArtResult, ArtistInfo, ArtistRequest, HubsRequest, SearchHit, SearchRequest, Track, TracksRequest};
 
-gpui::actions!(aulos, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch]);
+gpui::actions!(aulos, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch, ToggleNowPlaying]);
 
 #[derive(Clone)]
 enum View {
@@ -90,8 +91,9 @@ struct Aulos {
     fwd: Vec<View>,
     artist_tx: mpsc::UnboundedSender<ArtistRequest>,
     mpris: tokio::sync::mpsc::UnboundedSender<MprisUpdate>,
-    /// Track rating key -> loudness envelope (0..1, 96 points) for the seek bar.
-    levels: HashMap<String, Vec<f32>>,
+    /// Track rating key -> details (levels for the seek bar, lyrics, file...).
+    /// None while loading.
+    track_detail: HashMap<String, Option<plex::TrackDetail>>,
     /// Width of the main content column, set each render.
     content_w: f32,
     /// Album grid order for the current sort/filters (None: the cached list as-is).
@@ -105,6 +107,9 @@ struct Aulos {
     pal_sel: usize,
     pal_scope: usize,
     test_search: Option<String>,
+    /// Full-window Now Playing, and its panel tab (queue / signal / info).
+    now_playing: bool,
+    np_tab: usize,
     /// Album rating key -> details (None while loading).
     album_detail: HashMap<String, Option<plex::AlbumDetail>>,
     focus: gpui::FocusHandle,
@@ -385,7 +390,7 @@ impl Aulos {
             play_gen: 0,
             view: View::Home,
             back: Vec::new(),
-            levels: HashMap::new(),
+            track_detail: HashMap::new(),
             content_w: 1000.0,
             lib_view: None,
             lib_filters: Vec::new(),
@@ -396,6 +401,8 @@ impl Aulos {
             pal_sel: 0,
             pal_scope: 0,
             test_search: std::env::var("AULOS_SEARCH").ok(),
+            now_playing: std::env::var_os("AULOS_NOW_PLAYING").is_some(),
+            np_tab: std::env::var("AULOS_NP_TAB").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             album_detail: HashMap::new(),
             fwd: Vec::new(),
             album_scroll: gpui::ScrollHandle::new(),
@@ -814,24 +821,10 @@ impl Aulos {
             });
         }
         let rk = now.tracks[now.idx].rating_key.clone();
-        if !self.levels.contains_key(&rk) {
-            self.levels.insert(rk.clone(), Vec::new());
-            let rx = plex_call(move |c| async move { c.levels(&rk, player_bar::BARS).await.map(|l| (rk, l)) });
-            cx.spawn(async move |this, cx| {
-                match rx.await {
-                    Ok(Ok((rk, l))) => {
-                        this.update(cx, |this, cx| {
-                            this.levels.insert(rk, l);
-                            cx.notify();
-                        })
-                        .ok();
-                    }
-                    Ok(Err(e)) => eprintln!("[aulos] levels: {e:#}"),
-                    Err(_) => {}
-                }
-            })
-            .detach();
-        }
+        let album_key = now.tracks[now.idx].album_key.clone();
+        self.request_track_detail(rk, cx);
+        // Now Playing's ambient field comes from the album's UltraBlur colors.
+        self.request_album_detail(album_key, cx);
         let Some(now) = self.now.as_mut() else { return false };
         // Radio: fetch the next window when two tracks from the end.
         if let Some(key) = now.refill.clone()
@@ -895,6 +888,26 @@ impl Aulos {
     }
 
     /// Grid cells: the real library, or AULOS_ITEMS for the scroll benchmark.
+    fn request_track_detail(&mut self, rk: String, cx: &mut Context<Self>) {
+        if self.track_detail.contains_key(&rk) {
+            return;
+        }
+        self.track_detail.insert(rk.clone(), None);
+        let rx = plex_call(move |c| async move { c.track_detail(&rk, player_bar::BARS).await.map(|d| (rk, d)) });
+        cx.spawn(async move |this, cx| match rx.await {
+            Ok(Ok((rk, d))) => {
+                this.update(cx, |this, cx| {
+                    this.track_detail.insert(rk, Some(d));
+                    cx.notify();
+                })
+                .ok();
+            }
+            Ok(Err(e)) => eprintln!("[aulos] track detail: {e:#}"),
+            Err(_) => {}
+        })
+        .detach();
+    }
+
     fn cells(&self) -> usize {
         match &self.lib_view {
             Some(ix) => ix.len(),
@@ -1097,6 +1110,8 @@ impl Render for Aulos {
 
         let player = self.player_bar(&t, cx);
         let palette = self.palette.then(|| self.palette_view(&t, cx));
+        let now_playing = (self.now_playing && self.now.is_some())
+            .then(|| div().absolute().inset_0().child(self.now_playing_view(&t, cx)));
 
         let el = div()
             .key_context("Aulos")
@@ -1114,7 +1129,18 @@ impl Render for Aulos {
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.open_palette(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &Back, _, cx| this.go_back(cx)))
+            .on_action(cx.listener(|this, _: &Back, _, cx| {
+                if this.now_playing {
+                    this.now_playing = false;
+                    cx.notify();
+                } else {
+                    this.go_back(cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleNowPlaying, _, cx| {
+                this.now_playing = !this.now_playing && this.now.is_some();
+                cx.notify();
+            }))
             .size_full()
             .relative()
             .flex()
@@ -1153,6 +1179,7 @@ impl Render for Aulos {
                     ),
             )
             .child(player)
+            .children(now_playing)
             .children(palette);
         self.last_render_us = t0.elapsed().as_micros();
         el
@@ -1222,6 +1249,7 @@ fn main() {
             gpui::KeyBinding::new("right", SeekForward, Some("Aulos && !Input")),
             gpui::KeyBinding::new("left", SeekBack, Some("Aulos && !Input")),
             gpui::KeyBinding::new("escape", Back, Some("Aulos && !Input")),
+            gpui::KeyBinding::new("f", ToggleNowPlaying, Some("Aulos && !Input")),
             gpui::KeyBinding::new("ctrl-k", FocusSearch, Some("Aulos")),
         ]);
         let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
