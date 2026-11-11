@@ -96,6 +96,8 @@ struct Crate {
     eq_save_gen: u64,
     /// Sweet fades between albums, in seconds (0 = off).
     fade_secs: u32,
+    /// Remote streaming quality, kbps (0 = original file).
+    remote_kbps: u32,
     /// A queue waiting on loudness before it starts (its queue_seq); cleared
     /// by any transport action or explicit start, which supersede it.
     pending_start: Option<u64>,
@@ -233,6 +235,8 @@ struct Now {
     level: HashMap<usize, f32>,
     /// index -> (source rate, bits), from engine TrackStarted events.
     formats: HashMap<usize, (u32, u32)>,
+    /// index -> transcode bitrate (kbps) of what the engine opened; absent = original file.
+    transcoded: HashMap<usize, u32>,
     /// Album track index the current engine started at, and the offset into it.
     start_idx: usize,
     start_ms: u64,
@@ -687,6 +691,7 @@ impl Crate {
             leveling: theme::saved_leveling(),
             gains: HashMap::new(),
             fade_secs: theme::saved_fade(),
+            remote_kbps: theme::saved_remote_kbps(),
             eq_preset,
             eq_custom,
             eq_sliders,
@@ -1123,6 +1128,7 @@ impl Crate {
             context_key,
             tracks,
             formats: HashMap::new(),
+            transcoded: HashMap::new(),
             level: HashMap::new(),
             start_idx: 0,
             start_ms: 0,
@@ -1303,6 +1309,19 @@ impl Crate {
         cx.notify();
     }
 
+    pub(crate) fn set_remote_quality(&mut self, kbps: u32, cx: &mut Context<Self>) {
+        if self.remote_kbps == kbps {
+            return;
+        }
+        self.remote_kbps = kbps;
+        if let Err(e) = theme::save_remote_kbps(kbps) {
+            self.status = format!("Couldn't save the streaming quality: {e}").into();
+        }
+        // The next track onward; the one playing keeps its stream.
+        self.sync_upcoming();
+        cx.notify();
+    }
+
     pub(crate) fn set_leveling(&mut self, l: theme::Leveling, cx: &mut Context<Self>) {
         if self.leveling == l {
             return;
@@ -1327,6 +1346,7 @@ impl Crate {
         // The new engine reports its own gains; don't show the old one's meanwhile.
         if let Some(n) = self.now.as_mut() {
             n.level.clear();
+            n.transcoded.clear();
         }
         let Some(now) = self.now.as_mut() else { return };
         if idx >= now.tracks.len() {
@@ -1493,6 +1513,10 @@ impl Crate {
                         eprintln!("[crate] engine opened {label} for #{}", now.start_idx + index);
                     }
                     now.formats.insert(now.start_idx + index, (source_rate, bits));
+                    match transcoded_kbps(&label) {
+                        Some(k) => now.transcoded.insert(now.start_idx + index, k),
+                        None => now.transcoded.remove(&(now.start_idx + index)),
+                    };
                     // What the decoder really applies to this playback (not what we last asked for).
                     now.level.insert(now.start_idx + index, gain);
                     if now.boundaries.len() == index {
@@ -2023,6 +2047,11 @@ impl Render for Crate {
                                     this.with_tracks(album, cx, move |this, _a, tracks, cx| this.enqueue(tracks, next, label, cx));
                                 }
                             }
+                            k if k.starts_with("seek:") => {
+                                if let Ok(ms) = k[5..].parse() {
+                                    this.transport(Transport::SetPosition(ms), cx);
+                                }
+                            }
                             k if k.starts_with("play:") => {
                                 if let Some(ix) = this.albums.iter().position(|a| a.rating_key == k[5..]) {
                                     this.play_album(ix, cx);
@@ -2300,6 +2329,14 @@ impl Crate {
 
 /// The music library section key for this account.
 static SECTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Whether the server address in use is remote (set once at launch).
+pub(crate) static REMOTE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// The bitrate in a transcoded stream's engine label (`…part-<id>.tx<kbps>.mp3`).
+fn transcoded_kbps(label: &str) -> Option<u32> {
+    let rest = label.rsplit_once(".tx")?.1;
+    rest.strip_suffix(".mp3")?.parse().ok()
+}
 
 pub(crate) fn section() -> String {
     SECTION.get().cloned().unwrap_or_else(|| "1".into())
@@ -2556,6 +2593,15 @@ fn main() {
     let acct = rt.block_on(account::ensure_reachable(acct));
     let (base, token, section) = (acct.url.clone(), acct.token.clone(), acct.section.clone());
     offline::set_scope(&acct.server_id, &saved_url);
+    // Remote when the address in use is one Plex lists as not local (or a
+    // relay). An address it doesn't list (PLEX_URL) counts as local.
+    // CRATE_REMOTE=1/0 overrides, for testing.
+    let remote = match std::env::var("CRATE_REMOTE").ok().as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        _ => acct.connections.iter().find(|c| c.uri == acct.url).is_some_and(|c| !c.local || c.relay),
+    };
+    let _ = REMOTE.set(remote);
     let _ = SECTION.set(section.clone());
 
     // tokio lives on its own threads; GPUI never sees it except via channels.
@@ -2634,3 +2680,14 @@ fn main() {
 
 #[allow(dead_code)]
 fn _unused(_: Pixels) {}
+
+#[cfg(test)]
+mod transcode_tests {
+    #[test]
+    fn label_kbps() {
+        assert_eq!(super::transcoded_kbps("plex:part-46213.tx128.mp3"), Some(128));
+        assert_eq!(super::transcoded_kbps("plex:part-46213.flac"), None);
+        assert_eq!(super::transcoded_kbps("plex:part-46213.mp3"), None);
+        assert_eq!(super::transcoded_kbps("song.txt.mp3"), None);
+    }
+}

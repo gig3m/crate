@@ -44,6 +44,9 @@ impl Crate {
             })
             .collect();
         let format = n.formats.get(&n.idx).map(|&(rate, bits)| {
+            if let Some(k) = n.transcoded.get(&n.idx) {
+                return format!("MP3 {k}k · transcoded");
+            }
             let codec = detail.as_ref().map(|d| d.codec.clone()).unwrap_or_default();
             let khz = if rate % 1000 == 0 { format!("{}", rate / 1000) } else { format!("{:.1}", rate as f32 / 1000.0) };
             format!("{codec} {bits}/{khz}").trim().to_string()

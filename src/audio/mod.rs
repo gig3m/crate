@@ -471,8 +471,9 @@ fn decoder_thread(
         let fade_frames = (item.fade_ms as u64 * rate as u64 / 1000) as usize;
         // The track must be known to outlast the fade twice over, or the fade
         // would run past its end (into the next track); unknown length: gapless.
-        let long_enough = track.num_frames.is_some_and(|n| n >= 2 * fade_frames as u64);
-        if fade_frames > 0 && !long_enough && track.num_frames.is_none() {
+        let num_frames = src.len_ms().map(|ms| ms * rate as u64 / 1000).or(track.num_frames);
+        let long_enough = num_frames.is_some_and(|n| n >= 2 * fade_frames as u64);
+        if fade_frames > 0 && !long_enough && num_frames.is_none() {
             eprintln!("[engine] no fade into {}: its length isn't known", src.label());
         }
         let crossfade = fade_frames > 0 && long_enough && rate == tail_rate && tail.len() >= CHANNELS && !(index == 0 && start_ms > 0);

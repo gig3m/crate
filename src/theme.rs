@@ -139,6 +139,20 @@ pub fn save_fade(secs: u32) -> std::io::Result<()> {
     save_key("fade", toml::Value::Integer(secs as i64))
 }
 
+/// Remote streaming quality, kbps: 0 = original file. Applies only when the
+/// server address in use isn't on this network (canvas: "Original on LAN").
+pub const REMOTE_QUALITIES: [u32; 4] = [0, 320, 192, 128];
+
+pub fn saved_remote_kbps() -> u32 {
+    let raw = std::fs::read_to_string(config_path()).unwrap_or_default();
+    let map: HashMap<String, toml::Value> = toml::from_str(&raw).unwrap_or_default();
+    map.get("remote_quality").and_then(|v| v.as_integer()).map(|v| v as u32).filter(|v| REMOTE_QUALITIES.contains(v)).unwrap_or(0)
+}
+
+pub fn save_remote_kbps(kbps: u32) -> std::io::Result<()> {
+    save_key("remote_quality", toml::Value::Integer(kbps as i64))
+}
+
 /// Ten-band EQ presets (canvas). Off bypasses it (bit-perfect) but keeps
 /// the custom curve for later.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

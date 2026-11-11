@@ -217,7 +217,7 @@ impl Crate {
                                 .font_family(MONO)
                                 .text_size(px(11.0))
                                 .text_color(rgb(t.muted))
-                                .child(if online { "Music · direct play" } else { "connecting…" }),
+                                .child(if online { format!("Music · {}", self.stream_mode()) } else { "connecting…".into() }),
                         ),
                 )
                 .child(icons::icon("updown", 14.0, t.muted)),
@@ -308,7 +308,7 @@ impl Crate {
                     .text_size(px(12.0))
                     .text_color(rgb(t.text2))
                     .child(div().size(px(8.0)).rounded(px(4.0)).bg(rgb(if self.home.is_some() { t.healthy } else { t.muted })))
-                    .child(format!("{server} · direct play")),
+                    .child(format!("{server} · {}", self.stream_mode())),
             )
             .child(self.settings_menu(t, cx))
             .into_any_element()

@@ -19,8 +19,12 @@ use symphonia::core::io::MediaSource;
 #[derive(Clone, Debug)]
 pub enum Source {
     File(PathBuf),
-    /// A Plex part URL (absolute) fetched with the token, cached at `cache`.
-    Http { url: String, token: String, cache: PathBuf },
+    /// A Plex URL (absolute) fetched with the token, cached at `cache`.
+    /// `prepare`, when set, is fetched first and must succeed (a transcode
+    /// decision); `{session}` in both URLs becomes a fresh id per open.
+    /// `len_ms` overrides the container's length, for streams that don't
+    /// carry a reliable one (Plex's transcoded MP3 has no Xing header).
+    Http { url: String, token: String, cache: PathBuf, prepare: Option<String>, len_ms: Option<u64> },
 }
 
 impl Source {
@@ -30,6 +34,14 @@ impl Source {
             Source::Http { cache, .. } => {
                 format!("plex:{}", cache.file_name().unwrap_or_default().to_string_lossy())
             }
+        }
+    }
+
+    /// Known length, when the container's own can't be trusted.
+    pub fn len_ms(&self) -> Option<u64> {
+        match self {
+            Source::Http { len_ms, .. } => *len_ms,
+            Source::File(_) => None,
         }
     }
 
@@ -47,10 +59,32 @@ impl Source {
         match self {
             Source::File(p) => Ok(Box::new(File::open(p)?)),
             Source::Http { cache, .. } if cache.exists() => Ok(Box::new(File::open(cache)?)),
-            Source::Http { url, token, cache } => Ok(Box::new(Progressive::start(url, token, cache, stop)?)),
+            Source::Http { url, token, cache, prepare: None, .. } => Ok(Box::new(Progressive::start(url, token, CLIENT, cache, stop)?)),
+            Source::Http { url, token, cache, prepare: Some(prepare), .. } => {
+                // One transcode session per open, so a reopen (seek, restart)
+                // never shares a server-side job with an attempt being dropped.
+                let session = format!("crate-{}-{}", std::process::id(), ATTEMPT.fetch_add(1, Ordering::Relaxed));
+                reqwest::blocking::Client::new()
+                    .get(prepare.replace("{session}", &session))
+                    .header("X-Plex-Token", token.as_str())
+                    .header("X-Plex-Client-Identifier", TRANSCODE_CLIENT)
+                    .header("Accept", "application/json")
+                    .timeout(Duration::from_secs(10))
+                    .send()?
+                    .error_for_status()?;
+                Ok(Box::new(Progressive::start(&url.replace("{session}", &session), token, TRANSCODE_CLIENT, cache, stop)?))
+            }
         }
     }
 }
+
+/// Client id for direct file fetches.
+const CLIENT: &str = "crate";
+/// Transcodes go under their own client id: a transcode decision leaves
+/// Plex denying that client direct play of the part ("session lacking
+/// permission to direct play", 503) for a while, which would break
+/// original-quality and offline fetches of the same track.
+const TRANSCODE_CLIENT: &str = "crate-transcode";
 
 struct DlState {
     written: AtomicU64,
@@ -80,14 +114,14 @@ impl Drop for Progressive {
 static ATTEMPT: AtomicU64 = AtomicU64::new(0);
 
 impl Progressive {
-    fn start(url: &str, token: &str, cache: &std::path::Path, stop: Arc<AtomicBool>) -> anyhow::Result<Self> {
+    fn start(url: &str, token: &str, client: &str, cache: &std::path::Path, stop: Arc<AtomicBool>) -> anyhow::Result<Self> {
         // One temp file per attempt: overlapping downloads of the same track
         // (seek, restart) never share or truncate each other's file.
         // Request first, so a 404 or auth failure surfaces as itself.
         let mut resp = reqwest::blocking::Client::new()
             .get(url)
             .header("X-Plex-Token", token)
-            .header("X-Plex-Client-Identifier", "crate")
+            .header("X-Plex-Client-Identifier", client)
             .send()?
             .error_for_status()?;
         let n = ATTEMPT.fetch_add(1, Ordering::Relaxed);

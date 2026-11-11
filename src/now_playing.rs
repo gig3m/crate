@@ -373,7 +373,13 @@ impl Crate {
             1 => {
                 let fmt = n.formats.get(&n.idx).copied();
                 let codec = detail.as_ref().map(|d| d.codec.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| "Audio".into());
+                let tx = n.transcoded.get(&n.idx).copied();
                 let source = match fmt {
+                    // The decoder sees Plex's MP3, not the file: describe the file.
+                    _ if tx.is_some() => {
+                        let kbps = detail.as_ref().and_then(|d| d.bitrate).map(|b| format!(" · {b} kbps")).unwrap_or_default();
+                        format!("{codec} on the server{kbps}")
+                    }
                     Some((rate, bits)) => {
                         let kbps = detail.as_ref().and_then(|d| d.bitrate).map(|b| format!(" · {b} kbps")).unwrap_or_default();
                         format!("{codec} · {bits}-bit / {} kHz{kbps}", khz(rate))
@@ -384,7 +390,7 @@ impl Crate {
                 // Reported by the engine for this playback: what's actually audible.
                 let level = n.level.get(&n.idx).copied().unwrap_or(1.0);
                 let eq_on = self.eq_gains().iter().any(|&g| g != 0.0);
-                let bitperfect = native && self.volume >= 1.0 && level == 1.0 && !eq_on;
+                let bitperfect = native && self.volume >= 1.0 && level == 1.0 && !eq_on && tx.is_none();
                 let output = match fmt {
                     Some((rate, _)) if n.graph_rate == rate => format!("PipeWire · {} kHz matched", khz(rate)),
                     Some((rate, _)) if n.graph_rate > 0 => format!("PipeWire resamples {} → {} kHz", khz(rate), khz(n.graph_rate)),
@@ -399,7 +405,10 @@ impl Crate {
                 };
                 let steps: Vec<(&str, String, bool)> = vec![
                     ("Source", source, true),
-                    ("Plex stream", "Direct play · original file · no transcode".into(), true),
+                    match tx {
+                        Some(k) => ("Plex stream", format!("Transcoded · MP3 ~{k} kbps · remote connection"), false),
+                        None => ("Plex stream", "Direct play · original file · no transcode".into(), true),
+                    },
                     ("Decoder", "symphonia · lock-free ring buffer".into(), true),
                     ("Loudness leveling", gain, level == 1.0),
                     (
@@ -448,6 +457,8 @@ impl Crate {
                             .text_color(if bitperfect { rgb(t.healthy).into() } else { white(0.72) })
                             .child(if bitperfect {
                                 "● bit-perfect from Crate: native rate, stream volume 100%"
+                            } else if tx.is_some() {
+                                "● transcoded by Plex for the remote connection"
                             } else if native && eq_on {
                                 "● native rate · the EQ changes the samples"
                             } else if native && level != 1.0 {

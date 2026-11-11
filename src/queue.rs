@@ -56,12 +56,48 @@ impl Crate {
         }
         let (base, token) = self.plex.clone();
         let id = t.part_key.split('/').nth(3).unwrap_or("x").to_string();
+        let kbps = self.transcode_kbps();
+        if kbps > 0 {
+            // Plex picks the transcode profile by client; Linux matches none
+            // (400), so name one. The decision call must come first in the
+            // same session or musicBitrate is ignored (wad
+            // plex/music-transcode-400.md). MP3, since symphonia has no Opus.
+            let q = format!(
+                "path=%2Flibrary%2Fmetadata%2F{}&protocol=http&directPlay=0&directStream=0&mediaIndex=0&partIndex=0&offset=0&musicBitrate={kbps}&session={{session}}&X-Plex-Client-Profile-Name=Web",
+                t.rating_key
+            );
+            return Source::Http {
+                url: format!("{base}/music/:/transcode/universal/start.mp3?{q}"),
+                token,
+                // Keeps `part-<id>.` so the engine label still names the part.
+                cache: std::path::PathBuf::from(format!("/scratch/crate-cache/part-{id}.tx{kbps}.mp3")),
+                prepare: Some(format!("{base}/music/:/transcode/universal/decision?{q}")),
+                len_ms: (t.duration_ms > 0).then_some(t.duration_ms),
+            };
+        }
         let ext = t.part_key.rsplit('.').next().unwrap_or("bin").to_string();
         Source::Http {
             url: format!("{base}{}", t.part_key),
             token,
             cache: std::path::PathBuf::from(format!("/scratch/crate-cache/part-{id}.{ext}")),
+            prepare: None,
+            len_ms: None,
         }
+    }
+
+    /// How new tracks stream, for the connection badges.
+    pub(crate) fn stream_mode(&self) -> String {
+        match (crate::REMOTE.get().copied().unwrap_or(false), self.transcode_kbps()) {
+            (false, _) => "direct play".into(),
+            (true, 0) => "remote · direct play".into(),
+            (true, k) => format!("remote · {k}k"),
+        }
+    }
+
+    /// Bitrate to transcode new streams to: the remote quality setting when
+    /// the server address in use isn't local, else 0 (original file).
+    pub(crate) fn transcode_kbps(&self) -> u32 {
+        if crate::REMOTE.get().copied().unwrap_or(false) { self.remote_kbps } else { 0 }
     }
 
     /// Tracks the engine should get starting at queue index `from`: just that

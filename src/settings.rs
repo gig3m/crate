@@ -1,7 +1,7 @@
 //! Audio settings from the design canvas (AudioSettings.dc.html), limited to
 //! what the engine does today: output device choice and the bit-perfect
-//! status of the PipeWire graph. Leveling, crossfade, EQ and transcoding
-//! need engine work first.
+//! status of the PipeWire graph, leveling, crossfade, remote streaming
+//! quality and the EQ.
 
 use gpui::{Context, FontWeight, div, prelude::*, px, rgb};
 
@@ -405,6 +405,40 @@ impl Crate {
             .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(
                 "Crossfades only between tracks from different albums. Gapless inside albums is never broken. Needs both tracks at the same sample rate; otherwise they play back to back.",
             ));
+        let kbps = self.remote_kbps;
+        let remote = crate::REMOTE.get().copied().unwrap_or(false);
+        let q_segs = crate::theme::REMOTE_QUALITIES.into_iter().map(|q| {
+            let on = q == kbps;
+            div()
+                .id(("remote-quality", q as usize))
+                .flex_1()
+                .h(px(30.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.0))
+                .text_size(px(13.0))
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .when(on, |d| d.bg(rgb(t.raised)).text_color(rgb(t.text_strong)))
+                .when(!on, |d| d.text_color(rgb(t.text2)).hover(|d| d.text_color(rgb(t.text_strong))))
+                .child(if q == 0 { "Original".to_string() } else { format!("{q}k") })
+                .on_click(cx.listener(move |this, _, _, cx| this.set_remote_quality(q, cx)))
+        });
+        let quality = card()
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.text_strong)).child("Remote streaming quality"))
+                    .child(div().text_size(px(13.0)).text_color(rgb(t.text2)).child("Original on LAN")),
+            )
+            .child(div().p(px(3.0)).rounded(px(9.0)).border_1().border_color(rgb(t.raised)).bg(rgb(t.base)).flex().gap(px(2.0)).children(q_segs))
+            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(match (remote, kbps) {
+                (false, _) => "Connected on this network: every track plays as the original file.".to_string(),
+                (true, 0) => "Connected remotely, playing original files.".to_string(),
+                (true, k) => format!("Connected remotely: Plex converts tracks to MP3 at about {k} kbps (not bit-perfect). Applies from the next track."),
+            }));
 
         div()
             .id("audio-settings")
@@ -426,7 +460,7 @@ impl Crate {
                     .flex()
                     .gap(px(24.0))
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Output device")).children(devices))
-                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Signal")).child(bitperfect).child(later).child(fades).child(self.eq_card(t, cx))),
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Signal")).child(bitperfect).child(later).child(fades).child(quality).child(self.eq_card(t, cx))),
             )
             .when(!current.is_empty(), |d| {
                 d.child(div().font_family(MONO).text_size(px(11.0)).text_color(rgb(t.muted)).child(format!("Playing to {current}")))

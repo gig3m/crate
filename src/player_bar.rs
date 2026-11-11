@@ -159,6 +159,9 @@ impl Crate {
         // Right: signal path badge, panels, output, volume.
         let badge = now.and_then(|n| {
             let &(rate, bits) = n.formats.get(&n.idx)?;
+            if let Some(k) = n.transcoded.get(&n.idx) {
+                return Some((format!("MP3 {k}k · transcoded"), t.muted, false));
+            }
             let fmt = format!("{bits}/{}", khz(rate));
             Some(if n.graph_rate == 0 {
                 (fmt, t.muted, false)
