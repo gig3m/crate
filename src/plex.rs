@@ -410,6 +410,12 @@ impl Meta {
     }
 }
 
+/// The error means the server couldn't be reached (refused, no route,
+/// DNS, timed out), as opposed to the server answering with an error.
+pub fn unreachable(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some_and(|r| r.is_connect() || r.is_timeout()))
+}
+
 impl Client {
     pub fn new(base: String, token: String) -> Self {
         // A server that's asleep or a tailnet path that's down must fail,

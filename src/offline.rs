@@ -300,13 +300,29 @@ impl Crate {
         cx.notify();
     }
 
+    /// A kept album's tracks that are on disk, for playing without the
+    /// server (None when nothing is).
+    pub(crate) fn offline_tracks(&self, album_key: &str) -> Option<Vec<Track>> {
+        let kept = self.offline.index.get(album_key)?;
+        let on_disk: Vec<Track> = kept.to_tracks().into_iter().filter(|t| self.offline.local(&t.part_key).is_some()).collect();
+        (!on_disk.is_empty()).then_some(on_disk)
+    }
+
     /// Fill in kept tracks' details from a fresh server listing (albums kept
-    /// before the index carried them).
-    pub(crate) fn refresh_kept_details(&mut self, album_key: &str, tracks: &[Track]) {
+    /// before the index carried them). A track whose file changed on the
+    /// server (new part) is fetched again.
+    pub(crate) fn refresh_kept_details(&mut self, album_key: &str, tracks: &[Track], cx: &mut Context<Self>) {
         let Some(a) = self.offline.index.albums.iter_mut().find(|a| a.key == album_key) else { return };
         let mut changed = false;
+        let mut refetch = false;
         for k in &mut a.tracks {
             if let Some(t) = tracks.iter().find(|t| t.rating_key == k.rating_key) {
+                if t.part_key != k.part_key && file_for(&t.part_key).is_some() {
+                    k.part_key = t.part_key.clone();
+                    k.title = t.title.clone();
+                    refetch = true;
+                    changed = true;
+                }
                 let fresh = KeptTrack::from_track(t);
                 if (fresh.artist.as_str(), fresh.duration_ms, fresh.track_no, fresh.disc) != (k.artist.as_str(), k.duration_ms, k.track_no, k.disc) {
                     k.artist = fresh.artist;
@@ -317,8 +333,31 @@ impl Crate {
                 }
             }
         }
+        if refetch {
+            a.complete = false;
+            a.failed = None;
+            let key = a.key.clone();
+            if !self.offline.queue.contains(&key) {
+                self.offline.queue.push_back(key);
+            }
+        }
         if changed {
+            self.offline.reindex();
             self.save_offline();
+        }
+        if refetch {
+            self.pump_offline(cx);
+        }
+    }
+
+    /// Fill in details for kept albums whose index entries predate them
+    /// (once, when the library has loaded from the server).
+    pub(crate) fn backfill_kept(&mut self, cx: &mut Context<Self>) {
+        let stale: Vec<String> = self.offline.index.albums.iter().filter(|a| a.tracks.iter().any(|t| t.duration_ms == 0)).map(|a| a.key.clone()).collect();
+        for key in stale {
+            if let Some(album) = self.albums.iter().find(|a| a.rating_key == key).cloned() {
+                self.with_tracks(album, cx, |_, _, _, _| {});
+            }
         }
     }
 

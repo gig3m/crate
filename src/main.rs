@@ -180,6 +180,9 @@ struct Crate {
     view_size: (f32, f32),
     /// Now Playing shows lyrics when the track has them (saved).
     np_lyrics: bool,
+    /// Until when the server counts as unreachable (after a connect or
+    /// timeout failure): kept albums skip the request meanwhile.
+    server_down_until: Option<Instant>,
     /// Home: the request channel, a load in flight, the last error (retried
     /// with backoff), attempts since the last success, and when it loaded.
     hubs_tx: mpsc::UnboundedSender<HubsRequest>,
@@ -437,6 +440,14 @@ impl Crate {
             let mut first = true;
             while let Some((from, res)) = albums_rx.recv().await {
             let ok = this.update(cx, |this, cx| {
+                // The server answered with the library: fill in kept albums'
+                // details that older offline indexes lack (once).
+                if from == "plex" && res.is_ok() {
+                    cx.spawn(async move |this, cx| {
+                        this.update(cx, |this, cx| this.backfill_kept(cx)).ok();
+                    })
+                    .detach();
+                }
                 match res {
                     Ok(albums) => {
                         if !first && albums == this.albums {
@@ -725,6 +736,7 @@ impl Crate {
             content_w: 1000.0,
             view_size: (1280.0, 800.0),
             np_lyrics: theme::saved_lyrics(),
+            server_down_until: None,
             hubs_tx: hubs_tx_keep,
             home_loading: false,
             home_error: None,
@@ -882,7 +894,11 @@ impl Crate {
                     let key = h.rating_key.clone();
                     self.request_art(&album);
                     self.with_tracks(album, cx, move |this, album, tracks, cx| {
-                        let start = tracks.iter().position(|t| t.rating_key == key).unwrap_or(0);
+                        let Some(start) = tracks.iter().position(|t| t.rating_key == key) else {
+                            this.say(format!("That track isn't in the offline copy of {}", album.title));
+                            cx.notify();
+                            return;
+                        };
                         this.play_tracks(album, tracks, start, cx);
                     });
                 }
@@ -912,13 +928,22 @@ impl Crate {
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut Self, Album, Vec<Track>, &mut Context<Self>) + 'static,
     ) {
+        // The server was just found unreachable: kept albums play from the
+        // index at once instead of waiting out another timeout.
+        if self.server_down_until.is_some_and(|t| Instant::now() < t)
+            && let Some(tracks) = self.offline_tracks(&album.rating_key)
+        {
+            f(self, album, tracks, cx);
+            return;
+        }
         let (reply, rx) = tokio::sync::oneshot::channel();
         let _ = self.tracks_tx.send(TracksRequest { album_key: album.rating_key.clone(), reply });
         cx.spawn(async move |this, cx| {
             match rx.await {
                 Ok(Ok(t)) => {
                     this.update(cx, |this, cx| {
-                        this.refresh_kept_details(&album.rating_key, &t);
+                        this.server_down_until = None;
+                        this.refresh_kept_details(&album.rating_key, &t, cx);
                         f(this, album, t, cx)
                     })
                     .ok();
@@ -926,11 +951,16 @@ impl Crate {
                 Ok(Err(e)) => {
                     eprintln!("[crate] tracks: {e:#}");
                     let title = album.title.clone();
+                    let down = plex::unreachable(&e);
                     this.update(cx, |this, cx| {
+                        if down {
+                            this.server_down_until = Some(Instant::now() + Duration::from_secs(30));
+                        }
                         // Kept offline: play the copy on disk without the server.
-                        if let Some(kept) = this.offline.index.get(&album.rating_key).filter(|k| k.complete).cloned() {
-                            this.say(format!("Server unreachable: using the offline copy of {title}"));
-                            f(this, album, kept.to_tracks(), cx);
+                        if let Some(tracks) = this.offline_tracks(&album.rating_key) {
+                            let why = if down { "Server unreachable".to_string() } else { format!("Server error ({e:#})") };
+                            this.say(format!("{why}: using the offline copy of {title}"));
+                            f(this, album, tracks, cx);
                             return;
                         }
                         this.status = format!("Couldn't load {title}: {e:#}").into();
@@ -995,7 +1025,12 @@ impl Crate {
             if this.play_intent != intent {
                 return;
             }
-            let start = tracks.iter().position(|t| t.rating_key == track_key).unwrap_or(0);
+            let Some(start) = tracks.iter().position(|t| t.rating_key == track_key) else {
+                // Only possible offline: that track wasn't kept.
+                this.say(format!("That track isn't in the offline copy of {}", album.title));
+                cx.notify();
+                return;
+            };
             this.play_tracks(album, tracks, start, cx);
         });
     }
