@@ -413,16 +413,23 @@ impl Meta {
 impl Client {
     pub fn new(base: String, token: String) -> Self {
         // A server that's asleep or a tailnet path that's down must fail,
-        // not hang: requests without their own timeout get these.
+        // not hang: every request gets these unless it sets its own (the
+        // library listing and offline downloads do).
         let http = reqwest::Client::builder()
             .pool_max_idle_per_host(16)
             .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(45))
             .build()
             .unwrap();
         Self { base, token, http }
     }
 
     async fn get(&self, path: &str) -> anyhow::Result<reqwest::Response> {
+        self.get_within(path, std::time::Duration::from_secs(45)).await
+    }
+
+    /// `get` with its own limit on the whole response.
+    async fn get_within(&self, path: &str, limit: std::time::Duration) -> anyhow::Result<reqwest::Response> {
         let res = self
             .http
             .get(format!("{}{}", self.base, path))
@@ -430,8 +437,7 @@ impl Client {
             .header("X-Plex-Token", &self.token)
             .header("X-Plex-Product", "Crate")
             .header("X-Plex-Client-Identifier", client_id())
-            // Covers the whole response, the library listing included.
-            .timeout(std::time::Duration::from_secs(45))
+            .timeout(limit)
             .send()
             .await?;
         anyhow::ensure!(res.status().is_success(), "{} -> {}", path, res.status());
@@ -440,7 +446,9 @@ impl Client {
 
     pub async fn albums(&self, section: &str) -> anyhow::Result<Vec<Album>> {
         let env: Envelope = self
-            .get(&format!("/library/sections/{section}/all?type=9&sort=addedAt:desc"))
+            // The whole library in one response: several MB, so a slow
+            // remote link gets five minutes.
+            .get_within(&format!("/library/sections/{section}/all?type=9&sort=addedAt:desc"), std::time::Duration::from_secs(300))
             .await?
             .json()
             .await
@@ -778,6 +786,9 @@ impl Client {
             .get(format!("{}{part_key}", self.base))
             .header("X-Plex-Token", &self.token)
             .header("X-Plex-Client-Identifier", client_id())
+            // A whole album file over a slow link: no overall limit (the
+            // answer and each chunk are watched below).
+            .timeout(std::time::Duration::from_secs(24 * 3600))
             .send();
         let mut res = tokio::time::timeout(std::time::Duration::from_secs(30), send).await.map_err(|_| anyhow::anyhow!("server didn't answer"))??.error_for_status()?;
         if let Some(dir) = dest.parent() {
@@ -1815,11 +1826,10 @@ pub async fn run(
     {
         let client = client.clone();
         tokio::spawn(async move {
+            // Track lists stay in order: Add to queue / Play next on two
+            // albums must land in the order they were asked for.
             while let Some(req) = tracks_rx.recv().await {
-                let client = client.clone();
-                tokio::spawn(async move {
-                    let _ = req.reply.send(client.tracks(&req.album_key).await);
-                });
+                let _ = req.reply.send(client.tracks(&req.album_key).await);
             }
         });
     }

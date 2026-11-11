@@ -187,6 +187,11 @@ struct Crate {
     pub(crate) home_error: Option<String>,
     home_attempts: u32,
     home_at: Option<Instant>,
+    /// Bumped per Home load: only the latest failure's retry timer acts.
+    home_gen: u64,
+    /// Bumped when the playlist list is reloaded (after an edit): a Home
+    /// load that started before keeps the newer list.
+    pub(crate) playlists_gen: u64,
     /// The next play_from starts its engine paused (a seek while paused).
     pub(crate) start_paused: bool,
     /// Whether the last track shown in Now Playing had lyrics (layout while the next loads).
@@ -725,6 +730,8 @@ impl Crate {
             home_error: None,
             home_attempts: 0,
             home_at: None,
+            home_gen: 0,
+            playlists_gen: 0,
             start_paused: false,
             np_had_lyrics: std::cell::Cell::new(false),
             detail_failed: Default::default(),
@@ -1037,21 +1044,36 @@ impl Crate {
             return;
         }
         self.home_loading = true;
+        self.home_gen += 1;
+        let (load_gen, lists_gen) = (self.home_gen, self.playlists_gen);
+        // Counted from the attempt, so a failing refresh isn't retried on
+        // every focus (its own backoff handles that).
+        if self.home.is_some() {
+            self.home_at = Some(Instant::now());
+        }
         let (reply, rx) = tokio::sync::oneshot::channel();
         let _ = self.hubs_tx.send(HubsRequest { reply });
         cx.spawn(async move |this, cx| {
             let mut res = rx.await;
             this.update(cx, |this, cx| {
                 this.home_loading = false;
-                // Test hook: fail the first N loads.
-                if std::env::var("CRATE_HOME_FAIL").ok().and_then(|v| v.parse::<u32>().ok()).is_some_and(|n| this.home_attempts < n) {
+                // Test hook: fail the first N loads of the session.
+                static FAILED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                if std::env::var("CRATE_HOME_FAIL").ok().and_then(|v| v.parse::<u32>().ok()).is_some_and(|n| FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < n) {
                     res = Ok(Err(anyhow::anyhow!("test: hubs failed")));
                 }
                 match res {
-                    Ok(Ok(home)) => {
+                    Ok(Ok(mut home)) => {
                         this.home_error = None;
                         this.home_attempts = 0;
                         this.home_at = Some(Instant::now());
+                        // A playlist edit since this load began reloaded the
+                        // list: keep that newer one.
+                        if this.playlists_gen != lists_gen
+                            && let Some(h) = this.home.as_ref()
+                        {
+                            home.playlists = h.playlists.clone();
+                        }
                         this.home_loaded(home, cx);
                     }
                     Ok(Err(e)) => {
@@ -1063,7 +1085,9 @@ impl Crate {
                         cx.spawn(async move |this, cx| {
                             cx.background_executor().timer(Duration::from_secs(wait)).await;
                             this.update(cx, |this, cx| {
-                                if this.home_error.is_some() {
+                                // Only the latest load's timer: a Retry click or
+                                // another load since has its own.
+                                if this.home_error.is_some() && this.home_gen == load_gen {
                                     this.load_home(cx);
                                 }
                             })
@@ -1738,11 +1762,12 @@ impl Crate {
                         now.boundaries.push(at_us);
                     }
                 }
-                AudioEvent::Skipped { index, error } => {
+                AudioEvent::Skipped { index, error, partial } => {
                     let title = now.tracks.get(now.start_idx + index).map(|t| t.title.clone()).unwrap_or_default();
                     eprintln!("[crate] skipped #{} {title}: {error}", now.start_idx + index);
                     now.skipped_to = now.skipped_to.max(now.start_idx + index);
-                    self.status = format!("Skipped \u{201c}{title}\u{201d}: couldn't load it ({error})").into();
+                    let what = if partial { "stopped part-way" } else { "couldn't load it" };
+                    self.status = format!("Skipped \u{201c}{title}\u{201d}: {what} ({error})").into();
                 }
                 AudioEvent::Reconnected { from, to, silent_ms } => {
                     eprintln!("[crate] rate change {from} -> {to}: {silent_ms:.1} ms");
@@ -3051,7 +3076,7 @@ fn main() {
                     // Home goes stale in a long session: refresh it when the
                     // window comes back after ten minutes or more.
                     cx.observe_window_activation(window, |this: &mut Crate, window, cx| {
-                        if window.is_window_active() && this.home_at.is_some_and(|t| t.elapsed() > Duration::from_secs(600)) {
+                        if window.is_window_active() && this.home_error.is_none() && this.home_at.is_some_and(|t| t.elapsed() > Duration::from_secs(600)) {
                             this.load_home(cx);
                         }
                     })

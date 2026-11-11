@@ -226,6 +226,7 @@ impl Crate {
                 }
                 if let Some(h) = this.home.as_mut() {
                     h.playlists = lists;
+                    this.playlists_gen += 1;
                 }
                 cx.notify();
             })

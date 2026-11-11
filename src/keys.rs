@@ -43,8 +43,9 @@ impl Crate {
                 let (Some(body), view) = (self.album_scroll.bounds_for_item(2), self.album_scroll.bounds()) else { return 0 };
                 let above: f32 = (view.top() - body.top()).into();
                 // The first row whose top is on screen.
-                let n = self.album_tracks().map(|t| t.len()).unwrap_or(0);
-                (0..n).find(|&i| self.track_y(i) >= above - 0.5).unwrap_or(n.saturating_sub(1))
+                let headers = self.album_tracks().map(|t| crate::album::disc_headers(&t)).unwrap_or_default();
+                let n = headers.len();
+                (0..n).find(|&i| track_y(&headers, i) >= above - 0.5).unwrap_or(n.saturating_sub(1))
             }
             _ => 0,
         }
@@ -74,19 +75,12 @@ impl Crate {
         cx.notify();
     }
 
-    /// Track row `i`'s top below the album body's top, counting the DISC
-    /// headers above it.
-    fn track_y(&self, i: usize) -> f32 {
-        let headers = self.album_tracks().map(|t| crate::album::disc_headers(&t)).unwrap_or_default();
-        let above = headers.iter().take(i + 1).filter(|h| **h).count();
-        TRACK_HEAD_H + TRACK_ROW_H * i as f32 + DISC_HEAD_H * above as f32
-    }
-
     /// Keep track row `i` inside the album view's viewport.
     fn reveal_track(&self, i: usize) {
         // Children of the album scroll: header, actions, body (table + aside).
         let (Some(body), view) = (self.album_scroll.bounds_for_item(2), self.album_scroll.bounds()) else { return };
-        let top = body.top() + px(self.track_y(i));
+        let headers = self.album_tracks().map(|t| crate::album::disc_headers(&t)).unwrap_or_default();
+        let top = body.top() + px(track_y(&headers, i));
         let bottom = top + px(TRACK_ROW_H);
         let mut off = self.album_scroll.offset();
         let margin = px(12.0);
@@ -175,4 +169,11 @@ impl Crate {
             }
         }
     }
+}
+
+/// Track row `i`'s top below the album body's top, counting the DISC
+/// headers above it (`headers` from album::disc_headers).
+fn track_y(headers: &[bool], i: usize) -> f32 {
+    let above = headers.iter().take(i + 1).filter(|h| **h).count();
+    TRACK_HEAD_H + TRACK_ROW_H * i as f32 + DISC_HEAD_H * above as f32
 }
