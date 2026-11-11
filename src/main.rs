@@ -123,6 +123,7 @@ struct Aulos {
     /// Server sonic analysis progress, for the Stations page.
     sonic_progress: Option<u32>,
     audio_info: Option<settings::AudioInfo>,
+    prompt_copied: bool,
     history: Option<Vec<plex::HistoryItem>>,
     top_tracks: Option<Vec<(Track, u64)>>,
     /// Artists derived from the album list: (key, name, album count).
@@ -470,6 +471,7 @@ impl Aulos {
             sonic_progress: None,
             compact_playing: true,
             audio_info: None,
+            prompt_copied: false,
             history: None,
             top_tracks: None,
             artist_cache: Vec::new(),

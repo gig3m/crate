@@ -46,6 +46,27 @@ fn read_audio_info() -> anyhow::Result<AudioInfo> {
     Ok(info)
 }
 
+/// A prompt the user can hand to their coding agent to make PipeWire follow
+/// the file's sample rate permanently. Aulos itself never edits system config.
+pub(crate) fn pipewire_prompt(sink: &str, allowed: &str) -> String {
+    format!(
+        r#"Set up PipeWire on this Linux machine so the audio graph can run at the playing file's sample rate (bit-perfect playback for the Aulos music player) instead of resampling everything to one rate.
+
+Current state: clock.allowed-rates is {allowed}. Aulos plays to the sink "{sink}".
+
+Please:
+1. Find the playback sample rates each of my output devices supports. For USB/ALSA devices, read the "Rates:" lines under "Playback" in /proc/asound/card*/stream*; for others, use `pw-dump` (the node's EnumFormat params) or `pactl list sinks`.
+2. Create ~/.config/pipewire/pipewire.conf.d/10-allowed-rates.conf with
+   context.properties = {{ default.clock.allowed-rates = [ ... ] }}
+   listing the union of those rates among 44100 48000 88200 96000 176400 192000, with a comment naming which device supports which. If I manage ~/.config with a dotfiles repo, put the file there and link it the way that repo does.
+3. Check it parses: `pw-config merge context.properties` should show the new list.
+4. Apply it without restarting audio: `pw-metadata -n settings 0 clock.allowed-rates "[ ... ]"`. Don't restart PipeWire unless I say so (it cuts off whatever is playing).
+5. Confirm with `pw-metadata -n settings 0 clock.allowed-rates`, and tell me how to undo it (delete the file, restart PipeWire or set the metadata back to the old value).
+
+Trade-off to mention to me: while a file plays at, say, 44.1 kHz, other apps that start at 48 kHz are resampled to the playing rate, and the device briefly re-clocks when the rate changes between tracks."#
+    )
+}
+
 impl Aulos {
     pub(crate) fn open_audio_settings(&mut self, cx: &mut Context<Self>) {
         self.go(crate::View::Soon("audio"));
@@ -158,11 +179,43 @@ impl Aulos {
                     .child(format!("clock.allowed-rates {rates} · clock.rate {}", info.clock_rate)),
             )
             .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(if only_one {
-                "PipeWire only runs the graph at one rate, so files at other rates are resampled. Bit-perfect playback needs your DAC's rates in clock.allowed-rates; that change is outside Aulos and waiting on your call (a permanent PipeWire setting, or switching only while Aulos plays)."
+                "PipeWire runs every app at one shared rate, so files at other rates are resampled. To play bit-perfect, PipeWire has to be allowed to switch to your device's other rates (clock.allowed-rates). That's a system setting, so Aulos doesn't change it; the prompt below walks your coding agent through it. Trade-off: while Aulos plays, other apps share its rate, and the device briefly re-clocks when the rate changes."
             } else {
-                "PipeWire can follow the file's rate when the device supports it. Aulos asks for the file rate on every stream."
+                "PipeWire is allowed to follow the file's rate. Aulos asks for each file's own rate; a device that can't do a rate gets the nearest one it supports, resampled."
             }))
-            .when_some(now_line, |d, (l, c)| d.child(div().text_size(px(12.0)).text_color(rgb(c)).child(l)));
+            .when_some(now_line, |d, (l, c)| d.child(div().text_size(px(12.0)).text_color(rgb(c)).child(l)))
+            .when(only_one, |d| {
+                let prompt = pipewire_prompt(&current, &rates);
+                d.child(
+                    div()
+                        .mt(px(6.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .id("copy-pw-prompt")
+                                .h(px(32.0))
+                                .px(px(14.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(16.0))
+                                .bg(rgb(t.accent))
+                                .text_color(rgb(t.base))
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .cursor_pointer()
+                                .hover(|d| d.opacity(0.9))
+                                .child(if self.prompt_copied { "Copied" } else { "Copy setup prompt" })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(prompt.clone()));
+                                    this.prompt_copied = true;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child("Paste it into your coding agent (Claude Code, Codex…) to make the change.")),
+                )
+            });
 
         let later = card()
             .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.text_strong)).child("Loudness leveling, sweet fades, EQ"))
