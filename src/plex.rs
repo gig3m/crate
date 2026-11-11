@@ -881,9 +881,16 @@ impl Client {
         let mut near: Vec<Track> = self.nearest_tracks(&mid, 40).await?.into_iter().filter(|t| !current.contains(&t.rating_key)).collect();
         anyhow::ensure!(!near.is_empty(), "nothing near the path to detour through");
         crate::shuffle(&mut near);
+        let mut last_err = None;
         for w in near.iter().take(3) {
             let (a, b) = tokio::join!(self.sonic_path(section, start, &w.rating_key), self.sonic_path(section, &w.rating_key, end));
-            let (Ok(a), Ok(b)) = (a, b) else { continue };
+            let (a, b) = match (a, b) {
+                (Ok(a), Ok(b)) => (a, b),
+                (Err(e), _) | (_, Err(e)) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            };
             if a.is_empty() || b.is_empty() {
                 continue;
             }
@@ -893,7 +900,10 @@ impl Client {
                 return Ok(path);
             }
         }
-        anyhow::bail!("no other path found")
+        match last_err {
+            Some(e) => Err(e.context("no other path found")),
+            None => anyhow::bail!("no other path found"),
+        }
     }
 
     /// The first `limit` tracks of a playlist.

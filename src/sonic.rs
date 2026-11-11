@@ -222,6 +222,10 @@ impl Crate {
 
     /// Reroll (canvas): a different path between the same two tracks.
     pub(crate) fn reroll_sonic_path(&mut self, cx: &mut Context<Self>) {
+        // Only from a finished path (the button hides while one computes).
+        if self.sonic.busy || self.sonic.path.as_ref().is_none_or(|p| p.len() < 3) {
+            return;
+        }
         self.compute_sonic_path_inner(true, cx);
     }
 
@@ -268,6 +272,7 @@ impl Crate {
                         this.say(format!("Couldn't reroll: {e:#}"));
                     }
                     Ok(Err(e)) => this.status = format!("Sonic Adventure: {e:#}").into(),
+                    Err(_) if reroll => this.sonic.path = previous,
                     Err(_) => {}
                 }
                 cx.notify();
