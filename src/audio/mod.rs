@@ -628,7 +628,9 @@ fn decoder_thread(
         // The track must be known to outlast the fade twice over, or the fade
         // would run past its end (into the next track); unknown length: gapless.
         // The MP4 edit list's priming and real length (exact, when present).
-        let edit_trims = edits.and_then(|f| f.lock().unwrap().trims(rate)).filter(|(d, t)| *d > 0 || *t > 0);
+        // AAC only: its priming and padding are what the edit list is for.
+        let is_aac = params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_AAC;
+        let edit_trims = edits.filter(|_| is_aac).and_then(|p| p.trims(track.id, rate));
         let num_frames = edit_trims.map(|(_, t)| t).or_else(|| src.len_ms().map(|ms| ms * rate as u64 / 1000)).or(track.num_frames);
         let long_enough = num_frames.is_some_and(|n| n >= 2 * fade_frames as u64);
         if fade_frames > 0 && !long_enough && num_frames.is_none() {
@@ -730,14 +732,26 @@ fn decoder_thread(
         let mut preroll_frames = (preroll_ms * rate as u64 / 1000) as usize;
         // Seeking to (or pre-rolling back to) 0 is just playing from the start.
         let seeked = index == 0 && src_start == 0 && start_ms > preroll_ms;
+        // Frames before the seek target in the packet the reader landed on.
+        let mut seek_lead = 0u64;
         if seeked {
             use symphonia::core::formats::{SeekMode, SeekTo};
             use symphonia::core::units::Time;
             // MP4 with an edit list: the raw timeline starts with the priming.
             let priming_s = edit_trims.map(|(d, _)| d as f64 / rate as f64).unwrap_or(0.0);
             let time = Time::try_from_secs_f64((start_ms - preroll_ms) as f64 / 1000.0 + priming_s).unwrap_or_default();
-            if let Err(e) = fmt.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(track.id) }) {
-                track_failed!('tracks, 0, e.into())
+            match fmt.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(track.id) }) {
+                // Some readers land on the packet holding the target: the
+                // frames before it are dropped, so the position is exact.
+                Ok(to) if to.actual_ts < to.required_ts => {
+                    let ticks = (to.required_ts.get() - to.actual_ts.get()) as u64;
+                    seek_lead = match track.time_base {
+                        Some(tb) => ticks * tb.numer.get() as u64 * rate as u64 / tb.denom.get() as u64,
+                        None => ticks,
+                    };
+                }
+                Ok(_) => {}
+                Err(e) => track_failed!('tracks, 0, e.into()),
             }
         }
 
@@ -834,12 +848,19 @@ fn decoder_thread(
                 buf.copy_to_slice_interleaved(&mut wide[..]);
                 to_stereo(&wide, &weights, &mut scratch);
             }
+            if seek_lead > 0 {
+                let drop = (seek_lead as usize).min(scratch.len() / CHANNELS);
+                scratch.drain(..drop * CHANNELS);
+                seek_lead -= drop as u64;
+                if scratch.is_empty() {
+                    continue;
+                }
+            }
             if let Some(e) = edit.as_mut() {
                 e.apply(&mut scratch, CHANNELS);
                 if scratch.is_empty() {
-                    if e.left == Some(0) {
-                        break; // the real audio has ended; the rest is padding
-                    }
+                    // Past the real length: the rest is padding, dropped (but
+                    // still read, so a download finishes and is cached).
                     continue;
                 }
             }
