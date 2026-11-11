@@ -215,13 +215,10 @@ impl Aulos {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search, play, or run a command"));
         cx.subscribe(&search, |this, input, ev: &gpui_component::input::InputEvent, cx| {
             use gpui_component::input::InputEvent;
-            match ev {
-                InputEvent::Change => {
-                    let q = input.read(cx).value().to_string();
-                    this.pal_sel = 0;
-                    this.on_search_change(q, cx);
-                }
-                _ => {}
+            if let InputEvent::Change = ev {
+                let q = input.read(cx).value().to_string();
+                this.pal_sel = 0;
+                this.on_search_change(q, cx);
             }
         })
         .detach();
