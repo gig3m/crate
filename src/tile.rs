@@ -27,6 +27,8 @@ impl Crate {
         let frac = if len > 0 { (n.elapsed_ms as f32 / len as f32).min(1.0) } else { 0.0 };
         let levels = detail.as_ref().map(|d| d.levels.clone()).filter(|l| !l.is_empty());
         let bars = self.track_viz("tile-bar", 28.0, frac, len, levels.as_ref(), cx);
+        // While dragging to seek, the times show where the drop would land.
+        let shown_ms = self.viz.borrow().drag.map(|f| (f as f64 * len as f64) as u64).unwrap_or(n.elapsed_ms);
         let format = n.formats.get(&n.idx).map(|&(rate, bits)| {
             if let Some(k) = n.transcoded.get(&n.idx) {
                 return format!("MP3 {k}k · transcoded");
@@ -125,9 +127,9 @@ impl Crate {
                             .font_family(MONO)
                             .text_size(px(11.0))
                             .text_color(white(0.7))
-                            .child(fmt_ms(n.elapsed_ms))
+                            .child(fmt_ms(shown_ms))
                             .child(format.unwrap_or_default())
-                            .child(format!("−{}", fmt_ms(len.saturating_sub(n.elapsed_ms)))),
+                            .child(format!("−{}", fmt_ms(len.saturating_sub(shown_ms)))),
                     ),
             )
             .child(

@@ -100,6 +100,10 @@ pub(crate) struct Viz {
     press_x: Option<f32>,
     pub drag: Option<f32>,
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// When a track bar was last drawn: no bar on screen, no animation.
+    drawn: Cell<Option<std::time::Instant>>,
+    /// Last live sample: when, and the tap's head then.
+    sampled: Option<(std::time::Instant, u64)>,
 }
 
 impl Viz {
@@ -116,7 +120,20 @@ impl Viz {
 
     /// Refresh the live view from the engine's output tap.
     fn sample(&mut self, scope: &crate_audio::audio::Scope) {
-        let have = scope.latest(FFT, &mut self.buf);
+        // Smoothing is tuned per ~30 fps step: extra repaints (a drag,
+        // hover) reuse the last frame instead of speeding it up.
+        let now = std::time::Instant::now();
+        let head = scope.head();
+        if self.sampled.is_some_and(|(t, _)| now.duration_since(t) < std::time::Duration::from_millis(30)) {
+            return;
+        }
+        let fresh = self.sampled.is_none_or(|(_, h)| h != head);
+        self.sampled = Some((now, head));
+        // Nothing new played (pause, stop, underrun): fall to rest.
+        let have = fresh && scope.latest(FFT, &mut self.buf);
+        if !have {
+            self.buf.clear();
+        }
         match self.style {
             Style::Spectrum => {
                 let rate = scope.rate.load(std::sync::atomic::Ordering::Relaxed).max(8000) as f32;
@@ -131,6 +148,13 @@ impl Viz {
             }
             Style::Meter => {
                 let now = std::time::Instant::now();
+                if self.buf.is_empty() {
+                    for ch in 0..2 {
+                        self.level[ch] *= 0.85;
+                        self.peak[ch] = (self.peak[ch] - 0.02).max(0.0);
+                    }
+                    return;
+                }
                 let tail = self.buf.len().saturating_sub(2048 * 2);
                 for ch in 0..2 {
                     let xs: Vec<f32> = self.buf[tail..].iter().skip(ch).step_by(2).copied().collect();
@@ -261,7 +285,11 @@ impl Crate {
 
     /// A live style is showing over audio that is playing: worth animating.
     pub(crate) fn viz_animating(&self) -> bool {
-        self.viz.borrow().style.live() && self.engine.is_some() && self.now.as_ref().is_some_and(|n| !n.paused && !n.finished)
+        let v = self.viz.borrow();
+        v.style.live()
+            && v.drawn.get().is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(250))
+            && self.engine.is_some()
+            && self.now.as_ref().is_some_and(|n| !n.paused && !n.finished)
     }
 
     /// Repaint ~30 times a second while a live style animates.
@@ -290,6 +318,7 @@ impl Crate {
         let theme = self.theme.clone();
         let t = &theme;
         let mut v = self.viz.borrow_mut();
+        v.drawn.set(Some(std::time::Instant::now()));
         if v.style.live()
             && let Some(e) = self.engine.as_ref()
         {
@@ -385,14 +414,43 @@ impl Crate {
                 .child(div().h_full().w(gpui::relative(shown)).rounded(px(1.0)).bg(rgb(gradient(&st, shown))))
         });
         let bounds = v.bounds.clone();
+        let pressed = v.press_x.is_some();
         drop(v);
+        let weak = cx.entity().downgrade();
         div()
             .id(id)
             .relative()
             .flex_1()
             .h(px(height))
             .cursor_pointer()
-            .child(gpui::canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {}).absolute().size_full())
+            .child(
+                gpui::canvas(
+                    move |b, _, _| bounds.set(Some(b)),
+                    move |_, _, window, _| {
+                        // While pressed, follow the pointer anywhere in the window,
+                        // so a drag that leaves the thin bar keeps tracking.
+                        if pressed {
+                            let weak = weak.clone();
+                            window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
+                                if phase != gpui::DispatchPhase::Bubble || ev.pressed_button != Some(MouseButton::Left) {
+                                    return;
+                                }
+                                weak.update(cx, |this, cx| {
+                                    let mut v = this.viz.borrow_mut();
+                                    let Some(x0) = v.press_x else { return };
+                                    if v.drag.is_some() || (f32::from(ev.position.x) - x0).abs() > DRAG_PX {
+                                        v.drag = v.frac_at(ev.position.x);
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                            });
+                        }
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
             .child(body)
             .children(progress)
             .on_mouse_down(
@@ -403,17 +461,6 @@ impl Crate {
                     v.drag = None;
                 }),
             )
-            .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
-                let mut v = this.viz.borrow_mut();
-                let Some(x0) = v.press_x else { return };
-                if ev.pressed_button != Some(MouseButton::Left) {
-                    return;
-                }
-                if v.drag.is_some() || (f32::from(ev.position.x) - x0).abs() > DRAG_PX {
-                    v.drag = v.frac_at(ev.position.x);
-                    cx.notify();
-                }
-            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
@@ -432,11 +479,14 @@ impl Crate {
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(move |this, _: &MouseUpEvent, _, cx| {
+                cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
                     let drag = {
                         let mut v = this.viz.borrow_mut();
+                        // Where the pointer let go, if it travelled far enough.
+                        let drag = v.drag_target(ev.position.x).or(v.drag);
                         v.press_x = None;
-                        v.drag.take()
+                        v.drag = None;
+                        drag
                     };
                     if let Some(f) = drag
                         && len_ms > 0

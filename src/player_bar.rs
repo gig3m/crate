@@ -5,7 +5,8 @@ use gpui::{Context, FontWeight, ObjectFit, SharedString, div, img, prelude::*, p
 use crate::{Crate, fmt_ms, icons, mpris::Transport, shell::MONO, theme::Theme};
 
 /// Seek bar segments (the canvas draws 96 bars).
-pub(crate) const BARS: usize = 96;
+/// Sonic profile points per track (the visualizer's bar count).
+pub(crate) const BARS: usize = crate::viz::BARS;
 
 fn khz(r: u32) -> String {
     if r.is_multiple_of(1000) { format!("{}", r / 1000) } else { format!("{:.1}", r as f32 / 1000.0) }

@@ -199,6 +199,11 @@ impl Scope {
         self.ring[(at % n) as usize].store(sample.to_bits(), Ordering::Relaxed);
     }
 
+    /// Samples written so far: unchanged means nothing new played.
+    pub fn head(&self) -> u64 {
+        self.head.load(Ordering::Acquire)
+    }
+
     /// The latest `frames` frames (oldest first), interleaved stereo, into `out`.
     /// Returns false when nothing has played yet.
     pub fn latest(&self, frames: usize, out: &mut Vec<f32>) -> bool {
