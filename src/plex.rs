@@ -464,7 +464,7 @@ impl Client {
     /// Album rating keys matching a library filter, e.g. `decade=1990` or `mood=17889`.
     pub async fn album_keys_where(&self, section: &str, filter: &str) -> anyhow::Result<Vec<String>> {
         let env: Envelope =
-            self.get(&format!("/library/sections/{section}/all?type=9&{filter}")).await?.json().await.context("filter")?;
+            self.get_within(&format!("/library/sections/{section}/all?type=9&{filter}"), std::time::Duration::from_secs(300)).await?.json().await.context("filter")?;
         Ok(env.mc.metadata.into_iter().map(|m| m.rating_key).collect())
     }
 

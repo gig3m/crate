@@ -519,17 +519,34 @@ fn decoder_thread(
         macro_rules! track_failed {
             ($label:lifetime, $played:expr, $err:expr) => {{
                 let e: anyhow::Error = $err;
+                // A stop (seek, skip, new queue) while a read was waiting
+                // surfaces as an error too: just stop, don't open the next.
+                if stats.stop.load(Ordering::Acquire) {
+                    return Ok(());
+                }
                 if index == 0 && $played == 0 {
                     return Err(e);
                 }
                 eprintln!("[engine] {} failed part-way: {e:#}; skipping to the next track", src.label());
-                let _ = ev.send(Event::Skipped { index, error: format!("{e:#}"), partial: true });
-                // What's held back plays as is; a fade from the previous track
-                // has nothing left to fade under.
-                fading.clear();
-                if !tail.is_empty() {
+                let _ = ev.send(Event::Skipped { index, error: format!("{e:#}"), partial: $played > 0 });
+                // What's held back plays as is, then the rest of the previous
+                // (healthy) track's end: unchanged if the fade into this one
+                // hadn't begun, else fading out on its own. Crossfades only
+                // happen at one rate, so both are at `tail_rate`.
+                for part in 0..2 {
                     drained.clear();
-                    drained.extend(tail.drain(..));
+                    if part == 0 {
+                        drained.extend(tail.drain(..));
+                    } else if fade_done == 0 {
+                        drained.extend(fading.drain(..));
+                    } else if !fading.is_empty() {
+                        drained.resize(fading.len() / CHANNELS * CHANNELS, 0.0);
+                        mix_fade(&mut drained, &mut fading, fade_done, fade_total);
+                        fading.clear();
+                    }
+                    if drained.is_empty() {
+                        continue;
+                    }
                     let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, queued_rem: &mut queued_rem, stream_frames: &mut stream_frames };
                     if !out.push(&drained, tail_rate, &cmd_tx, &stats) {
                         return Ok(());
@@ -1217,8 +1234,8 @@ fn stereo_weights(ch: &symphonia::core::audio::Channels) -> Vec<(f32, f32)> {
                 0 => (1.0, 0.0),                        // front left
                 1 => (0.0, 1.0),                        // front right
                 3 | 18 => (0.0, 0.0),                   // LFE
-                4 | 6 | 9 | 12 | 15 | 19 | 22 => (H, 0.0), // left-side positions
-                5 | 7 | 10 | 14 | 17 | 20 | 23 => (0.0, H), // right-side positions
+                4 | 6 | 9 | 12 | 15 | 19 | 22 | 24 => (H, 0.0), // left-side positions
+                5 | 7 | 10 | 14 | 17 | 20 | 23 | 25 => (0.0, H), // right-side positions
                 _ => (H, H),                            // centres
             })
             .collect(),
