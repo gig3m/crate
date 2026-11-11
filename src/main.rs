@@ -180,6 +180,8 @@ struct Crate {
     view_size: (f32, f32),
     /// Now Playing shows lyrics when the track has them (saved).
     np_lyrics: bool,
+    /// Pages whose data failed to load (History, Tracks), with the error.
+    pub(crate) page_error: HashMap<&'static str, String>,
     /// Until when the server counts as unreachable (after a connect or
     /// timeout failure): kept albums skip the request meanwhile.
     server_down_until: Option<Instant>,
@@ -736,6 +738,7 @@ impl Crate {
             content_w: 1000.0,
             view_size: (1280.0, 800.0),
             np_lyrics: theme::saved_lyrics(),
+            page_error: HashMap::new(),
             server_down_until: None,
             hubs_tx: hubs_tx_keep,
             home_loading: false,

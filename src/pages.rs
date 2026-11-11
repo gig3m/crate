@@ -28,9 +28,19 @@ impl Crate {
         let section = crate::section();
         match id {
             "history" => {
+                self.page_error.remove("history");
                 let rx = crate::plex_call(move |c| async move { c.history(&section, 200).await });
                 cx.spawn(async move |this, cx| {
-                    if let Ok(Ok(h)) = rx.await {
+                    let res = rx.await;
+                    if let Ok(Err(e)) = &res {
+                        let e = format!("{e:#}");
+                        this.update(cx, |this, cx| {
+                            this.page_error.insert("history", e);
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    if let Ok(Ok(h)) = res {
                         this.update(cx, |this, cx| {
                             let thumbs: Vec<String> = h.iter().take(40).map(|x| x.thumb.clone()).collect();
                             for th in thumbs {
@@ -45,9 +55,19 @@ impl Crate {
                 .detach();
             }
             "tracks" => {
+                self.page_error.remove("tracks");
                 let rx = crate::plex_call(move |c| async move { c.top_tracks(&section, 300).await });
                 cx.spawn(async move |this, cx| {
-                    if let Ok(Ok(v)) = rx.await {
+                    let res = rx.await;
+                    if let Ok(Err(e)) = &res {
+                        let e = format!("{e:#}");
+                        this.update(cx, |this, cx| {
+                            this.page_error.insert("tracks", e);
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    if let Ok(Ok(v)) = res {
                         this.update(cx, |this, cx| {
                             let thumbs: Vec<String> = v.iter().take(40).map(|x| x.0.thumb.clone()).collect();
                             for th in thumbs {
@@ -174,18 +194,62 @@ impl Crate {
             .child(div().font_family(MONO).text_size(px(12.0)).text_color(rgb(t.text2)).child(right))
     }
 
-    pub(crate) fn tracks_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(top) = self.top_tracks.clone() else {
-            return title("Tracks", "loading…".into(), t).into_any_element();
+    /// A page still loading, or (with Retry) one whose load failed.
+    fn page_waiting(&self, name: &'static str, id: &'static str, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(err) = self.page_error.get(id).cloned() else {
+            return title(name, "loading…".into(), t).into_any_element();
         };
-        let all: Vec<Track> = top.iter().map(|x| x.0.clone()).collect();
+        div()
+            .flex()
+            .flex_col()
+            .child(title(name, "couldn't load".into(), t))
+            .child(
+                div()
+                    .px(px(PAD_X))
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.0))
+                    .child(div().text_size(px(13.0)).text_color(rgb(t.text2)).child(err))
+                    .child(
+                        div()
+                            .id(("page-retry", id.len()))
+                            .w(px(96.0))
+                            .h(px(34.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(rgb(t.line))
+                            .text_size(px(13.0))
+                            .text_color(rgb(t.text))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgb(t.raised)))
+                            .child("Retry")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.load_page(id, cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn tracks_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(top) = self.top_tracks.as_ref() else {
+            return self.page_waiting("Tracks", "tracks", t, cx);
+        };
         let rows: Vec<_> = top
             .iter()
             .enumerate()
             .map(|(i, (tr, plays))| {
-                let all = all.clone();
-                self.track_row(i, tr, format!("{plays} plays · {}", fmt_ms(tr.duration_ms)), t)
-                    .on_click(cx.listener(move |this, _, _, cx| this.start_queue("Most played".into(), None, all.clone(), i, cx)))
+                // The list is read at click time, not copied into every row.
+                self.track_row(i, tr, format!("{plays} plays · {}", fmt_ms(tr.duration_ms)), t).on_click(cx.listener(move |this, _, _, cx| {
+                    let all: Vec<Track> = this.top_tracks.as_ref().map(|v| v.iter().map(|x| x.0.clone()).collect()).unwrap_or_default();
+                    if i < all.len() {
+                        this.start_queue("Most played".into(), None, all, i, cx);
+                    }
+                }))
             })
             .collect();
         div()
@@ -201,8 +265,8 @@ impl Crate {
     }
 
     pub(crate) fn history_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(h) = self.history.clone() else {
-            return title("History", "loading…".into(), t).into_any_element();
+        let Some(h) = self.history.as_ref() else {
+            return self.page_waiting("History", "history", t, cx);
         };
         let rows: Vec<_> = h
             .iter()
