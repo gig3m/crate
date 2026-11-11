@@ -1244,6 +1244,19 @@ impl Client {
         Ok((m["ratingKey"].as_str().context("no playlist key")?.to_string(), m["leafCount"].as_u64().unwrap_or(0)))
     }
 
+    /// A playlist of these tracks in order, created from the first chunk and
+    /// filled in chunks (keeps each request URL short for long queues).
+    /// Returns (rating key, track count).
+    pub async fn create_playlist_chunked(&self, title: &str, keys: &[String]) -> anyhow::Result<(String, u64)> {
+        const CHUNK: usize = 200;
+        let (first, rest) = keys.split_at(keys.len().min(CHUNK));
+        let (key, mut n) = self.create_playlist(title, first).await?;
+        for part in rest.chunks(CHUNK) {
+            n += self.add_to_playlist(&key, part).await.with_context(|| format!("created \u{201c}{title}\u{201d} with {n} tracks, then adding more failed"))?;
+        }
+        Ok((key, n))
+    }
+
     /// Append these items to a (non-smart) playlist; returns tracks added.
     pub async fn add_to_playlist(&self, playlist: &str, keys: &[String]) -> anyhow::Result<u64> {
         anyhow::ensure!(!keys.is_empty(), "nothing to add");

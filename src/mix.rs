@@ -16,7 +16,7 @@ pub(crate) enum MixSource {
     Station(String),
     /// Mix builder: an artist's most-played tracks interleaved with the
     /// similar artists' (a fixed batch).
-    Builder { key: String },
+    Builder { key: String, similar: bool },
 }
 
 /// Tracks a radio mix page gathers before showing (Plex hands out artist
@@ -45,7 +45,9 @@ impl Crate {
             None => true,
         };
         if fresh {
-            self.mixes.insert(id.clone(), MixPage { title, desc, source, station: None, tracks: None, error: None, load_gen: 0 });
+            // Keep counting loads, so a reply for the page replaced is dropped.
+            let load_gen = self.mixes.get(&id).map(|p| p.load_gen).unwrap_or(0);
+            self.mixes.insert(id.clone(), MixPage { title, desc, source, station: None, tracks: None, error: None, load_gen });
             self.load_mix(id.clone(), cx);
         } else if let Some(p) = self.mixes.get_mut(&id) {
             p.title = title;
@@ -64,9 +66,9 @@ impl Crate {
         p.error = None;
         let (load_gen, source) = (p.load_gen, p.source.clone());
         match source {
-            MixSource::Builder { key } => {
+            MixSource::Builder { key, similar } => {
                 let mut keys = vec![key.clone()];
-                if let Some(Some(sim)) = self.sonic_artists.get(&key) {
+                if let Some(Some(sim)) = self.sonic_artists.get(&key).filter(|_| similar) {
                     keys.extend(sim.iter().take(3).map(|s| s.0.clone()));
                 } else {
                     self.request_sonic_artists(key.clone(), cx);
@@ -293,7 +295,7 @@ impl Crate {
                         .shadow_lg()
                         .cursor_pointer()
                         .hover(|d| d.opacity(0.9))
-                        .child(icons::icon(if playing_here.is_some() { "pause" } else { "play" }, 22.0, t.base))
+                        .child(icons::icon(if playing_here.is_some() && self.now.as_ref().is_some_and(|n| !n.paused && !n.finished) { "pause" } else { "play" }, 22.0, t.base))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if this.playing_mix() == Some(id1.as_str()) {
                                 this.transport(crate::mpris::Transport::PlayPause, cx);

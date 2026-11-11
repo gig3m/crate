@@ -483,7 +483,7 @@ impl Crate {
         } else {
             (format!("{name} mix"), format!("{name}'s most-played tracks"))
         };
-        self.open_mix(format!("builder:{key}"), title, desc, crate::mix::MixSource::Builder { key }, cx);
+        self.open_mix(format!("builder:{key}"), title, desc, crate::mix::MixSource::Builder { key, similar: with_others }, cx);
     }
 
     /// Art the artist page needs once its info arrives.

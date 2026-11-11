@@ -180,6 +180,8 @@ struct Crate {
     view_size: (f32, f32),
     /// Now Playing shows lyrics when the track has them (saved).
     np_lyrics: bool,
+    /// Whether the last track shown in Now Playing had lyrics (layout while the next loads).
+    np_had_lyrics: std::cell::Cell<bool>,
     /// Mix pages by id ("artist:<key>", "mood:<query>", "builder:<key>").
     mixes: HashMap<String, mix::MixPage>,
     /// Bumped per queue started (Now::queue_id) and per play request, so late
@@ -801,6 +803,7 @@ impl Crate {
             content_w: 1000.0,
             view_size: (1280.0, 800.0),
             np_lyrics: theme::saved_lyrics(),
+            np_had_lyrics: std::cell::Cell::new(false),
             mixes: HashMap::new(),
             queue_seq: 0,
             play_intent: 0,

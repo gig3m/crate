@@ -77,7 +77,7 @@ impl Crate {
             }
             NameFor::Tracks(keys) => {
                 let t = title.clone();
-                (crate::plex_call(move |c| async move { c.create_playlist(&t, &keys).await }), None)
+                (crate::plex_call(move |c| async move { c.create_playlist_chunked(&t, &keys).await }), None)
             }
             NameFor::Smart(query) => {
                 let t = title.clone();

@@ -52,7 +52,16 @@ impl Crate {
         let lyrics = detail.as_ref().map(|d| d.lyrics.clone()).unwrap_or_default();
         // Without lyrics (none, or turned off) the cover takes the middle,
         // sized to the window.
-        let show_lyrics = self.np_lyrics && !lyrics.is_empty();
+        // While a new track's detail loads, keep the last track's layout
+        // (no jump to the big cover and back).
+        let has_lyrics = match detail.as_ref() {
+            Some(_) => {
+                self.np_had_lyrics.set(!lyrics.is_empty());
+                !lyrics.is_empty()
+            }
+            None => self.np_had_lyrics.get(),
+        };
+        let show_lyrics = self.np_lyrics && has_lyrics;
         let art = if show_lyrics {
             420.0
         } else {
@@ -114,11 +123,12 @@ impl Crate {
                                 d.cursor_pointer().hover(|d| d.underline()).on_click(cx.listener(move |this, _, _, cx| {
                                     this.now_playing = false;
                                     if let Some(id) = ck.strip_prefix("mix:") {
-                                        if this.mixes.contains_key(id) {
+                                        if this.mixes.contains_key(id) && !matches!(&this.view, crate::View::Mix { id: cur } if cur == id) {
                                             this.go(crate::View::Mix { id: id.to_string() });
                                         }
                                     } else if let Some(key) = ck.strip_prefix("playlist:") {
-                                        this.open_playlist(key.to_string(), title.clone(), cx);
+                                        let t = title.strip_suffix(" (shuffled)").unwrap_or(&title).to_string();
+                                        this.open_playlist(key.to_string(), t, cx);
                                     } else if let Some(ix) = this.albums.iter().position(|a| a.rating_key == ck) {
                                         this.open_album(ix, cx);
                                     }
@@ -289,6 +299,9 @@ impl Crate {
         // Middle: synced lyrics around the current line.
         let lyric_col = if !show_lyrics {
             None
+        } else if lyrics.is_empty() {
+            // Loading this track's lyrics: hold the column.
+            Some(div().flex_1().min_w_0())
         } else {
             let cur = lyrics.iter().rposition(|l| l.0 <= n.elapsed_ms).unwrap_or(0);
             let start = cur.saturating_sub(3);
@@ -407,7 +420,7 @@ impl Crate {
                 let label = if in_mix { "NEXT IN THIS MIX" } else if radio { "NEXT FROM RADIO" } else { "NEXT UP" };
                 let dj_on = self.guest_dj;
                 // Guest DJ toggle (canvas): not offered on radio, which is sonic already.
-                let dj = (!radio).then(|| {
+                let dj = n.refill.is_none().then(|| {
                     div()
                         .id("guest-dj")
                         .h(px(22.0))
