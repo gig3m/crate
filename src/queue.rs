@@ -230,16 +230,15 @@ impl Crate {
     /// sonic already) or repeat-one, and not after a DJ pick.
     pub(crate) fn guest_dj_tick(&mut self, cx: &mut Context<Self>) {
         let Some(now) = self.now.as_ref() else { return };
-        if !self.guest_dj || now.refill.is_some() || self.repeat == Repeat::One || now.finished {
+        if !self.guest_dj || now.refill.is_some() || self.repeat == Repeat::One || now.finished || now.stopped {
             return;
         }
-        let at = (now.queue_id, now.idx);
-        if self.dj_for == Some(at) {
-            return;
-        }
-        self.dj_for = Some(at);
+        let qid = now.queue_id;
+        let at = (qid, now.idx);
         let cur = now.tracks[now.idx].clone();
-        if self.dj_keys.contains(&cur.rating_key) {
+        // Not after a DJ pick, and once per track per queue (recorded before the
+        // fetch, so a quick off/on can't pick twice).
+        if self.dj_keys.contains(&(qid, cur.rating_key.clone())) || !self.dj_done.insert((qid, cur.rating_key.clone())) {
             return;
         }
         let queued: std::collections::HashSet<String> = now.tracks.iter().map(|t| t.rating_key.clone()).collect();
@@ -248,12 +247,13 @@ impl Crate {
         cx.spawn(async move |this, cx| {
             let Ok(Ok(near)) = rx.await else { return };
             this.update(cx, |this, cx| {
-                // Still the same track playing in the same queue.
-                if this.now.as_ref().map(|n| (n.queue_id, n.idx)) != Some(at) || !this.guest_dj {
+                // Still the same track playing in the same, unfinished queue.
+                let live = this.now.as_ref().is_some_and(|n| (n.queue_id, n.idx) == at && !n.finished && !n.stopped);
+                if !live || !this.guest_dj || this.repeat == Repeat::One {
                     return;
                 }
                 let Some(pick) = near.into_iter().find(|t| !queued.contains(&t.rating_key) && t.album_key != cur.album_key) else { return };
-                this.dj_keys.insert(pick.rating_key.clone());
+                this.dj_keys.insert((qid, pick.rating_key.clone()));
                 // Quietly: a toast for every pick would be noise.
                 let (status, seen) = (this.status.clone(), this.status_seen.clone());
                 this.enqueue(vec![pick], true, "Guest DJ".into(), cx);

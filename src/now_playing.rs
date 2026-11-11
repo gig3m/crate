@@ -321,7 +321,7 @@ impl Crate {
                                     .child(div().text_size(px(12.0)).text_color(white(0.66)).truncate().child(q.artist.clone())),
                             )
                             .when(radio, |d| d.child(div().font_family(MONO).text_size(px(10.0)).text_color(rgb(t.healthy)).child("RADIO")))
-                            .when(!radio && self.dj_keys.contains(&q.rating_key), |d| d.child(div().font_family(MONO).text_size(px(10.0)).text_color(rgb(t.discovery)).child("DJ")))
+                            .when(!radio && self.dj_keys.contains(&(n.queue_id, q.rating_key.clone())), |d| d.child(div().font_family(MONO).text_size(px(10.0)).text_color(rgb(t.discovery)).child("DJ")))
                             .child(div().font_family(MONO).text_size(px(11.0)).text_color(white(0.66)).child(fmt_ms(q.duration_ms)))
                             .on_click(cx.listener(move |this, _, _, cx| this.play_from(i, 0, cx)))
                     })
@@ -346,7 +346,6 @@ impl Crate {
                         .child(if dj_on { "GUEST DJ · ON" } else { "GUEST DJ" })
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.guest_dj = !this.guest_dj;
-                            this.dj_for = None;
                             this.say(if this.guest_dj { "Guest DJ on: a sonically nearby track after each one" } else { "Guest DJ off" });
                             if this.guest_dj {
                                 this.guest_dj_tick(cx);

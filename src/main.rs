@@ -192,10 +192,11 @@ struct Crate {
     edition_formats: HashMap<String, (u32, String)>,
     /// Guest DJ (canvas): slips a sonically nearby track in after each one.
     guest_dj: bool,
-    /// Tracks the Guest DJ added (badged in the queue), and the (queue, index)
-    /// it last picked for, so each track gets one pick.
-    dj_keys: std::collections::HashSet<String>,
-    dj_for: Option<(u64, usize)>,
+    /// (queue, track key) the Guest DJ added (badged in that queue), and the
+    /// (queue, track key) it has picked after: one pick per track per queue,
+    /// however often the track comes round (Prev, repeat, toggling).
+    dj_keys: std::collections::HashSet<(u64, String)>,
+    dj_done: std::collections::HashSet<(u64, String)>,
     /// Appears on, by artist key: album keys (fetched after the artist page shows).
     appears_on: HashMap<String, Vec<String>>,
     sonic_artists: HashMap<String, Option<Vec<sonic::ArtistRef>>>,
@@ -751,7 +752,7 @@ impl Crate {
             appears_on: HashMap::new(),
             guest_dj: std::env::var_os("CRATE_GUEST_DJ").is_some(),
             dj_keys: std::collections::HashSet::new(),
-            dj_for: None,
+            dj_done: std::collections::HashSet::new(),
             sonic_artists: HashMap::new(),
             sonic: sonic::SonicState::default(),
             artist_kinds: HashMap::new(),
