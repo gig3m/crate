@@ -157,7 +157,7 @@ impl Crate {
                     .px(px(10.0))
                     .pt(px(4.0))
                     .pb(px(18.0))
-                    .child(icons::logo(30.0, t.accent, t.base))
+                    .child(icons::logo(30.0, t.accent, crate::theme::mix(t.base, 0x000000, 0.35), t.line))
                     .child(div().text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(rgb(t.text_strong)).child("crate")),
             );
         for &(id, label, ic, key) in NAV_PRIMARY {
