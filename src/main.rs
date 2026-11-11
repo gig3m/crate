@@ -1913,6 +1913,13 @@ impl Render for Crate {
                             "enter" => this.activate_cursor(cx),
                             "x" => this.toggle_cursor_mark(cx),
                             "r" => this.radio_from_selection(cx),
+                            k if k.starts_with("next:") || k.starts_with("queue:") => {
+                                let (next, key) = k.split_once(':').map(|(a, b)| (a == "next", b.to_string())).unwrap_or((false, String::new()));
+                                if let Some(album) = this.albums.iter().find(|a| a.rating_key == key).cloned() {
+                                    let label = album.title.clone();
+                                    this.with_tracks(album, cx, move |this, _a, tracks, cx| this.enqueue(tracks, next, label, cx));
+                                }
+                            }
                             k if k.starts_with("play:") => {
                                 if let Some(ix) = this.albums.iter().position(|a| a.rating_key == k[5..]) {
                                     this.play_album(ix, cx);

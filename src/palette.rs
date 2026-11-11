@@ -98,6 +98,47 @@ impl Crate {
         }
     }
 
+    /// Queue an album, track or playlist (play next or at the end).
+    pub(crate) fn queue_item(&mut self, item: Item, next: bool, cx: &mut Context<Self>) {
+        match item {
+            Item::Hit(h) if h.kind == "album" || h.kind == "track" => {
+                let album_key = if h.kind == "album" { h.rating_key.clone() } else { h.parent_key.clone() };
+                let Some(album) = self.albums.iter().find(|a| a.rating_key == album_key).cloned() else { return };
+                self.request_art(&album);
+                let (track, label) = (if h.kind == "track" { Some(h.rating_key.clone()) } else { None }, h.title.clone());
+                self.with_tracks(album, cx, move |this, _album, tracks, cx| {
+                    let tracks = match &track {
+                        Some(k) => tracks.into_iter().filter(|t| t.rating_key == *k).collect(),
+                        None => tracks,
+                    };
+                    this.enqueue(tracks, next, label, cx);
+                });
+            }
+            Item::Playlist(p) => {
+                let (key, label) = (p.rating_key.clone(), p.title.clone());
+                let rx = crate::plex_call(move |c| async move { c.playlist_tracks(&key, 500).await });
+                cx.spawn(async move |this, cx| {
+                    let res = rx.await;
+                    this.update(cx, |this, cx| match res {
+                        Ok(Ok(tracks)) => this.enqueue(tracks, next, label, cx),
+                        Ok(Err(e)) => {
+                            this.status = format!("{label}: {e:#}").into();
+                            cx.notify();
+                        }
+                        Err(_) => {}
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            // Artists and radio aren't a fixed list of tracks to queue.
+            _ => {
+                self.status = "Play next / add to queue works on albums, tracks and playlists".into();
+                cx.notify();
+            }
+        }
+    }
+
     /// Tab: radio from the selected artist/album (or the top result).
     pub(crate) fn palette_radio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let items = self.palette_items();
@@ -116,6 +157,13 @@ impl Crate {
             "escape" => self.close_palette(window, cx),
             "down" if n > 0 => self.pal_sel = (self.pal_sel + 1) % n,
             "up" if n > 0 => self.pal_sel = (self.pal_sel + n - 1) % n,
+            "enter" if ev.keystroke.modifiers.shift || ev.keystroke.modifiers.control => {
+                // Shift+Enter play next, Ctrl+Enter add to queue (canvas).
+                if let Some((_, it)) = items.into_iter().nth(self.pal_sel) {
+                    self.queue_item(it, ev.keystroke.modifiers.shift, cx);
+                    self.close_palette(window, cx);
+                }
+            }
             "enter" => {
                 if let Some((_, it)) = items.into_iter().nth(self.pal_sel) {
                     self.activate_item(it, window, cx);
@@ -293,6 +341,8 @@ impl Crate {
             .text_color(rgb(t.muted))
             .child("↑↓ move")
             .child("Enter play")
+            .child("⇧Enter next")
+            .child("Ctrl+Enter queue")
             .child("Tab radio")
             .child("→ open")
             .child(div().flex_1())

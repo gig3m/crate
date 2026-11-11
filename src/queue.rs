@@ -108,6 +108,72 @@ impl Crate {
         true
     }
 
+    /// Play next (right after what the engine has already opened) or add to
+    /// the end of the queue. Nothing playing: these start a queue.
+    pub(crate) fn enqueue(&mut self, tracks: Vec<Track>, next: bool, label: String, cx: &mut Context<Self>) {
+        if tracks.is_empty() {
+            return;
+        }
+        let n = tracks.len();
+        if self.now.is_none() {
+            self.start_queue(label, None, tracks, 0, cx);
+            return;
+        }
+        // Insert and hand over against the SAME `started`; if the decoder opens a
+        // track in between, the engine refuses it and we redo it from the new point.
+        let mut placed = None;
+        for _ in 0..5 {
+            let started = self.engine.as_ref().map(|e| e.started());
+            let Some(now) = self.now.as_mut() else { return };
+            let opened = now.start_idx + started.unwrap_or(0);
+            let at = if next { (now.idx + 1).max(opened) } else { now.tracks.len() }.min(now.tracks.len());
+            now.tracks.splice(at..at, tracks.iter().cloned());
+            // Shuffle-off order: right after the current track, or at the end.
+            let cur_key = now.tracks.get(now.idx).map(|t| t.rating_key.clone());
+            let opos = if next { cur_key.and_then(|k| now.orig_order.iter().position(|o| *o == k)).map(|p| p + 1).unwrap_or(now.orig_order.len()) } else { now.orig_order.len() };
+            now.orig_order.splice(opos..opos, tracks.iter().map(|t| t.rating_key.clone()));
+            if now.engine_end >= at {
+                now.engine_end += n;
+            }
+            match started {
+                // No live engine (finished or stopped): nothing to hand over.
+                None => {
+                    placed = Some(at);
+                    break;
+                }
+                Some(s) if self.hand_over(s) => {
+                    placed = Some(at);
+                    break;
+                }
+                Some(_) => {
+                    // Undo and retry from where the decoder is now.
+                    if let Some(now) = self.now.as_mut() {
+                        now.tracks.drain(at..at + n);
+                        now.orig_order.drain(opos..opos + n);
+                        if now.engine_end >= at + n {
+                            now.engine_end -= n;
+                        }
+                    }
+                }
+            }
+        }
+        let Some(at) = placed else {
+            self.status = "Couldn't queue that (playback moved on); try again".into();
+            cx.notify();
+            return;
+        };
+        self.status = format!("{} {label}", if next { "Playing next:" } else { "Added to queue:" }).into();
+        // The engine ran out before this arrived: carry on with the new tracks.
+        if let Some(now) = self.now.as_ref()
+            && now.finished
+            && !now.stopped
+            && self.engine.is_none()
+        {
+            self.play_from(at, 0, cx);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
         self.shuffle = !self.shuffle;
         // Reorder and hand over against the SAME `started`: if the decoder opens a
