@@ -486,6 +486,27 @@ impl Crate {
                         // is pressed, so a drag that leaves the thin bar keeps
                         // tracking. Registered every paint: a press triggers no repaint.
                         {
+                            // A new left press anywhere means any earlier one has
+                            // ended, even if its release was never seen (let go
+                            // outside the window). Capture runs before the bar's own
+                            // mouse-down, which then records a fresh press.
+                            let weak = weak.clone();
+                            window.on_mouse_event(move |ev: &MouseDownEvent, phase, _, cx| {
+                                if phase != gpui::DispatchPhase::Capture || ev.button != MouseButton::Left {
+                                    return;
+                                }
+                                weak.update(cx, |this, _| {
+                                    let mut v = this.viz.borrow_mut();
+                                    if v.press.is_some() {
+                                        v.press = None;
+                                        v.drag = None;
+                                        v.right_in_press = false;
+                                    }
+                                })
+                                .ok();
+                            });
+                        }
+                        {
                             let weak = weak.clone();
                             window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
                                 if phase != gpui::DispatchPhase::Bubble {
