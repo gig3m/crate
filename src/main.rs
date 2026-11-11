@@ -2192,6 +2192,12 @@ impl Crate {
             .flat_map(|(k, _)| self.albums.iter().filter(move |a| a.artist_key == *k).take(4).map(|a| a.thumb.clone()))
             .collect();
         thumbs.extend(home.mixes.iter().flat_map(|m| m.3.iter().map(|(th, _)| th.clone())));
+        // Collage filler: an album cover per sonically similar artist.
+        for (k, _) in Crate::mix_artists(home) {
+            if let Some(Some(sim)) = self.sonic_artists.get(&k) {
+                thumbs.extend(sim.iter().filter_map(|s| self.albums.iter().find(|a| a.artist_key == s.0)).map(|a| a.thumb.clone()));
+            }
+        }
         for th in thumbs {
             self.request_thumb(&th);
         }
