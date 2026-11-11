@@ -1834,6 +1834,35 @@ fn main() {
         });
         return;
     }
+    if args.iter().any(|a| a == "--refresh-server") {
+        // Fill in the stored account's server id and addresses from plex.tv
+        // (needed for finding the server again on another network).
+        let Some(mut a) = account::stored() else {
+            eprintln!("no saved sign-in");
+            return;
+        };
+        rt.block_on(async {
+            let http = reqwest::Client::new();
+            match account::servers(&http, &a.token).await {
+                Ok(list) => {
+                    let host = a.url.split("://").nth(1).unwrap_or_default().split(':').next().unwrap_or_default().to_lowercase();
+                    let pick = list.iter().find(|s| s.token == a.token || s.name.eq_ignore_ascii_case(&host) || s.name.eq_ignore_ascii_case(&a.server));
+                    match pick {
+                        Some(s) => {
+                            a.remember(s);
+                            match account::save(&a) {
+                                Ok(()) => println!("Saved {} addresses for {}.", a.connections.len(), a.server),
+                                Err(e) => eprintln!("couldn't save: {e:#}"),
+                            }
+                        }
+                        None => eprintln!("none of this account's servers matches {}", a.url),
+                    }
+                }
+                Err(e) => eprintln!("servers: {e:#}"),
+            }
+        });
+        return;
+    }
     let Some(acct) = account::load() else {
         run_setup(rt);
         return;
@@ -1842,6 +1871,7 @@ fn main() {
     if instance::hand_off() {
         return;
     }
+    let acct = rt.block_on(account::ensure_reachable(acct));
     let (base, token, section) = (acct.url.clone(), acct.token.clone(), acct.section.clone());
     let _ = SECTION.set(section.clone());
 

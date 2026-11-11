@@ -28,6 +28,8 @@ pub struct Setup {
     run: std::sync::Arc<std::sync::atomic::AtomicU64>,
     url_in: Entity<InputState>,
     token_in: Entity<InputState>,
+    /// The server chosen via plex.tv (its id and addresses get saved too).
+    found: Option<account::Server>,
 }
 
 impl Setup {
@@ -41,6 +43,7 @@ impl Setup {
             run: Default::default(),
             url_in: cx.new(|cx| InputState::new(window, cx).placeholder("http://my-server:32400")),
             token_in: cx.new(|cx| InputState::new(window, cx).placeholder("X-Plex-Token").masked(true)),
+            found: None,
         }
     }
 
@@ -150,7 +153,10 @@ impl Setup {
                 Ok((url, server, sections))
             },
             |this, res, cx| match res {
-                Ok((url, server, sections)) => this.libraries(url, server.token, server.name, sections, cx),
+                Ok((url, server, sections)) => {
+                    this.found = Some(server.clone());
+                    this.libraries(url, server.token, server.name, sections, cx)
+                }
                 Err(e) => this.fail(e),
             },
         );
@@ -181,7 +187,10 @@ impl Setup {
 
     /// Save the account and start the app proper.
     fn finish(&mut self, url: String, token: String, server: String, section: String, cx: &mut Context<Self>) {
-        let a = account::Account { url, token, section, server };
+        let mut a = account::Account { url, token, section, server, ..Default::default() };
+        if let Some(s) = self.found.as_ref().filter(|s| s.token == a.token) {
+            a.remember(s);
+        }
         // A different server or library: its caches would show the old one's.
         let changed = account::stored().is_none_or(|old| old.url != a.url || old.section != a.section);
         if let Err(e) = account::save(&a) {

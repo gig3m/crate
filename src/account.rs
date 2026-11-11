@@ -18,6 +18,66 @@ pub struct Account {
     /// Server name, for display.
     #[serde(default)]
     pub server: String,
+    /// The server's machine identifier and every address Plex listed for it,
+    /// so Crate can find it again when `url` stops answering (another network).
+    #[serde(default)]
+    pub server_id: String,
+    #[serde(default)]
+    pub connections: Vec<Conn>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Conn {
+    pub uri: String,
+    #[serde(default)]
+    pub local: bool,
+    #[serde(default)]
+    pub relay: bool,
+}
+
+impl Account {
+    /// The stored addresses as a Server for pick_connection.
+    pub fn as_server(&self) -> Server {
+        Server {
+            name: self.server.clone(),
+            id: self.server_id.clone(),
+            token: self.token.clone(),
+            connections: self.connections.iter().map(|c| (c.uri.clone(), c.local, c.relay)).collect(),
+        }
+    }
+
+    pub fn remember(&mut self, s: &Server) {
+        self.server = s.name.clone();
+        self.server_id = s.id.clone();
+        self.connections = s.connections.iter().map(|(uri, local, relay)| Conn { uri: uri.clone(), local: *local, relay: *relay }).collect();
+    }
+}
+
+/// At launch: if the saved address doesn't answer (another network, a
+/// changed IP), find the server again among its known addresses and save
+/// the one that works. Returns the account to use.
+pub async fn ensure_reachable(mut a: Account) -> Account {
+    let http = reqwest::Client::new();
+    let ok = http
+        .get(format!("{}/identity", a.url))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success());
+    if ok || a.connections.is_empty() {
+        return a;
+    }
+    match pick_connection(&http, &a.as_server()).await {
+        Ok((url, _)) if url != a.url => {
+            eprintln!("[crate] {} didn't answer; using {url}", a.url);
+            a.url = url;
+            if from_env().is_none() {
+                let _ = save(&a);
+            }
+            a
+        }
+        _ => a,
+    }
 }
 
 fn path() -> PathBuf {
@@ -33,7 +93,7 @@ pub fn from_env() -> Option<Account> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let token = env("PLEX_TOKEN")?;
     match (env("PLEX_URL"), env("PLEX_SECTION")) {
-        (Some(url), Some(section)) => Some(Account { url, token, section, server: String::new() }),
+        (Some(url), Some(section)) => Some(Account { url, token, section, ..Default::default() }),
         _ => {
             eprintln!("[crate] PLEX_TOKEN is set without PLEX_URL and PLEX_SECTION; ignoring the environment");
             None
