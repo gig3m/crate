@@ -267,7 +267,34 @@ impl Crate {
                         {
                             this.play_playlist(p.rating_key.clone(), p.title.clone(), cx);
                         }
+                        // Recently Added format labels follow in a second pass, so
+                        // Home shows without waiting on them.
+                        let keys: Vec<String> = home
+                            .rows
+                            .iter()
+                            .filter(|r| r.kind == "album" && r.id.starts_with("music.recent.added"))
+                            .flat_map(|r| r.items.iter().map(|i| i.rating_key.clone()))
+                            .collect();
                         this.home = Some(home);
+                        if !keys.is_empty() {
+                            let rx = plex_call(move |c| async move { c.album_formats(keys).await });
+                            cx.spawn(async move |this, cx| {
+                                if let Ok(Ok(found)) = rx.await {
+                                    this.update(cx, |this, cx| {
+                                        let Some(home) = this.home.as_mut() else { return };
+                                        let rows = home.rows.iter_mut().filter(|r| r.kind == "album" && r.id.starts_with("music.recent.added"));
+                                        for it in rows.flat_map(|r| r.items.iter_mut()) {
+                                            if let Some((_, f)) = found.iter().find(|(k, _)| *k == it.rating_key) {
+                                                it.format = f.clone();
+                                            }
+                                        }
+                                        cx.notify();
+                                    })
+                                    .ok();
+                                }
+                            })
+                            .detach();
+                        }
                         cx.notify();
                     })
                     .ok();

@@ -182,13 +182,13 @@ pub fn short_format(codec: &str, bit_depth: Option<u64>, rate: Option<u64>) -> S
     let codec = codec.to_ascii_lowercase();
     let rate = rate.unwrap_or(0);
     if codec.starts_with("dsd") {
-        // Plex reports DSD at its PCM-equivalent or native rate; name the native multiple.
-        let native = if rate >= 2_822_400 { rate } else { rate * 32 };
-        return if native >= 2_822_400 { format!("DSD{}", native / 44_100) } else { "DSD".into() };
+        // Only a native DSD bit rate names the multiple unambiguously; reported
+        // PCM-equivalent rates differ by convention (/8, /16, /32).
+        return if rate >= 2_822_400 && rate.is_multiple_of(44_100) { format!("DSD{}", rate / 44_100) } else { "DSD".into() };
     }
     match bit_depth {
-        Some(b) if b > 16 || rate > 48_000 => {
-            let khz = if rate.is_multiple_of(1000) { format!("{}", rate / 1000) } else { format!("{:.1}", rate as f64 / 1000.0) };
+        Some(b) if rate > 0 && (b > 16 || rate > 48_000) => {
+            let khz = if rate.is_multiple_of(1000) { format!("{}", rate / 1000) } else { format!("{}", (rate as f64 / 100.0).floor() / 10.0) };
             format!("{b}/{khz}")
         }
         _ => codec.to_uppercase(),
@@ -493,7 +493,7 @@ impl Client {
             .json()
             .await
             .context("decoding hubs")?;
-        let mut rows = env
+        Ok(env
             .mc
             .hubs
             .into_iter()
@@ -515,32 +515,43 @@ impl Client {
                     })
                     .collect(),
             })
-            .collect::<Vec<_>>();
-        // Recently Added cards show each album's format (two small requests per
-        // album, concurrent). Bounded so a slow server can't hold up Home.
-        if let Some(row) = rows.iter_mut().find(|r| r.kind == "album" && r.id.starts_with("music.recent.added")) {
-            let mut set = tokio::task::JoinSet::new();
-            for (i, it) in row.items.iter().enumerate() {
-                let (c, key) = (self.clone(), it.rating_key.clone());
-                set.spawn(async move { (i, c.album_format_short(&key).await) });
-            }
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-            while let Ok(Some(Ok((i, res)))) = tokio::time::timeout_at(deadline, set.join_next()).await {
-                if let (Ok(f), Some(it)) = (res, row.items.get_mut(i)) {
-                    it.format = f;
-                }
-            }
-            set.abort_all();
-            if std::env::var_os("CRATE_TRACE").is_some() {
-                eprintln!("recent formats: {:?}", row.items.iter().map(|i| format!("{} = {}", i.title, i.format)).collect::<Vec<_>>());
+            .collect())
+    }
+
+    /// Card formats for these albums, as (album key, format), fetched
+    /// concurrently after Home is up. Albums that don't answer within 10 s
+    /// (or fail) are left out.
+    pub async fn album_formats(&self, keys: Vec<String>) -> anyhow::Result<Vec<(String, String)>> {
+        let mut set = tokio::task::JoinSet::new();
+        for key in keys {
+            let c = self.clone();
+            set.spawn(async move {
+                let f = c.album_format_short(&key).await;
+                (key, f)
+            });
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut out = Vec::new();
+        while let Ok(Some(joined)) = tokio::time::timeout_at(deadline, set.join_next()).await {
+            if let Ok((key, Ok(f))) = joined {
+                out.push((key, f));
             }
         }
-        Ok(rows)
+        set.abort_all();
+        if std::env::var_os("CRATE_TRACE").is_some() {
+            eprintln!("recent formats: {out:?}");
+        }
+        Ok(out)
     }
 
     /// An album's format, read from its first track's audio stream.
     pub async fn album_format_short(&self, album_key: &str) -> anyhow::Result<String> {
-        let env: serde_json::Value = self.get(&format!("/library/metadata/{album_key}/children")).await?.json().await.context("tracks")?;
+        let env: serde_json::Value = self
+            .get(&format!("/library/metadata/{album_key}/children?X-Plex-Container-Start=0&X-Plex-Container-Size=1"))
+            .await?
+            .json()
+            .await
+            .context("tracks")?;
         let first = env["MediaContainer"]["Metadata"][0]["ratingKey"].as_str().context("no tracks")?.to_string();
         let v: serde_json::Value = self.get(&format!("/library/metadata/{first}")).await?.json().await.context("track")?;
         let streams = v["MediaContainer"]["Metadata"][0]["Media"][0]["Part"][0]["Stream"].as_array().cloned().unwrap_or_default();
@@ -1205,6 +1216,11 @@ mod format_tests {
         assert_eq!(short_format("alac", Some(24), Some(44_100)), "24/44.1");
         assert_eq!(short_format("mp3", None, Some(44_100)), "MP3");
         assert_eq!(short_format("dsd_lsbf_planar", Some(1), Some(2_822_400)), "DSD64");
-        assert_eq!(short_format("dsd_msbf", None, Some(176_400)), "DSD128");
+        assert_eq!(short_format("dsd_msbf", None, Some(5_644_800)), "DSD128");
+        // PCM-equivalent DSD rates are ambiguous across conventions.
+        assert_eq!(short_format("dsd_msbf", None, Some(176_400)), "DSD");
+        assert_eq!(short_format("dsd_lsbf", Some(1), Some(352_800)), "DSD");
+        assert_eq!(short_format("flac", Some(24), None), "FLAC");
+        assert_eq!(short_format("flac", Some(24), Some(22_050)), "24/22");
     }
 }
