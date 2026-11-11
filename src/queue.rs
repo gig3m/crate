@@ -235,23 +235,33 @@ impl Crate {
         }
         let qid = now.queue_id;
         let at = (qid, now.idx);
-        let cur = now.tracks[now.idx].clone();
-        // Not after a DJ pick, and once per track per queue (recorded before the
-        // fetch, so a quick off/on can't pick twice).
-        if self.dj_keys.contains(&(qid, cur.rating_key.clone())) || !self.dj_done.insert((qid, cur.rating_key.clone())) {
+        let key = (qid, now.tracks[now.idx].rating_key.clone());
+        // Not after a DJ pick, not when the next track already is one, and once
+        // per track per queue (recorded before the fetch, so an in-flight pick
+        // can't be doubled; released again if the pick doesn't happen).
+        let next_is_dj = now.tracks.get(now.idx + 1).is_some_and(|t| self.dj_keys.contains(&(qid, t.rating_key.clone())));
+        if next_is_dj || self.dj_keys.contains(&key) || self.dj_done.contains(&key) {
             return;
         }
+        self.dj_done.insert(key.clone());
+        let cur = now.tracks[now.idx].clone();
         let queued: std::collections::HashSet<String> = now.tracks.iter().map(|t| t.rating_key.clone()).collect();
         let k = cur.rating_key.clone();
         let rx = crate::plex_call(move |c| async move { c.nearest_tracks(&k, 15).await });
         cx.spawn(async move |this, cx| {
-            let Ok(Ok(near)) = rx.await else { return };
+            let res = rx.await;
             this.update(cx, |this, cx| {
                 // Still the same track playing in the same, unfinished queue.
                 let live = this.now.as_ref().is_some_and(|n| (n.queue_id, n.idx) == at && !n.finished && !n.stopped);
-                if !live || !this.guest_dj || this.repeat == Repeat::One {
-                    return;
-                }
+                let near = match res {
+                    Ok(Ok(near)) if live && this.guest_dj && this.repeat != Repeat::One => near,
+                    // No pick this time (moved on, toggled off, fetch failed): let
+                    // the track try again when it next comes round.
+                    _ => {
+                        this.dj_done.remove(&key);
+                        return;
+                    }
+                };
                 let Some(pick) = near.into_iter().find(|t| !queued.contains(&t.rating_key) && t.album_key != cur.album_key) else { return };
                 this.dj_keys.insert((qid, pick.rating_key.clone()));
                 // Quietly: a toast for every pick would be noise.
