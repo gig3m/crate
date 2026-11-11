@@ -630,6 +630,9 @@ fn decoder_thread(
         // The MP4 edit list's priming and real length (exact, when present).
         // AAC only: its priming and padding are what the edit list is for.
         let is_aac = params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_AAC;
+        if !is_aac && let Some(p) = &edits {
+            p.stop();
+        }
         let edit_trims = edits.filter(|_| is_aac).and_then(|p| p.trims(track.id, rate));
         let num_frames = edit_trims.map(|(_, t)| t).or_else(|| src.len_ms().map(|ms| ms * rate as u64 / 1000)).or(track.num_frames);
         let long_enough = num_frames.is_some_and(|n| n >= 2 * fade_frames as u64);
@@ -743,7 +746,9 @@ fn decoder_thread(
             match fmt.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(track.id) }) {
                 // Some readers land on the packet holding the target: the
                 // frames before it are dropped, so the position is exact.
-                Ok(to) if to.actual_ts < to.required_ts => {
+                // (Only where nothing else trims: other decoders apply their
+                // own start trims, which this would count twice.)
+                Ok(to) if edit_trims.is_some() && to.actual_ts < to.required_ts => {
                     let ticks = (to.required_ts.get() - to.actual_ts.get()) as u64;
                     seek_lead = match track.time_base {
                         Some(tb) => ticks * tb.numer.get() as u64 * rate as u64 / tb.denom.get() as u64,

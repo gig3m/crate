@@ -31,6 +31,10 @@ impl Captured {
         if self.total + bytes.len() > CAPTURE_MAX {
             return;
         }
+        // A shorter re-read at the same offset keeps the longer one.
+        if self.chunks.get(&at).is_some_and(|c| c.len() >= bytes.len()) {
+            return;
+        }
         self.total += bytes.len();
         self.chunks.insert(at, bytes.to_vec());
     }
@@ -40,11 +44,9 @@ impl Captured {
         let mut out = Vec::with_capacity(len);
         let mut pos = at;
         while out.len() < len {
-            let (start, chunk) = self.chunks.range(..=pos).next_back()?;
+            // Any read that covers `pos` (reads can overlap after seeks).
+            let (start, chunk) = self.chunks.range(..=pos).rev().find(|(s, c)| pos < **s + c.len() as u64)?;
             let off = (pos - start) as usize;
-            if off >= chunk.len() {
-                return None;
-            }
             let take = (len - out.len()).min(chunk.len() - off);
             out.extend_from_slice(&chunk[off..off + take]);
             pos += take as u64;
@@ -69,6 +71,12 @@ pub struct Probe {
 }
 
 impl Probe {
+    /// Stop recording and let the capture go (not an AAC track).
+    pub fn stop(&self) {
+        self.recording.store(false, Ordering::Release);
+        drop(std::mem::take(&mut *self.captured.lock().unwrap()));
+    }
+
     /// Stop recording (the probe is done) and find `track_id`'s edit list:
     /// (priming frames, real length in frames) at `rate`.
     pub fn trims(&self, track_id: u32, rate: u32) -> Option<(u64, u64)> {
@@ -192,22 +200,12 @@ pub fn edit_list(c: &Captured, track_id: u32) -> Option<Edit> {
         }
         at = at.checked_add(size?)?;
     };
-    let mut movie_timescale = None;
-    for (kind, s, e) in children(c, moov.0, moov.1) {
-        match &kind {
-            b"mvhd" => {
-                let v = c.get(s, 1)?[0];
-                movie_timescale = Some(be32(&c.get(s + if v == 1 { 20 } else { 12 }, 4)?));
-            }
-            b"trak" => {
-                if let Some(edit) = trak(c, s, e, track_id, movie_timescale?) {
-                    return Some(edit);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    // mvhd may come before or after the traks.
+    let kids = children(c, moov.0, moov.1);
+    let (_, ms, _) = kids.iter().find(|k| &k.0 == b"mvhd")?;
+    let v = c.get(*ms, 1)?[0];
+    let movie_timescale = be32(&c.get(ms + if v == 1 { 20 } else { 12 }, 4)?);
+    kids.iter().filter(|k| &k.0 == b"trak").find_map(|(_, s, e)| trak(c, *s, *e, track_id, movie_timescale))
 }
 
 fn trak(c: &Captured, s: u64, e: u64, track_id: u32, movie_timescale: u32) -> Option<Edit> {
@@ -352,6 +350,18 @@ mod tests {
         let e = edit_list(&c, 2).expect("audio trak");
         assert_eq!(e.trims(44_100), Some((2048, (247_973 * 44_100 + 500) / 1000)));
         assert_eq!(edit_list(&c, 1), None, "not audio");
+    }
+
+    #[test]
+    fn overlapping_reads_and_late_mvhd() {
+        let mut c = Captured::default();
+        c.add(0, &[1u8; 4096]);
+        c.add(2048, &[2u8; 512]);
+        c.add(0, &[3u8; 1024]);
+        assert_eq!(c.get(3000, 8), Some(vec![1u8; 8]));
+        let moov = [trak(2, b"soun", 44100, &[(1000, 2048)]), mvhd(1000)].concat();
+        let file = [atom(b"ftyp", b"M4A \0\0\0\0"), atom(b"moov", &moov)].concat();
+        assert!(edit_list(&capture(&file), 2).is_some());
     }
 
     #[test]
