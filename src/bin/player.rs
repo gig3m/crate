@@ -30,7 +30,7 @@ fn main() -> anyhow::Result<()> {
     }
     anyhow::ensure!(!queue.is_empty(), "nothing to play");
 
-    let engine = Engine::play(queue, target)?;
+    let engine = Engine::play(queue.into_iter().map(Into::into).collect(), target)?;
     let st = engine.stats.clone();
     let mut tracks: Vec<(u64, u32, String)> = Vec::new();
     let mut reported = 0usize;

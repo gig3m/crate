@@ -32,6 +32,20 @@ use symphonia::core::{
 
 pub use source::Source;
 
+/// A queued track: where to read it, and the linear gain the decoder applies
+/// to its samples (loudness leveling). 1.0 leaves the samples untouched.
+#[derive(Clone, Debug)]
+pub struct Item {
+    pub src: Source,
+    pub gain: f32,
+}
+
+impl From<Source> for Item {
+    fn from(src: Source) -> Self {
+        Item { src, gain: 1.0 }
+    }
+}
+
 pub const CHANNELS: usize = 2;
 
 #[derive(Default)]
@@ -99,7 +113,7 @@ enum Cmd {
 /// Tracks the decoder hasn't opened yet. The decoder pops from the front;
 /// the caller can append (radio refills) or replace what's left (shuffle).
 struct Queue {
-    items: VecDeque<Source>,
+    items: VecDeque<Item>,
     /// Tracks the decoder has opened (= the next track's engine index).
     started: usize,
     /// The decoder reached the end and is winding down: no more changes.
@@ -134,7 +148,7 @@ impl Engine {
 
     /// Add tracks to the end. False once the decoder has finished the queue
     /// (the caller must start a new engine for them).
-    pub fn append(&self, more: Vec<Source>) -> bool {
+    pub fn append(&self, more: Vec<Item>) -> bool {
         let mut q = self.queue.lock().unwrap();
         if q.closed {
             return false;
@@ -151,7 +165,7 @@ impl Engine {
     /// Replace the tracks not opened yet, but only if the decoder has opened
     /// exactly `started` tracks (so the caller's view of what's next is
     /// current). False means retry with a fresh `started()`, or the queue closed.
-    pub fn replace_upcoming(&self, started: usize, upcoming: Vec<Source>) -> bool {
+    pub fn replace_upcoming(&self, started: usize, upcoming: Vec<Item>) -> bool {
         let mut q = self.queue.lock().unwrap();
         if q.closed || q.started != started {
             return false;
@@ -169,12 +183,12 @@ impl Drop for Engine {
 
 impl Engine {
     /// Start playing `queue` on `target` (a sink node.name; None = default).
-    pub fn play(queue: Vec<Source>, target: Option<String>) -> anyhow::Result<Self> {
+    pub fn play(queue: Vec<Item>, target: Option<String>) -> anyhow::Result<Self> {
         Self::play_from(queue, 0, target)
     }
 
     /// Like `play`, starting `start_ms` into the first track.
-    pub fn play_from(queue: Vec<Source>, start_ms: u64, target: Option<String>) -> anyhow::Result<Self> {
+    pub fn play_from(queue: Vec<Item>, start_ms: u64, target: Option<String>) -> anyhow::Result<Self> {
         let stats = Arc::new(Stats::default());
         let queue = Arc::new(Mutex::new(Queue { items: queue.into(), started: 0, closed: false }));
         let (ev_tx, events) = mpsc::channel();
@@ -263,7 +277,7 @@ fn decoder_thread(
                 (q.started - 1, src)
             })
         };
-        let (index, src) = match popped {
+        let (index, item) = match popped {
             Some(next) => next,
             None => {
                 // Out of tracks for now. Let what's buffered play while an
@@ -298,6 +312,9 @@ fn decoder_thread(
                 }
             }
         };
+        let (src, gain) = (item.src, item.gain);
+        // A gain that isn't a sane finite factor is ignored rather than trusted.
+        let gain = if gain.is_finite() && gain > 0.0 && gain <= 4.0 { gain } else { 1.0 };
         let mss = MediaSourceStream::new(src.open(stats.stop.clone())?, Default::default());
         let mut hint = Hint::new();
         if let Some(ext) = src.ext() {
@@ -396,6 +413,13 @@ fn decoder_thread(
             anyhow::ensure!(ch == CHANNELS, "only stereo in the spike (got {ch})");
             scratch.resize(buf.frames() * ch, 0.0);
             buf.copy_to_slice_interleaved(&mut scratch[..]);
+            // Loudness leveling. Exactly 1.0 skips the loop, so leveling off
+            // stays bit-perfect.
+            if gain != 1.0 {
+                for s in scratch.iter_mut() {
+                    *s = (*s * gain).clamp(-1.0, 1.0);
+                }
+            }
             let mut off = 0;
             while off < scratch.len() {
                 let free = prod.slots();
@@ -515,6 +539,11 @@ fn pw_thread(
             };
             if let Some(t) = &target {
                 props.insert("target.object", t.as_str());
+                // Tests: never fall back to a real device if the target is missing.
+                if std::env::var_os("CRATE_TARGET_STRICT").is_some() {
+                    props.insert("node.dont-fallback", "true");
+                    props.insert("node.dont-reconnect", "true");
+                }
             }
             let stream = pw::stream::StreamBox::new(&core, "crate-playback", props)?;
             // SAFETY (spike): the stream borrows `core`, which lives for the

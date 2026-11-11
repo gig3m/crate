@@ -48,7 +48,7 @@ use gpui::{
 use gpui_component::input::InputState;
 use tokio::sync::mpsc;
 
-use crate_audio::audio::{Engine, Event as AudioEvent, Source};
+use crate_audio::audio::{Engine, Event as AudioEvent, Item, Source};
 use mpris::{Transport, Update as MprisUpdate};
 use plex::{Album, ArtRequest, ArtResult, ArtistInfo, ArtistRequest, HubsRequest, SearchHit, SearchRequest, Track, TracksRequest};
 
@@ -81,6 +81,11 @@ struct Crate {
     /// The status last shown as a toast, and until when it stays up.
     status_seen: SharedString,
     status_until: Option<Instant>,
+    /// Loudness leveling setting, and Plex's loudness analysis by track key.
+    leveling: theme::Leveling,
+    gains: HashMap<String, plex::Gain>,
+    /// Gain each track was last handed to the engine with (what's audible).
+    applied_gain: std::cell::RefCell<HashMap<String, f32>>,
     /// (queue context, note): shown with "Playing …" when that queue starts.
     play_note: Option<(String, String)>,
     art: HashMap<String, Arc<Image>>,
@@ -597,6 +602,9 @@ impl Crate {
             status_seen: "Loading library…".into(),
             status_until: None,
             play_note: None,
+            leveling: theme::saved_leveling(),
+            gains: HashMap::new(),
+            applied_gain: std::cell::RefCell::new(HashMap::new()),
             art: HashMap::new(),
             requested: HashSet::new(),
             art_tx,
@@ -1003,7 +1011,85 @@ impl Crate {
             rep_at: Instant::now(),
             orig_order,
         });
-        self.play_from(start, 0, cx);
+        // With leveling on, the first track needs its gain before it starts
+        // (bounded: Plex answers in tens of ms on a LAN; give up after 1.5 s).
+        let missing = self.missing_gains(self.now.as_ref().map(|n| &n.tracks[..]).unwrap_or_default());
+        if missing.is_empty() {
+            self.play_from(start, 0, cx);
+            return;
+        }
+        let seq = self.queue_seq;
+        let rx = plex_call(move |c| async move {
+            tokio::time::timeout(Duration::from_millis(1500), c.track_gains(missing)).await.map_err(|_| anyhow::anyhow!("timed out"))?
+        });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok(Ok(found)) => this.gains.extend(found),
+                    Ok(Err(e)) => eprintln!("[crate] loudness: {e:#}"),
+                    Err(_) => {}
+                }
+                // Only if this queue is still the one waiting to start.
+                if this.queue_seq == seq && this.engine.is_none() {
+                    this.play_from(start, 0, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Track keys among `tracks` whose loudness isn't known yet (none when
+    /// leveling is off). Bounded so a huge playlist doesn't stall a start.
+    fn missing_gains(&self, tracks: &[Track]) -> Vec<String> {
+        if self.leveling == theme::Leveling::Off {
+            return Vec::new();
+        }
+        let mut seen = std::collections::HashSet::new();
+        tracks
+            .iter()
+            .filter(|t| !self.gains.contains_key(&t.rating_key) && seen.insert(t.rating_key.as_str()))
+            .take(300)
+            .map(|t| t.rating_key.clone())
+            .collect()
+    }
+
+    /// Fetch loudness for `tracks` in the background, then re-hand the engine
+    /// its unopened tracks with their gains (the playing one keeps its gain).
+    fn fill_gains(&mut self, tracks: &[Track], cx: &mut Context<Self>) {
+        let missing = self.missing_gains(tracks);
+        if missing.is_empty() {
+            self.sync_upcoming();
+            return;
+        }
+        let rx = plex_call(move |c| async move { c.track_gains(missing).await });
+        cx.spawn(async move |this, cx| {
+            if let Ok(res) = rx.await {
+                this.update(cx, |this, _| {
+                    match res {
+                        Ok(found) => this.gains.extend(found),
+                        Err(e) => eprintln!("[crate] loudness: {e:#}"),
+                    }
+                    this.sync_upcoming();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn set_leveling(&mut self, l: theme::Leveling, cx: &mut Context<Self>) {
+        if self.leveling == l {
+            return;
+        }
+        self.leveling = l;
+        if let Err(e) = theme::save_leveling(l) {
+            self.status = format!("Couldn't save the leveling setting: {e}").into();
+        }
+        let tracks = self.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default();
+        self.fill_gains(&tracks, cx);
+        cx.notify();
     }
 
     fn art_path(album_key: &str) -> std::path::PathBuf {
@@ -1252,6 +1338,8 @@ impl Crate {
                                 && let Some(n) = this.now.as_mut()
                             {
                                 n.engine_end = n.tracks.len();
+                                // Appended at unity if their loudness isn't known yet; retune once it is.
+                                this.fill_gains(&more, cx);
                             }
                             for th in thumbs {
                                 this.request_thumb(&th);

@@ -3,7 +3,7 @@
 
 use gpui::Context;
 
-use crate::{Crate, Source, plex::Track};
+use crate::{Crate, Item, Source, plex::Track};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum Repeat {
@@ -14,25 +14,47 @@ pub(crate) enum Repeat {
 }
 
 impl Crate {
-    /// Engine sources for `tracks`.
-    pub(crate) fn sources(&self, tracks: &[Track]) -> Vec<Source> {
-        let (base, token) = self.plex.clone();
+    /// Linear leveling gain for `t` under the current setting: 10^(dB/20),
+    /// held under 1/peak so it can't clip; 1.0 when off or not analyzed.
+    pub(crate) fn level_gain(&self, t: &Track) -> f32 {
+        use crate::theme::Leveling;
+        let Some(g) = self.gains.get(&t.rating_key) else { return 1.0 };
+        let album_in_order = !self.shuffle && self.now.as_ref().is_some_and(|n| n.context_key.as_deref() == Some(t.album_key.as_str()));
+        let use_album = match self.leveling {
+            Leveling::Off => return 1.0,
+            Leveling::Track => false,
+            Leveling::Album => true,
+            Leveling::Smart => album_in_order,
+        };
+        linear_gain(g, use_album)
+    }
+
+    /// Engine items for `tracks`, with leveling gains.
+    pub(crate) fn sources(&self, tracks: &[Track]) -> Vec<Item> {
+        let mut applied = self.applied_gain.borrow_mut();
         tracks
             .iter()
             .map(|t| {
-                // Kept offline (on this server): play the local copy.
-                if let Some(kept) = self.offline.local(&t.part_key) {
-                    return Source::File(kept);
-                }
-                let id = t.part_key.split('/').nth(3).unwrap_or("x").to_string();
-                let ext = t.part_key.rsplit('.').next().unwrap_or("bin").to_string();
-                Source::Http {
-                    url: format!("{base}{}", t.part_key),
-                    token: token.clone(),
-                    cache: std::path::PathBuf::from(format!("/scratch/crate-cache/part-{id}.{ext}")),
-                }
+                let gain = self.level_gain(t);
+                applied.insert(t.rating_key.clone(), gain);
+                Item { src: self.source(t), gain }
             })
             .collect()
+    }
+
+    fn source(&self, t: &Track) -> Source {
+        // Kept offline (on this server): play the local copy.
+        if let Some(kept) = self.offline.local(&t.part_key) {
+            return Source::File(kept);
+        }
+        let (base, token) = self.plex.clone();
+        let id = t.part_key.split('/').nth(3).unwrap_or("x").to_string();
+        let ext = t.part_key.rsplit('.').next().unwrap_or("bin").to_string();
+        Source::Http {
+            url: format!("{base}{}", t.part_key),
+            token,
+            cache: std::path::PathBuf::from(format!("/scratch/crate-cache/part-{id}.{ext}")),
+        }
     }
 
     /// Tracks the engine should get starting at queue index `from`: just that
@@ -167,5 +189,39 @@ impl Crate {
             }
             _ => false,
         }
+    }
+}
+
+/// 10^(dB/20) for the album or track gain (falling back to the other when
+/// one is missing), held under 1/peak so it can't clip. dB is bounded to
+/// -24..+12; exactly 1.0 when there's nothing to apply.
+pub(crate) fn linear_gain(g: &crate::plex::Gain, use_album: bool) -> f32 {
+    let (db, peak) = if use_album { (g.album_db.or(g.track_db), g.album_peak.or(g.track_peak)) } else { (g.track_db.or(g.album_db), g.track_peak.or(g.album_peak)) };
+    let Some(db) = db else { return 1.0 };
+    let mut lin = 10f32.powf(db.clamp(-24.0, 12.0) / 20.0);
+    if let Some(p) = peak.filter(|p| *p > 0.0) {
+        lin = lin.min(1.0 / p);
+    }
+    if (lin - 1.0).abs() < 1e-4 { 1.0 } else { lin }
+}
+
+#[cfg(test)]
+mod gain_tests {
+    use super::linear_gain;
+    use crate::plex::Gain;
+
+    #[test]
+    fn gains() {
+        let g = Gain { track_db: Some(-5.46), track_peak: Some(0.97), album_db: Some(-8.27), album_peak: Some(0.99) };
+        assert!((linear_gain(&g, false) - 10f32.powf(-5.46 / 20.0)).abs() < 1e-5);
+        assert!((linear_gain(&g, true) - 10f32.powf(-8.27 / 20.0)).abs() < 1e-5);
+        // A boost is held under the peak: +6 dB on a 0.8 peak gives 1/0.8.
+        let quiet = Gain { track_db: Some(6.0), track_peak: Some(0.8), ..Default::default() };
+        assert!((linear_gain(&quiet, false) - 1.25).abs() < 1e-5);
+        // Album mode falls back to the track's gain when the album's is missing.
+        assert!((linear_gain(&quiet, true) - 1.25).abs() < 1e-5);
+        // Nothing analyzed: unity, exactly.
+        assert_eq!(linear_gain(&Gain::default(), false), 1.0);
+        assert_eq!(linear_gain(&Gain { track_db: Some(0.0), ..Default::default() }, false), 1.0);
     }
 }

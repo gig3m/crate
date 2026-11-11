@@ -336,6 +336,7 @@ impl Crate {
             }
             1 => {
                 let fmt = n.formats.get(&n.idx).copied();
+                let tr_key = n.tracks.get(n.idx).map(|t| t.rating_key.clone()).unwrap_or_default();
                 let codec = detail.as_ref().map(|d| d.codec.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| "Audio".into());
                 let source = match fmt {
                     Some((rate, bits)) => {
@@ -345,18 +346,25 @@ impl Crate {
                     None => codec.clone(),
                 };
                 let native = fmt.is_some_and(|(rate, _)| n.graph_rate == rate);
-                let bitperfect = native && self.volume >= 1.0;
+                let level = self.applied_gain.borrow().get(&tr_key).copied().unwrap_or(1.0);
+                let bitperfect = native && self.volume >= 1.0 && level == 1.0;
                 let output = match fmt {
                     Some((rate, _)) if n.graph_rate == rate => format!("PipeWire · {} kHz matched", khz(rate)),
                     Some((rate, _)) if n.graph_rate > 0 => format!("PipeWire resamples {} → {} kHz", khz(rate), khz(n.graph_rate)),
                     _ => "PipeWire".into(),
                 };
-                let gain = detail.as_ref().and_then(|d| d.gain).map(|g| format!("Off (track gain {g:+.1} dB)")).unwrap_or_else(|| "Off".into());
+                let gain = if level != 1.0 {
+                    format!("{} · {:+.1} dB applied (changes the samples)", self.leveling.label(), 20.0 * level.log10())
+                } else if self.leveling == crate::theme::Leveling::Off {
+                    "Off · samples untouched".into()
+                } else {
+                    format!("{} · 0 dB here (not analyzed, or already level)", self.leveling.label())
+                };
                 let steps: Vec<(&str, String, bool)> = vec![
                     ("Source", source, true),
                     ("Plex stream", "Direct play · original file · no transcode".into(), true),
                     ("Decoder", "symphonia · lock-free ring buffer".into(), true),
-                    ("Loudness leveling", gain, false),
+                    ("Loudness leveling", gain, level == 1.0),
                     ("EQ", "Bypassed".into(), false),
                     (
                         "Volume",
@@ -399,6 +407,8 @@ impl Crate {
                             .text_color(if bitperfect { rgb(t.healthy).into() } else { white(0.72) })
                             .child(if bitperfect {
                                 "● bit-perfect from Crate: native rate, stream volume 100%"
+                            } else if native && level != 1.0 {
+                                "● native rate · loudness leveling changes the samples"
                             } else if native {
                                 "● native rate · volume below 100% changes the samples"
                             } else {

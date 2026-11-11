@@ -85,6 +85,51 @@ pub fn saved_volume() -> f32 {
     map.get("volume").and_then(|v| v.as_float()).filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0) as f32).unwrap_or(1.0)
 }
 
+/// Loudness leveling (canvas: Off / Track / Album / Smart). Off keeps
+/// playback bit-perfect, so it's the default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Leveling {
+    #[default]
+    Off,
+    Track,
+    Album,
+    /// Album gain for an album played in order, track gain otherwise.
+    Smart,
+}
+
+impl Leveling {
+    pub const ALL: [Leveling; 4] = [Leveling::Off, Leveling::Track, Leveling::Album, Leveling::Smart];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Leveling::Off => "Off",
+            Leveling::Track => "Track",
+            Leveling::Album => "Album",
+            Leveling::Smart => "Smart",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Leveling::Off => "off",
+            Leveling::Track => "track",
+            Leveling::Album => "album",
+            Leveling::Smart => "smart",
+        }
+    }
+}
+
+pub fn saved_leveling() -> Leveling {
+    let raw = std::fs::read_to_string(config_path()).unwrap_or_default();
+    let map: HashMap<String, toml::Value> = toml::from_str(&raw).unwrap_or_default();
+    let v = map.get("leveling").and_then(|v| v.as_str()).unwrap_or("off");
+    Leveling::ALL.into_iter().find(|l| l.key() == v).unwrap_or_default()
+}
+
+pub fn save_leveling(l: Leveling) -> std::io::Result<()> {
+    save_key("leveling", toml::Value::String(l.key().into()))
+}
+
 pub fn save_volume(v: f32) -> std::io::Result<()> {
     save_key("volume", toml::Value::Float(((v as f64) * 100.0).round() / 100.0))
 }

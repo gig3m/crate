@@ -291,11 +291,36 @@ impl Crate {
                 )
             });
 
+        // Loudness leveling (canvas: Off / Track / Album / Smart).
+        let cur = self.leveling;
+        let segs = crate::theme::Leveling::ALL.into_iter().map(|l| {
+            let on = l == cur;
+            div()
+                .id(("leveling", l as usize))
+                .flex_1()
+                .h(px(30.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.0))
+                .text_size(px(13.0))
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .when(on, |d| d.bg(rgb(t.raised)).text_color(rgb(t.text_strong)))
+                .when(!on, |d| d.text_color(rgb(t.text2)).hover(|d| d.text_color(rgb(t.text_strong))))
+                .child(l.label())
+                .on_click(cx.listener(move |this, _, _, cx| this.set_leveling(l, cx)))
+        });
         let later = card()
-            .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.text_strong)).child("Loudness leveling, sweet fades, EQ"))
-            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(
-                "Not in the engine yet. Each one changes the samples, so they'll be off by default and the signal path will say when they're on.",
-            ));
+            .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.text_strong)).child("Loudness leveling"))
+            .child(div().p(px(3.0)).rounded(px(9.0)).border_1().border_color(rgb(t.raised)).bg(rgb(t.base)).flex().gap(px(2.0)).children(segs))
+            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(match cur {
+                crate::theme::Leveling::Off => "Off: samples stay untouched (bit-perfect).",
+                crate::theme::Leveling::Track => "Each track to the same loudness, from Plex's analysis. Changes the samples.",
+                crate::theme::Leveling::Album => "Whole albums to the same loudness, keeping their own dynamics. Changes the samples.",
+                crate::theme::Leveling::Smart => "Smart: album gain when you play an album in order, track gain on shuffle and radio. Changes the samples.",
+            }))
+            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child("Applies from the next track. Never boosts past a track's peak. Sweet fades and EQ aren't built yet."));
 
         div()
             .id("audio-settings")

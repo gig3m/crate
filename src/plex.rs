@@ -290,6 +290,16 @@ struct Part {
     key: String,
 }
 
+/// Loudness analysis for one track (Plex's audio stream fields). Gains are
+/// dB relative to ReplayGain 2's -18 LUFS; peaks are linear sample peaks.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Gain {
+    pub track_db: Option<f32>,
+    pub track_peak: Option<f32>,
+    pub album_db: Option<f32>,
+    pub album_peak: Option<f32>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Track {
     pub rating_key: String,
@@ -540,6 +550,29 @@ impl Client {
         set.abort_all();
         if std::env::var_os("CRATE_TRACE").is_some() {
             eprintln!("recent formats: {out:?}");
+        }
+        Ok(out)
+    }
+
+    /// Loudness analysis for these tracks, from batched metadata requests.
+    /// Tracks Plex hasn't analyzed come back as `Gain::default()`.
+    pub async fn track_gains(&self, keys: Vec<String>) -> anyhow::Result<Vec<(String, Gain)>> {
+        let num = |v: &serde_json::Value| v.as_str().and_then(|x| x.parse::<f32>().ok()).or(v.as_f64().map(|f| f as f32)).filter(|f| f.is_finite());
+        let mut out = Vec::with_capacity(keys.len());
+        for chunk in keys.chunks(50) {
+            let v: serde_json::Value = self.get(&format!("/library/metadata/{}", chunk.join(","))).await?.json().await.context("gains")?;
+            for m in v["MediaContainer"]["Metadata"].as_array().into_iter().flatten() {
+                let Some(key) = m["ratingKey"].as_str() else { continue };
+                let streams = m["Media"][0]["Part"][0]["Stream"].as_array().cloned().unwrap_or_default();
+                let g = streams.iter().find(|s| s["streamType"].as_i64() == Some(2)).map(|a| Gain {
+                    // Plex's per-track `gain` repeats the album's; derive the track's from its loudness.
+                    track_db: num(&a["loudness"]).map(|l| -18.0 - l),
+                    track_peak: num(&a["peak"]),
+                    album_db: num(&a["albumGain"]),
+                    album_peak: num(&a["albumPeak"]),
+                });
+                out.push((key.to_string(), g.unwrap_or_default()));
+            }
         }
         Ok(out)
     }
