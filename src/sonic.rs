@@ -52,6 +52,10 @@ impl Crate {
                         // The card falls back to the bare thumb path when Plex gave none.
                         let th = if th.is_empty() { format!("/library/metadata/{k}/thumb") } else { th.clone() };
                         this.request_thumb(&th);
+                        // An album cover each too (artist mix collages fill with these).
+                        if let Some(t) = this.albums.iter().find(|a| a.artist_key == *k).map(|a| a.thumb.clone()) {
+                            this.request_thumb(&t);
+                        }
                     }
                     this.sonic_artists.insert(key, Some(list));
                     cx.notify();

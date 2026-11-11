@@ -308,19 +308,33 @@ impl Crate {
                             .filter(|r| r.kind == "album" && r.id.starts_with("music.recent.added"))
                             .flat_map(|r| r.items.iter().map(|i| i.rating_key.clone()))
                             .collect();
-                        // Mixes for you: similar artists (subtitle, covers) and their art.
+                        // Mixes for you: similar artists (subtitle, covers), art, and the
+                        // mood mixes' covers in a second pass (Home doesn't wait on them).
                         for (k, _) in Crate::mix_artists(&home) {
                             this.request_sonic_artists(k, cx);
                         }
-                        let mix_thumbs: Vec<String> = Crate::mix_artists(&home)
-                            .iter()
-                            .flat_map(|(k, _)| this.albums.iter().filter(move |a| a.artist_key == *k).take(4).map(|a| a.thumb.clone()))
-                            .collect();
-                        let mix_thumbs = mix_thumbs.into_iter().chain(home.mixes.iter().flat_map(|m| m.3.iter().map(|(th, _)| th.clone())));
-                        for th in mix_thumbs {
-                            this.request_thumb(&th);
-                        }
+                        let filters: Vec<String> = home.mixes.iter().map(|m| m.2.clone()).collect();
                         this.home = Some(home);
+                        this.request_mix_art();
+                        if !filters.is_empty() {
+                            let section = crate::section();
+                            let rx = plex_call(move |c| async move { c.mix_covers(&section, filters).await });
+                            cx.spawn(async move |this, cx| {
+                                if let Ok(Ok(covers)) = rx.await {
+                                    this.update(cx, |this, cx| {
+                                        if let Some(h) = this.home.as_mut() {
+                                            for (m, c) in h.mixes.iter_mut().zip(covers) {
+                                                m.3 = c;
+                                            }
+                                        }
+                                        this.request_mix_art();
+                                        cx.notify();
+                                    })
+                                    .ok();
+                                }
+                            })
+                            .detach();
+                        }
                         if !keys.is_empty() {
                             let rx = plex_call(move |c| async move { c.album_formats(keys).await });
                             cx.spawn(async move |this, cx| {
@@ -439,6 +453,8 @@ impl Crate {
                         let old: Vec<Option<String>> =
                             std::iter::once(&this.view).chain(this.back.iter()).chain(this.fwd.iter()).map(|v| key_of(v, &this.albums)).collect();
                         this.albums = albums;
+                        // Mix collages read album covers: Home may have landed first.
+                        this.request_mix_art();
                         let pos: HashMap<&str, usize> = this.albums.iter().enumerate().map(|(i, a)| (a.rating_key.as_str(), i)).collect();
                         let remap = |v: &mut View, key: &Option<String>| -> bool {
                             match (v, key) {
@@ -2167,6 +2183,20 @@ impl Render for Crate {
 }
 
 impl Crate {
+    /// Art for "Mixes for you": the mix artists' album covers and the mood
+    /// mixes' covers. Called when Home, the album list or mix covers arrive.
+    fn request_mix_art(&mut self) {
+        let Some(home) = self.home.as_ref() else { return };
+        let mut thumbs: Vec<String> = Crate::mix_artists(home)
+            .iter()
+            .flat_map(|(k, _)| self.albums.iter().filter(move |a| a.artist_key == *k).take(4).map(|a| a.thumb.clone()))
+            .collect();
+        thumbs.extend(home.mixes.iter().flat_map(|m| m.3.iter().map(|(th, _)| th.clone())));
+        for th in thumbs {
+            self.request_thumb(&th);
+        }
+    }
+
     /// Show `msg` as a toast even if it's the same text as last time.
     pub(crate) fn say(&mut self, msg: impl Into<SharedString>) {
         self.status = msg.into();

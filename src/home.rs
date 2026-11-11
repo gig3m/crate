@@ -246,7 +246,8 @@ impl Crate {
             Mood(String, String, String, Vec<(String, String)>),
         }
         let mut mixes: Vec<Mix> = Self::mix_artists(home).into_iter().map(|(k, n)| Mix::Artist(k, n)).collect();
-        mixes.extend(home.mixes.iter().map(|(a, b, c, d)| Mix::Mood(a.clone(), b.clone(), c.clone(), d.clone())));
+        // A mood mix shows once albums with those moods are confirmed (its covers).
+        mixes.extend(home.mixes.iter().filter(|m| !m.3.is_empty()).map(|(a, b, c, d)| Mix::Mood(a.clone(), b.clone(), c.clone(), d.clone())));
         if mixes.is_empty() {
             return None;
         }

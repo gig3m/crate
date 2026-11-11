@@ -534,6 +534,47 @@ impl Client {
             .collect())
     }
 
+    /// Four random covers of albums matching each mood mix's filter, in order
+    /// (empty for a filter no album matches). Fetched after Home shows.
+    pub async fn mix_covers(&self, section: &str, filters: Vec<String>) -> anyhow::Result<Vec<Vec<(String, String)>>> {
+        let mut set = tokio::task::JoinSet::new();
+        for (i, q) in filters.iter().enumerate() {
+            let (c, q, section) = (self.clone(), q.clone(), section.to_string());
+            set.spawn(async move {
+                let r = c
+                    .http
+                    .get(format!("{}/library/sections/{section}/all?type=9&{q}&sort=random", c.base))
+                    .header("Accept", "application/json")
+                    .header("X-Plex-Token", &c.token)
+                    .header("X-Plex-Container-Start", "0")
+                    .header("X-Plex-Container-Size", "4")
+                    .send()
+                    .await;
+                let covers: Vec<(String, String)> = match r {
+                    Ok(r) => r
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()
+                        .and_then(|v| v["MediaContainer"]["Metadata"].as_array().cloned())
+                        .unwrap_or_default()
+                        .iter()
+                        .take(4)
+                        .filter_map(|m| Some((m["thumb"].as_str()?.to_string(), m["ratingKey"].as_str()?.to_string())))
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
+                (i, covers)
+            });
+        }
+        let mut out = vec![Vec::new(); filters.len()];
+        while let Some(joined) = set.join_next().await {
+            if let Ok((i, covers)) = joined {
+                out[i] = covers;
+            }
+        }
+        Ok(out)
+    }
+
     /// Edition facts for album pages: (album key, track count, card format).
     /// Track counts come only with per-album metadata (not the library list).
     pub async fn edition_info(&self, keys: Vec<String>) -> anyhow::Result<Vec<(String, u32, String)>> {
@@ -1085,35 +1126,13 @@ impl Client {
             ("Sunday Morning", "Hymns, gentle and reverent", &["Devotional", "Hymn-like", "Reverent", "Spiritual"]),
             ("High Energy", "Fast, bright and driving", &["Energetic", "Kinetic", "Driving", "Rousing"]),
         ];
-        let mut mixes: Vec<MoodMix> = MIXES
+        let mixes: Vec<MoodMix> = MIXES
             .iter()
             .filter_map(|(title, desc, names)| {
                 let ids: Vec<&str> = names.iter().filter_map(|n| moods.iter().find(|(_, t)| t == n)).map(|(k, _)| k.as_str()).collect();
                 (!ids.is_empty()).then(|| (title.to_string(), desc.to_string(), format!("mood={}", ids.join(",")), Vec::new()))
             })
             .collect();
-        // Four random album covers per mix, fetched together (best effort).
-        let mut set = tokio::task::JoinSet::new();
-        for (i, m) in mixes.iter().enumerate() {
-            let (c, q, section) = (self.clone(), m.2.clone(), section.to_string());
-            set.spawn(async move {
-                let r = c.http.get(format!("{}/library/sections/{section}/all?type=9&{q}&sort=random", c.base)).header("Accept", "application/json").header("X-Plex-Token", &c.token).header("X-Plex-Container-Start", "0").header("X-Plex-Container-Size", "4").send().await;
-                let covers: Vec<(String, String)> = match r {
-                    Ok(r) => r.json::<serde_json::Value>().await.ok().and_then(|v| v["MediaContainer"]["Metadata"].as_array().cloned()).unwrap_or_default().iter().take(4).filter_map(|m| Some((m["thumb"].as_str()?.to_string(), m["ratingKey"].as_str()?.to_string()))).collect(),
-                    Err(_) => Vec::new(),
-                };
-                (i, covers)
-            });
-        }
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-        while let Ok(Some(joined)) = tokio::time::timeout_at(deadline, set.join_next()).await {
-            if let Ok((i, covers)) = joined
-                && let Some(m) = mixes.get_mut(i)
-            {
-                m.3 = covers;
-            }
-        }
-        set.abort_all();
         let moods = MOODS
             .iter()
             .filter_map(|w| moods.iter().find(|(_, t)| t == w))
