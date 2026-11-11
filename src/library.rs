@@ -70,6 +70,8 @@ impl Crate {
     /// (date added, no filters) is the cached list as-is.
     pub(crate) fn refresh_library(&mut self, cx: &mut Context<Self>) {
         self.lib_gen += 1;
+        // A new sort or filter changes what's on screen: start a fresh selection.
+        self.selection.clear();
         self.scroll = gpui::UniformListScrollHandle::new();
         if self.lib_sort == LibSort::Added && self.lib_filters.is_empty() {
             self.lib_view = None;
@@ -347,10 +349,8 @@ impl Crate {
                         let selected = self.selection.contains(&a.rating_key);
                         div()
                             .relative()
-                            .rounded(px(10.0))
-                            .border_2()
-                            .border_color(if selected { rgb(t.accent).into() } else { gpui::transparent_black() })
                             .child(cover)
+                            .when(selected, |d| d.child(div().absolute().inset_0().rounded(px(8.0)).border_2().border_color(rgb(t.accent))))
                             .when(selected, |d| {
                                 d.child(
                                     div()
@@ -421,7 +421,7 @@ impl Crate {
     pub(crate) fn list_row(&mut self, cell: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = self.theme.clone();
         let ix = self.cell_album(cell);
-        let Some(a) = self.album(ix).cloned() else { return div().id(("lrow", cell)).into_any_element() };
+        let Some(a) = self.album(ix).cloned() else { return div().id(("lrow", cell)).h(px(LIST_ROW_H)).into_any_element() };
         self.request_thumb(&a.thumb.clone());
         let selected = self.selection.contains(&a.rating_key);
         let kept = self.offline.index.get(&a.rating_key).is_some_and(|k| k.complete);
@@ -488,6 +488,9 @@ impl Crate {
                 .justify_center()
                 .child(
                     div()
+                        .id("sel-bar")
+                        // Clicks on the bar must not reach the album underneath.
+                        .occlude()
                         .flex()
                         .items_center()
                         .gap(px(6.0))
@@ -538,11 +541,18 @@ impl Crate {
         let keys: Vec<String> = albums.iter().map(|a| a.rating_key.clone()).collect();
         let name = if albums.len() == 1 { albums[0].title.clone() } else { format!("{} albums", albums.len()) };
         self.status = format!("Loading {name}…").into();
+        cx.notify();
+        // One album failing (deleted, timed out) skips that album, not the lot.
         let rx = crate::plex_call(move |c| async move {
             let mut all = Vec::new();
+            let mut failed = 0;
             for k in keys {
-                all.extend(c.tracks(&k).await?);
+                match c.tracks(&k).await {
+                    Ok(t) => all.extend(t),
+                    Err(_) => failed += 1,
+                }
             }
+            anyhow::ensure!(!all.is_empty() || failed == 0, "{failed} album(s) couldn't be loaded");
             Ok(all)
         });
         cx.spawn(async move |this, cx| {
@@ -556,8 +566,14 @@ impl Crate {
                     this.selection.clear();
                     this.start_queue(name, None, tracks, 0, cx);
                 }
-                Ok(Ok(_)) => this.status = "Those albums have no tracks".into(),
-                Ok(Err(e)) => this.status = format!("Couldn't load the albums: {e:#}").into(),
+                Ok(Ok(_)) => {
+                    this.status = "Those albums have no tracks".into();
+                    cx.notify();
+                }
+                Ok(Err(e)) => {
+                    this.status = format!("Couldn't load the albums: {e:#}").into();
+                    cx.notify();
+                }
                 Err(_) => {}
             })
             .ok();
@@ -565,24 +581,53 @@ impl Crate {
         .detach();
     }
 
+    /// Fetches the albums' track lists on its own request (not the shared
+    /// tracks channel), so opening an album isn't stuck behind a big batch.
     fn keep_selection_offline(&mut self, cx: &mut Context<Self>) {
-        for album in self.selected_albums() {
-            if self.offline.index.get(&album.rating_key).is_none() {
-                self.with_tracks(album, cx, |this, album, tracks, cx| this.keep_offline(album, tracks, cx));
-            }
-        }
+        let albums: Vec<crate::plex::Album> = self.selected_albums().into_iter().filter(|a| self.offline.index.get(&a.rating_key).is_none()).collect();
         self.selection.clear();
+        if albums.is_empty() {
+            cx.notify();
+            return;
+        }
+        self.status = format!("Keeping {} albums offline…", albums.len()).into();
         cx.notify();
+        let keys: Vec<String> = albums.iter().map(|a| a.rating_key.clone()).collect();
+        let rx = crate::plex_call(move |c| async move {
+            let mut out = Vec::new();
+            for k in keys {
+                if let Ok(t) = c.tracks(&k).await {
+                    out.push((k, t));
+                }
+            }
+            Ok(out)
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(found)) = rx.await {
+                this.update(cx, |this, cx| {
+                    for (k, tracks) in found {
+                        if let Some(a) = albums.iter().find(|a| a.rating_key == k).cloned() {
+                            this.keep_offline(a, tracks, cx);
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     fn rate_selection(&mut self, stars: u8, cx: &mut Context<Self>) {
-        for album in self.selected_albums() {
+        let albums = self.selected_albums();
+        let n = albums.len();
+        for album in albums {
             if let Some(Some(d)) = self.album_detail.get_mut(&album.rating_key) {
                 d.rating = Some(f32::from(stars * 2));
             }
             self.rate_on_server(album.rating_key.clone(), Some(stars * 2), cx);
         }
-        self.status = format!("Rated {} albums {}", self.selection.len(), "★".repeat(stars as usize)).into();
+        self.status = format!("Rated {n} album{} {}", if n == 1 { "" } else { "s" }, "★".repeat(stars as usize)).into();
         self.selection.clear();
         cx.notify();
     }

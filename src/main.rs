@@ -790,6 +790,10 @@ impl Crate {
     fn go(&mut self, v: View) {
         let old = std::mem::replace(&mut self.view, v);
         self.compact_playing = false;
+        // A selection belongs to the Albums page it was made on.
+        if !matches!(self.view, View::Library) {
+            self.selection.clear();
+        }
         self.back.push(old);
         if self.back.len() > 50 {
             self.back.remove(0);
@@ -1626,6 +1630,8 @@ impl Render for Crate {
             .flex_1()
         };
         let sel_bar = self.selection_bar(&t, cx);
+        // Keep the last rows reachable above the floating bar.
+        let grid = if sel_bar.is_some() { grid.pb(px(72.0)) } else { grid };
         let grid = div().flex_1().min_h_0().flex().relative().child(grid).children(if self.lib_list { None } else { rail }).children(sel_bar);
 
         let page = match &self.view {
@@ -1694,7 +1700,7 @@ impl Render for Crate {
                 this.open_palette(window, cx);
             }))
             .on_action(cx.listener(|this, _: &Back, _, cx| {
-                if !this.selection.is_empty() {
+                if !this.selection.is_empty() && matches!(this.view, View::Library) && !this.now_playing {
                     this.selection.clear();
                     cx.notify();
                 } else if this.now_playing {
