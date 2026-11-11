@@ -1284,8 +1284,8 @@ fn credit_has(credit: &str, name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
-    const BEFORE: [&str; 11] = [", ", "& ", " and ", " x ", "/", "; ", "(", "[", "feat. ", "ft. ", "featuring "];
-    const AFTER: [&str; 12] = [",", " & ", " and ", " x ", "/", ";", ")", "]", " feat", " ft.", " with ", " - "];
+    const BEFORE: [&str; 13] = [", ", "& ", " and ", " x ", "/", "/ ", "; ", "(", "[", "feat. ", "feat ", "ft. ", "featuring "];
+    const AFTER: [&str; 13] = [",", " & ", " and ", " x ", "/", " /", ";", ")", "]", " feat", " ft.", " with ", " - "];
     credit.match_indices(name).any(|(i, _)| {
         let (pre, post) = (&credit[..i], &credit[i + name.len()..]);
         let pre_ok = pre.trim_end().is_empty() || BEFORE.iter().any(|b| pre.ends_with(b)) || pre.ends_with("with ");
@@ -1330,6 +1330,9 @@ mod credit_tests {
         assert!(credit_has("ac/dc", "ac/dc"));
         assert!(!credit_has("blair", "air"));
         assert!(!credit_has("drake bell", "drake"));
+        assert!(credit_has("artist a / jon batiste", "jon batiste"));
+        assert!(credit_has("jon batiste / artist b", "jon batiste"));
+        assert!(credit_has("cory wong feat jon batiste", "jon batiste"));
         assert!(title_credits("Home (feat. Jon Batiste)", "jon batiste"));
         assert!(title_credits("Song (feat. A, B & Jon Batiste)", "jon batiste"));
         assert!(title_credits("September (feat. Earth, Wind & Fire)", "earth, wind & fire"));
