@@ -107,8 +107,12 @@ pub fn set_scope(server_id: &str, url: &str) {
         let root = dir().parent().map(|p| p.to_path_buf());
         if let Some(root) = root {
             let (old, new) = (root.join(&url_key), root.join(&key));
-            if old.is_dir() && !new.exists() {
-                let _ = std::fs::rename(old, new);
+            if old.is_dir() {
+                if new.exists() {
+                    eprintln!("[crate] offline: both {} and {} exist; leaving {} alone", old.display(), new.display(), old.display());
+                } else if let Err(e) = std::fs::rename(&old, &new) {
+                    eprintln!("[crate] offline: couldn't move {} to {}: {e}", old.display(), new.display());
+                }
             }
         }
     }
@@ -134,6 +138,9 @@ pub fn file_for(part_key: &str) -> Option<PathBuf> {
     Some(dir().join(format!("part-{id}.{ext}")))
 }
 
+/// Set when the index couldn't be read this session: saving would overwrite it.
+static READ_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// A corrupt index is set aside (not overwritten) so its files stay findable.
 pub fn load() -> Index {
     let p = dir().join("index.json");
@@ -141,23 +148,29 @@ pub fn load() -> Index {
     let raw = match std::fs::read(&p) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Index::default(),
+        // A read error isn't proof the file is bad: leave it, and don't save over it.
         Err(e) => {
-            eprintln!("[crate] offline index unreadable ({e}); moved aside");
-            let _ = std::fs::rename(&p, p.with_extension("json.corrupt"));
+            eprintln!("[crate] offline index can't be read ({e}); not saving over it this session");
+            READ_FAILED.store(true, Ordering::Relaxed);
             return Index::default();
         }
     };
     match serde_json::from_slice(&raw) {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("[crate] offline index unreadable ({e}); moved aside");
-            let _ = std::fs::rename(&p, p.with_extension("json.corrupt"));
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let aside = p.with_extension(format!("json.corrupt-{stamp}"));
+            eprintln!("[crate] offline index unreadable ({e}); moved to {}", aside.display());
+            let _ = std::fs::rename(&p, aside);
             Index::default()
         }
     }
 }
 
 fn save(idx: &Index) -> std::io::Result<()> {
+    if READ_FAILED.load(Ordering::Relaxed) {
+        return Err(std::io::Error::other("the offline index couldn't be read at startup; not overwriting it"));
+    }
     let d = dir();
     std::fs::create_dir_all(&d)?;
     let tmp = d.join("index.json.tmp");

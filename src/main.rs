@@ -1903,9 +1903,12 @@ fn main() {
     }
     let (transport_tx, transport_rx) = mpsc::unbounded_channel::<Transport>();
     instance::listen(transport_tx.clone());
+    // Offline files are scoped by the address the account was saved with,
+    // not whichever one answers this session.
+    let saved_url = acct.url.clone();
     let acct = rt.block_on(account::ensure_reachable(acct));
     let (base, token, section) = (acct.url.clone(), acct.token.clone(), acct.section.clone());
-    offline::set_scope(&acct.server_id, &acct.url);
+    offline::set_scope(&acct.server_id, &saved_url);
     let _ = SECTION.set(section.clone());
 
     // tokio lives on its own threads; GPUI never sees it except via channels.
