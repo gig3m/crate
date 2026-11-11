@@ -8,6 +8,7 @@
 //!   AULOS_ITEMS   (default 50000; real albums are cycled to fill)
 //!   AULOS_BENCH   (set: auto-scroll, print frame stats, quit)
 
+mod album;
 mod home;
 mod icons;
 mod mpris;
@@ -96,6 +97,8 @@ struct Aulos {
     content_w: f32,
     /// Library grid filter: label and album indices.
     lib_filter: Option<(String, Vec<usize>)>,
+    /// Album rating key -> details (None while loading).
+    album_detail: HashMap<String, Option<plex::AlbumDetail>>,
     focus: gpui::FocusHandle,
 }
 
@@ -247,13 +250,19 @@ impl Aulos {
                             this.play_album(ix, cx);
                         } else if let Ok(key) = std::env::var("AULOS_ARTIST_KEY") {
                                 this.open_artist(key, std::env::var("AULOS_ARTIST_NAME").unwrap_or_default(), cx);
-                        } else if let Ok(key) = std::env::var("AULOS_OPEN_KEY")
-                            && let Some(ix) = this.albums.iter().position(|a| a.rating_key == key) {
+                        } else {
+                            let find = |var: &str| {
+                                let key = std::env::var(var).ok()?;
+                                this.albums.iter().position(|a| a.rating_key == key)
+                            };
+                            let (open, play) = (find("AULOS_OPEN_KEY"), find("AULOS_AUTOPLAY_KEY"));
+                            if let Some(ix) = open {
                                 this.open_album(ix, cx);
-                        } else if let Ok(key) = std::env::var("AULOS_AUTOPLAY_KEY")
-                            && let Some(ix) = this.albums.iter().position(|a| a.rating_key == key) {
+                            }
+                            if let Some(ix) = play {
                                 this.play_album(ix, cx);
                             }
+                        }
                     }
                     Err(e) => this.status = format!("Plex error: {e:#}").into(),
                 }
@@ -354,6 +363,7 @@ impl Aulos {
             levels: HashMap::new(),
             content_w: 1000.0,
             lib_filter: None,
+            album_detail: HashMap::new(),
             fwd: Vec::new(),
             album_scroll: gpui::ScrollHandle::new(),
             search_tx,
@@ -544,6 +554,7 @@ impl Aulos {
         let Some(album) = self.album(ix).cloned() else { return };
         self.request_art(&album);
         self.go(View::Album { ix, tracks: None });
+        self.request_album_detail(album.rating_key.clone(), cx);
         self.album_scroll = gpui::ScrollHandle::new();
         cx.notify();
         self.with_tracks(album, cx, move |this, _album, tracks, cx| {
@@ -1158,130 +1169,16 @@ impl Aulos {
         col.into_any_element()
     }
 
-    fn album_view(&self, ix: usize, tracks: Option<&Vec<Track>>, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(album) = self.album(ix).cloned() else { return div().into_any_element() };
-        let cover = match self.art.get(&album.thumb).cloned() {
-            Some(i) => img(i).size(px(232.0)).flex_none().rounded(px(10.0)).object_fit(ObjectFit::Cover).into_any_element(),
-            None => div().size(px(232.0)).flex_none().rounded(px(10.0)).bg(rgb(t.raised)).into_any_element(),
-        };
-        let playing_here = self.now.as_ref().filter(|n| n.context_key.as_deref() == Some(album.rating_key.as_str())).map(|n| n.idx);
-        let total_ms: u64 = tracks.map(|v| v.iter().map(|t| t.duration_ms).sum()).unwrap_or(0);
-        let meta = match tracks {
-            Some(v) => format!("{} · {} tracks · {} min", album.artist, v.len(), total_ms / 60_000),
-            None => format!("{} · loading tracks…", album.artist),
-        };
-        let play_btn = div()
-            .id("album-play")
-            .h(px(40.0))
-            .px(px(22.0))
-            .flex()
-            .items_center()
-            .rounded(px(20.0))
-            .bg(rgb(t.accent))
-            .text_color(rgb(t.base))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .cursor_pointer()
-            .child("Play")
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if let View::Album { tracks: Some(tr), .. } = &this.view
-                    && let Some(a) = this.album(ix).cloned() {
-                        let tr = tr.clone();
-                        this.play_tracks(a, tr, 0, cx);
-                    }
-            }));
-        let back_btn = div()
-            .id("album-back")
-            .h(px(40.0))
-            .px(px(16.0))
-            .flex()
-            .items_center()
-            .rounded(px(20.0))
-            .border_1()
-            .border_color(rgb(t.border))
-            .text_color(rgb(t.text))
-            .cursor_pointer()
-            .child("Back")
-            .on_click(cx.listener(|this, _, _, cx| this.go_back(cx)));
-        let header = div()
-            .flex()
-            .gap(px(28.0))
-            .items_end()
-            .child(cover)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0))
-                    .min_w_0()
-                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(format!("ALBUM · {}", album.year)))
-                    .child(
-                        div()
-                            .text_size(px(40.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(t.text_strong))
-                            .child(album.title.clone()),
-                    )
-                    .child({
-                        let (ak, an) = (album.artist_key.clone(), album.artist.clone());
-                        div()
-                            .id("album-artist")
-                            .text_size(px(15.0))
-                            .text_color(rgb(t.text))
-                            .cursor_pointer()
-                            .hover(|d| d.text_color(rgb(t.accent)))
-                            .child(meta)
-                            .on_click(cx.listener(move |this, _, _, cx| this.open_artist(ak.clone(), an.clone(), cx)))
-                    })
-                    .child(div().flex().gap(px(10.0)).mt(px(8.0)).child(play_btn).child(back_btn)),
-            );
-        let rows: Vec<gpui::AnyElement> = tracks
-            .map(|v| {
-                v.iter()
-                    .enumerate()
-                    .map(|(i, tr)| {
-                        let playing = playing_here == Some(i);
-                        let color = if playing { t.accent } else { t.text };
-                        div()
-                            .id(("track", i))
-                            .h(px(44.0))
-                            .px(px(12.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(16.0))
-                            .rounded(px(8.0))
-                            .cursor_pointer()
-                            .when(playing, |d| d.bg(rgb(t.raised)))
-                            .hover(|d| d.bg(rgb(t.raised)))
-                            .child(div().w(px(28.0)).text_size(px(13.0)).text_color(rgb(if playing { t.accent } else { t.muted })).child(format!("{}", i + 1)))
-                            .child(div().flex_1().min_w_0().truncate().text_color(rgb(color)).child(tr.title.clone()))
-                            .child(div().text_size(px(13.0)).text_color(rgb(t.muted)).child(fmt_ms(tr.duration_ms)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let View::Album { tracks: Some(tr), .. } = &this.view
-                                    && let Some(a) = this.album(ix).cloned() {
-                                        let tr = tr.clone();
-                                        this.play_tracks(a, tr, i, cx);
-                                    }
-                            }))
-                            .into_any_element()
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        div()
-            .id("album-view")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.album_scroll)
-            .px(px(PAD_X))
-            .pt(px(28.0))
-            .pb(px(40.0))
-            .flex()
-            .flex_col()
-            .gap(px(24.0))
-            .child(header)
-            .child(div().flex().flex_col().children(rows))
-            .into_any_element()
+}
+
+/// Fisher–Yates with a time-seeded xorshift (no rand dependency).
+fn shuffle<T>(v: &mut [T]) {
+    let mut x = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;
+    for i in (1..v.len()).rev() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        v.swap(i, (x % (i as u64 + 1)) as usize);
     }
 }
 

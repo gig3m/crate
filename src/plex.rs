@@ -131,6 +131,29 @@ pub struct Home {
     pub decades: Vec<(String, String)>,
 }
 
+/// Album page details beyond what the library list carries.
+#[derive(Clone, Debug, Default)]
+pub struct AlbumDetail {
+    pub summary: String,
+    pub genres: Vec<String>,
+    pub styles: Vec<String>,
+    pub moods: Vec<String>,
+    pub studio: String,
+    /// originallyAvailableAt, e.g. 2016-02-19.
+    pub released: String,
+    pub added_at: i64,
+    /// Your rating, 0–10.
+    pub rating: Option<f32>,
+    /// UltraBlur corner colors: top-left, top-right, bottom-right, bottom-left.
+    pub blur: Option<[u32; 4]>,
+    /// e.g. "FLAC 24/96", from the first track.
+    pub format: String,
+    /// Integrated album loudness in LUFS (ReplayGain 2 reference −18 minus album gain).
+    pub lufs: Option<f32>,
+    /// Track rating key -> (plays, your rating 0–10).
+    pub stats: std::collections::HashMap<String, (u64, Option<f32>)>,
+}
+
 pub struct HubsRequest {
     pub reply: oneshot::Sender<anyhow::Result<Home>>,
 }
@@ -450,6 +473,55 @@ impl Client {
         anyhow::ensure!(res.status().is_success(), "playlist {rating_key} -> {}", res.status());
         let env: Envelope = res.json().await.context("playlist")?;
         Ok(env.mc.metadata.into_iter().filter_map(Meta::into_track).collect())
+    }
+
+    pub async fn album_detail(&self, key: &str) -> anyhow::Result<AlbumDetail> {
+        let (mp, kp) = (format!("/library/metadata/{key}"), format!("/library/metadata/{key}/children"));
+        let (meta, kids) = tokio::join!(self.get(&mp), self.get(&kp));
+        let meta: serde_json::Value = meta?.json().await.context("album")?;
+        let kids: serde_json::Value = kids?.json().await.context("album tracks")?;
+        let m = &meta["MediaContainer"]["Metadata"][0];
+        let tags = |k: &str| -> Vec<String> {
+            m[k].as_array().map(|a| a.iter().filter_map(|t| t["tag"].as_str().map(String::from)).collect()).unwrap_or_default()
+        };
+        let hex = |k: &str| u32::from_str_radix(m["UltraBlurColors"][k].as_str()?, 16).ok();
+        let blur = (|| Some([hex("topLeft")?, hex("topRight")?, hex("bottomRight")?, hex("bottomLeft")?]))();
+        let tracks = kids["MediaContainer"]["Metadata"].as_array().cloned().unwrap_or_default();
+        let stats = tracks
+            .iter()
+            .filter_map(|t| {
+                Some((t["ratingKey"].as_str()?.to_string(), (t["viewCount"].as_u64().unwrap_or(0), t["userRating"].as_f64().map(|r| r as f32))))
+            })
+            .collect();
+        let mut d = AlbumDetail {
+            summary: m["summary"].as_str().unwrap_or_default().replace("\\&", "&"),
+            genres: tags("Genre"),
+            styles: tags("Style"),
+            moods: tags("Mood"),
+            studio: m["studio"].as_str().unwrap_or_default().to_string(),
+            released: m["originallyAvailableAt"].as_str().unwrap_or_default().to_string(),
+            added_at: m["addedAt"].as_i64().unwrap_or(0),
+            rating: m["userRating"].as_f64().map(|r| r as f32),
+            blur,
+            stats,
+            ..Default::default()
+        };
+        // Format and loudness from the first track's audio stream.
+        if let Some(first) = tracks.first().and_then(|t| t["ratingKey"].as_str()) {
+            let v: serde_json::Value = self.get(&format!("/library/metadata/{first}")).await?.json().await.context("track")?;
+            let streams = v["MediaContainer"]["Metadata"][0]["Media"][0]["Part"][0]["Stream"].as_array().cloned().unwrap_or_default();
+            if let Some(st) = streams.iter().find(|s| s["streamType"].as_i64() == Some(2)) {
+                let codec = st["codec"].as_str().unwrap_or_default().to_uppercase();
+                let rate = st["samplingRate"].as_u64().unwrap_or(0);
+                let khz = if rate % 1000 == 0 { format!("{}", rate / 1000) } else { format!("{:.1}", rate as f64 / 1000.0) };
+                d.format = match st["bitDepth"].as_u64() {
+                    Some(b) => format!("{codec} {b}/{khz}"),
+                    None => format!("{codec} {khz} kHz"),
+                };
+                d.lufs = st["albumGain"].as_str().and_then(|g| g.parse::<f32>().ok()).map(|g| -18.0 - g);
+            }
+        }
+        Ok(d)
     }
 
     /// Loudness envelope for a track, normalized to 0..1 over `points` samples.
