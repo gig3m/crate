@@ -16,6 +16,7 @@ mod library;
 mod palette;
 mod mpris;
 mod now_playing;
+mod tile;
 mod player_bar;
 mod settings;
 mod shell;
@@ -112,6 +113,8 @@ struct Aulos {
     /// Full-window Now Playing, and its panel tab (queue / signal / info).
     now_playing: bool,
     np_tab: usize,
+    /// Compact layout: showing the Playing tab (vs. a page).
+    compact_playing: bool,
     /// Server sonic analysis progress, for the Stations page.
     sonic_progress: Option<u32>,
     audio_info: Option<settings::AudioInfo>,
@@ -418,6 +421,7 @@ impl Aulos {
             test_search: std::env::var("AULOS_SEARCH").ok(),
             now_playing: std::env::var_os("AULOS_NOW_PLAYING").is_some(),
             sonic_progress: None,
+            compact_playing: true,
             audio_info: None,
             np_tab: std::env::var("AULOS_NP_TAB").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             album_detail: HashMap::new(),
@@ -579,6 +583,7 @@ impl Aulos {
     /// Navigate, recording history.
     fn go(&mut self, v: View) {
         let old = std::mem::replace(&mut self.view, v);
+        self.compact_playing = false;
         self.back.push(old);
         if self.back.len() > 50 {
             self.back.remove(0);
@@ -1100,16 +1105,19 @@ impl Render for Aulos {
             window.focus(&self.focus, cx);
         }
         let vw: f32 = window.viewport_size().width.into();
-        let usable = (vw - SIDEBAR_W - PAD_X * 2.0).max(300.0);
+        // Narrow tiled window: the canvas Tile layout (no sidebar, bottom nav).
+        let compact = vw < 720.0;
+        let side = if compact { 0.0 } else { SIDEBAR_W };
+        let usable = (vw - side - PAD_X * 2.0).max(240.0);
         self.content_w = usable;
-        self.grid_layout(vw - SIDEBAR_W - PAD_X);
+        self.grid_layout(vw - side - PAD_X);
         let rows = self.cells().div_ceil(self.cols);
 
         if self.bench.is_some() {
             self.bench_tick(window, cx);
         }
 
-        let sidebar = self.sidebar(&t, cx);
+        let sidebar = (!compact).then(|| self.sidebar(&t, cx));
 
         let header = matches!(self.view, View::Library).then(|| self.library_header(&t, cx));
         let rail = self.letter_rail(&t, cx);
@@ -1125,9 +1133,46 @@ impl Render for Aulos {
         .flex_1();
         let grid = div().flex_1().min_h_0().flex().child(grid).children(rail);
 
-        let player = self.player_bar(&t, cx);
+        let page = match &self.view {
+            View::Home => self.home_view(&t, cx),
+            View::Artist { key, name, info } => {
+                let (key, name, info) = (key.clone(), name.clone(), info.clone());
+                self.artist_view(&key, &name, info.as_ref(), &t, cx)
+            }
+            View::Library => grid.into_any_element(),
+            View::Soon("stations") => self.stations_view(&t, cx),
+            View::Soon("audio") => self.audio_settings_view(&t, cx),
+            View::Soon(name) => self.soon_view(name, &t),
+            View::Album { ix, tracks } => {
+                let (ix, tracks) = (*ix, tracks.clone());
+                self.album_view(ix, tracks.as_ref(), &t, cx)
+            }
+        };
+        let main_area = if compact && self.compact_playing && self.now.is_some() {
+            self.tile_view(&t, cx)
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .children(sidebar)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .when(!compact, |d| d.child(self.top_bar(&t, cx)))
+                        .when(compact, |d| d.pt(px(16.0)))
+                        .children(header)
+                        .child(page),
+                )
+                .into_any_element()
+        };
+        let player = if compact { self.compact_nav(&t, cx) } else { self.player_bar(&t, cx) };
         let palette = self.palette.then(|| self.palette_view(&t, cx));
-        let now_playing = (self.now_playing && self.now.is_some())
+        let now_playing = (self.now_playing && self.now.is_some() && !compact)
             .then(|| div().absolute().inset_0().child(self.now_playing_view(&t, cx)));
 
         let el = div()
@@ -1165,38 +1210,7 @@ impl Render for Aulos {
             .bg(rgb(t.base))
             .text_color(rgb(t.text))
             .font_family("Inter")
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .child(sidebar)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .child(self.top_bar(&t, cx))
-                            .children(header)
-                            .child(match &self.view {
-                                View::Home => self.home_view(&t, cx),
-                                View::Artist { key, name, info } => {
-                                    let (key, name, info) = (key.clone(), name.clone(), info.clone());
-                                    self.artist_view(&key, &name, info.as_ref(), &t, cx)
-                                }
-                                View::Library => grid.into_any_element(),
-                                View::Soon("stations") => self.stations_view(&t, cx),
-                                View::Soon("audio") => self.audio_settings_view(&t, cx),
-                                View::Soon(name) => self.soon_view(name, &t),
-                                View::Album { ix, tracks } => {
-                                    let (ix, tracks) = (*ix, tracks.clone());
-                                    self.album_view(ix, tracks.as_ref(), &t, cx)
-                                }
-                            }),
-                    ),
-            )
+            .child(main_area)
             .child(player)
             .children(now_playing)
             .children(palette);
