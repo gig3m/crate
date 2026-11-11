@@ -33,10 +33,14 @@ impl Aulos {
     pub(crate) fn play_station(&mut self, key: String, title: String, cx: &mut Context<Self>) {
         self.status = format!("Starting {title}…").into();
         cx.notify();
+        self.play_intent += 1;
+        let intent = self.play_intent;
         let rx = crate::fetch_more(key.clone());
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| match res {
+                // Something else was played since the click: drop this.
+                _ if this.play_intent != intent => {}
                 Ok(Ok(tracks)) if !tracks.is_empty() => {
                     this.start_queue(title, None, tracks, 0, cx);
                     if let Some(n) = this.now.as_mut() {
@@ -54,10 +58,13 @@ impl Aulos {
 
     /// Play a playlist from the top (first 500 tracks).
     pub(crate) fn play_playlist(&mut self, key: String, title: String, cx: &mut Context<Self>) {
+        self.play_intent += 1;
+        let intent = self.play_intent;
         let rx = crate::plex_call(move |c| async move { c.playlist_tracks(&key, 500).await });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
             this.update(cx, |this, cx| match res {
+                _ if this.play_intent != intent => {}
                 Ok(Ok(tracks)) if !tracks.is_empty() => this.start_queue(title, None, tracks, 0, cx),
                 Ok(Ok(_)) => this.status = format!("{title} is empty").into(),
                 Ok(Err(e)) => this.status = format!("{title}: {e:#}").into(),

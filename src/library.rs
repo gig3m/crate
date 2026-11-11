@@ -247,7 +247,7 @@ impl Aulos {
             None => (0..self.albums.len()).collect(),
         };
         let bucket = |ix: usize| -> char {
-            let a = &self.albums[ix];
+            let Some(a) = self.albums.get(ix) else { return '#' };
             let s = if by_artist { &a.artist } else { &a.title };
             let c = s.trim_start_matches("The ").chars().next().unwrap_or('#').to_ascii_uppercase();
             if c.is_ascii_alphabetic() { c } else { '#' }

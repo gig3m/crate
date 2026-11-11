@@ -38,7 +38,7 @@ fn month_year(ts: i64) -> String {
 
 impl Aulos {
     pub(crate) fn request_album_detail(&mut self, key: String, cx: &mut Context<Self>) {
-        if self.album_detail.contains_key(&key) {
+        if key.is_empty() || self.album_detail.contains_key(&key) {
             return;
         }
         self.album_detail.insert(key.clone(), None);
@@ -52,13 +52,8 @@ impl Aulos {
                 })
                 .ok();
             }
-            Ok(Err(e)) => {
-                eprintln!("[aulos] album detail: {e:#}");
-                this.update(cx, |this, _| {
-                    this.album_detail.remove(&key);
-                })
-                .ok();
-            }
+            // Leave the None marker: retrying here would refetch on every 250 ms poll.
+            Ok(Err(e)) => eprintln!("[aulos] album detail {key}: {e:#}"),
             Err(_) => {}
         })
         .detach();

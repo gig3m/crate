@@ -100,6 +100,10 @@ struct Aulos {
     track_detail: HashMap<String, Option<plex::TrackDetail>>,
     /// Width of the main content column, set each render.
     content_w: f32,
+    /// Bumped per queue started (Now::queue_id) and per play request, so late
+    /// async replies can tell they've been superseded.
+    queue_seq: u64,
+    play_intent: u64,
     /// Album grid order for the current sort/filters (None: the cached list as-is).
     lib_view: Option<Vec<usize>>,
     lib_filters: Vec<library::LibFilter>,
@@ -154,6 +158,10 @@ struct Now {
     refilling: bool,
     /// One past the last queue index the current engine was given.
     engine_end: usize,
+    /// Identifies this queue so late replies (radio refills) can't land on another.
+    queue_id: u64,
+    /// The user stopped, or the engine failed: don't continue on our own.
+    stopped: bool,
 }
 
 struct Bench {
@@ -257,17 +265,42 @@ impl Aulos {
                             return;
                         }
                         this.status = format!("{} albums ({from})", albums.len()).into();
-                        // Keep an open album page pointing at the same album.
-                        let open_key = match &this.view {
-                            View::Album { ix, .. } => this.albums.get(*ix).map(|a| a.rating_key.clone()),
+                        // Album indices (open page, history) point into the old list:
+                        // remap them by rating key, dropping albums that vanished.
+                        let key_of = |v: &View, albums: &[Album]| match v {
+                            View::Album { ix, .. } => albums.get(*ix).map(|a| a.rating_key.clone()),
                             _ => None,
                         };
+                        let old: Vec<Option<String>> =
+                            std::iter::once(&this.view).chain(this.back.iter()).chain(this.fwd.iter()).map(|v| key_of(v, &this.albums)).collect();
                         this.albums = albums;
-                        if let Some(key) = open_key
-                            && let View::Album { ix, .. } = &mut this.view
-                            && let Some(n) = this.albums.iter().position(|a| a.rating_key == key) {
-                                *ix = n;
+                        let pos: HashMap<&str, usize> = this.albums.iter().enumerate().map(|(i, a)| (a.rating_key.as_str(), i)).collect();
+                        let remap = |v: &mut View, key: &Option<String>| -> bool {
+                            match (v, key) {
+                                (View::Album { ix, .. }, Some(k)) => match pos.get(k.as_str()) {
+                                    Some(&n) => {
+                                        *ix = n;
+                                        true
+                                    }
+                                    None => false,
+                                },
+                                (View::Album { .. }, None) => false,
+                                _ => true,
                             }
+                        };
+                        let mut keys = old.into_iter();
+                        let cur_key = keys.next().flatten();
+                        if !remap(&mut this.view, &cur_key) {
+                            this.view = View::Library;
+                        }
+                        let back: Vec<View> = std::mem::take(&mut this.back);
+                        this.back = back.into_iter().filter_map(|mut v| remap(&mut v, &keys.next().flatten()).then_some(v)).collect();
+                        let fwd: Vec<View> = std::mem::take(&mut this.fwd);
+                        this.fwd = fwd.into_iter().filter_map(|mut v| remap(&mut v, &keys.next().flatten()).then_some(v)).collect();
+                        // A sorted/filtered grid holds indices too.
+                        if this.lib_view.is_some() {
+                            this.refresh_library(cx);
+                        }
                         if !std::mem::replace(&mut first, false) {
                             cx.notify();
                             return;
@@ -422,6 +455,8 @@ impl Aulos {
             back: Vec::new(),
             track_detail: HashMap::new(),
             content_w: 1000.0,
+            queue_seq: 0,
+            play_intent: 0,
             lib_view: None,
             lib_filters: Vec::new(),
             lib_sort: library::LibSort::Added,
@@ -566,6 +601,10 @@ impl Aulos {
         self.go(View::Artist { key: key.clone(), name, info: None });
         self.album_scroll = gpui::ScrollHandle::new();
         cx.notify();
+        self.load_artist_info(key, cx);
+    }
+
+    fn load_artist_info(&mut self, key: String, cx: &mut Context<Self>) {
         let (reply, rx) = tokio::sync::oneshot::channel();
         let _ = self.artist_tx.send(ArtistRequest { key: key.clone(), reply });
         cx.spawn(async move |this, cx| match rx.await {
@@ -614,7 +653,24 @@ impl Aulos {
             let cur = std::mem::replace(&mut self.view, v);
             self.fwd.push(cur);
             self.album_scroll = gpui::ScrollHandle::new();
+            self.reload_view(cx);
             cx.notify();
+        }
+    }
+
+    /// A view restored from history may still be waiting on data whose reply
+    /// arrived after we'd left it; ask again.
+    fn reload_view(&mut self, cx: &mut Context<Self>) {
+        match &self.view {
+            View::Album { ix, tracks: None } => {
+                let ix = *ix;
+                self.load_album_tracks(ix, cx);
+            }
+            View::Artist { key, info: None, .. } => {
+                let key = key.clone();
+                self.load_artist_info(key, cx);
+            }
+            _ => {}
         }
     }
 
@@ -623,6 +679,7 @@ impl Aulos {
             let cur = std::mem::replace(&mut self.view, v);
             self.back.push(cur);
             self.album_scroll = gpui::ScrollHandle::new();
+            self.reload_view(cx);
             cx.notify();
         }
     }
@@ -634,6 +691,11 @@ impl Aulos {
         self.request_album_detail(album.rating_key.clone(), cx);
         self.album_scroll = gpui::ScrollHandle::new();
         cx.notify();
+        self.load_album_tracks(ix, cx);
+    }
+
+    fn load_album_tracks(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(album) = self.album(ix).cloned() else { return };
         self.with_tracks(album, cx, move |this, _album, tracks, cx| {
             if let View::Album { ix: cur, tracks: slot } = &mut this.view
                 && *cur == ix {
@@ -666,6 +728,14 @@ impl Aulos {
 
     /// Play `tracks` from `start`; `context` names what's playing.
     fn start_queue(&mut self, context: String, context_key: Option<String>, tracks: Vec<Track>, start: usize, cx: &mut Context<Self>) {
+        // Every index into `now.tracks` assumes idx < len.
+        if start >= tracks.len() {
+            self.status = format!("{context}: nothing to play").into();
+            cx.notify();
+            return;
+        }
+        self.queue_seq += 1;
+        self.play_intent += 1;
         for t in &tracks {
             self.request_thumb(&t.thumb.clone());
         }
@@ -686,6 +756,8 @@ impl Aulos {
             refill: None,
             refilling: false,
             engine_end: 0,
+            queue_id: self.queue_seq,
+            stopped: false,
         });
         self.play_from(start, 0, cx);
     }
@@ -724,6 +796,7 @@ impl Aulos {
                 now.elapsed_ms = ms;
                 now.paused = false;
                 now.finished = false;
+                now.stopped = false;
                 now.engine_end = now.tracks.len();
                 self.status = format!("Playing {}", now.context).into();
                 let _ = self.mpris.send(MprisUpdate::Status { playing: true, stopped: false });
@@ -796,6 +869,7 @@ impl Aulos {
             Transport::Stop => {
                 self.engine = None;
                 now.finished = true;
+                now.stopped = true;
                 now.paused = true;
                 let _ = self.mpris.send(MprisUpdate::Status { playing: false, stopped: true });
                 cx.notify();
@@ -823,6 +897,7 @@ impl Aulos {
                     eprintln!("[aulos] audio: {e}");
                     self.status = format!("Audio error: {e}").into();
                     now.finished = true;
+                    now.stopped = true;
                     failed = true;
                 }
                 AudioEvent::FirstAudio { ms_since_play } => {
@@ -835,7 +910,7 @@ impl Aulos {
         // Current track: the last engine boundary at or before the played clock.
         let rel = now.boundaries.iter().rposition(|&b| b <= played_us).unwrap_or(0);
         let base = now.boundaries.get(rel).copied().unwrap_or(0);
-        now.idx = (now.start_idx + rel).min(now.tracks.len() - 1);
+        now.idx = (now.start_idx + rel).min(now.tracks.len().saturating_sub(1));
         now.elapsed_ms = (played_us - base.min(played_us)) / 1000 + if rel == 0 { now.start_ms } else { 0 };
 
         // Cover arrived after the track was announced: write it and re-announce.
@@ -871,11 +946,13 @@ impl Aulos {
             && now.idx + 2 >= now.tracks.len()
         {
             now.refilling = true;
+            let qid = now.queue_id;
             let rx = fetch_more(key);
             cx.spawn(async move |this, cx| {
                 let res = rx.await;
                 this.update(cx, |this, cx| {
-                    let Some(now) = this.now.as_mut() else { return };
+                    // Another queue started meanwhile: these tracks aren't for it.
+                    let Some(now) = this.now.as_mut().filter(|n| n.queue_id == qid) else { return };
                     now.refilling = false;
                     match res {
                         Ok(Ok(more)) => {
@@ -892,6 +969,7 @@ impl Aulos {
                             // The engine already ran out while we fetched: continue now.
                             if let Some(n) = this.now.as_ref()
                                 && n.finished
+                                && !n.stopped
                                 && n.engine_end < n.tracks.len()
                             {
                                 let from = n.engine_end;
@@ -899,7 +977,11 @@ impl Aulos {
                             }
                             cx.notify();
                         }
-                        Ok(Err(e)) => eprintln!("[aulos] refill: {e:#}"),
+                        Ok(Err(e)) => {
+                            // Don't retry on every poll; the queue ends where it is.
+                            eprintln!("[aulos] refill: {e:#}");
+                            now.refill = None;
+                        }
                         Err(_) => {}
                     }
                 })
@@ -908,7 +990,7 @@ impl Aulos {
             .detach();
         }
         // The engine reached the end of its queue but the queue has grown.
-        if now.finished && !failed && now.engine_end < now.tracks.len() {
+        if now.finished && !failed && !now.stopped && now.engine_end < now.tracks.len() {
             let from = now.engine_end;
             self.play_from(from, 0, cx);
             return false;
