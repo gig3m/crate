@@ -148,7 +148,19 @@ impl Crate {
             if let Some(k) = n.transcoded.get(&n.idx) {
                 return Some((format!("Opus {k}k · transcoded"), t.muted, false));
             }
-            let fmt = format!("{bits}/{}", khz(rate));
+            // Lossy formats have no bit depth: name the codec instead.
+            let fmt = if bits == 0 {
+                let ext = n.tracks.get(n.idx).and_then(|t| t.part_key.rsplit('.').next().map(str::to_lowercase)).unwrap_or_default();
+                let codec = match ext.as_str() {
+                    "m4a" | "mp4" | "aac" => "AAC",
+                    "mp3" => "MP3",
+                    "ogg" | "opus" => "Opus",
+                    _ => "lossy",
+                };
+                format!("{codec} {}", khz(rate))
+            } else {
+                format!("{bits}/{}", khz(rate))
+            };
             Some(if n.graph_rate == 0 {
                 (fmt, t.muted, false)
             } else if n.graph_rate == rate {

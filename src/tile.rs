@@ -35,7 +35,7 @@ impl Crate {
             }
             let codec = detail.as_ref().map(|d| d.codec.clone()).unwrap_or_default();
             let khz = if rate % 1000 == 0 { format!("{}", rate / 1000) } else { format!("{:.1}", rate as f32 / 1000.0) };
-            format!("{codec} {bits}/{khz}").trim().to_string()
+            if bits == 0 { format!("{codec} {khz}") } else { format!("{codec} {bits}/{khz}") }.trim().to_string()
         });
         let btn = |id: &'static str, ic: &'static str, tr: Transport| {
             div()

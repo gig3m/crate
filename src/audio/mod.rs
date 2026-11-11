@@ -9,6 +9,7 @@
 //! - caller: reads `Stats` and receives `Event`s.
 
 pub mod eq;
+pub mod mp4gap;
 pub mod opus;
 pub mod source;
 
@@ -567,19 +568,28 @@ fn decoder_thread(
         // A gain that isn't a sane finite factor is ignored rather than trusted.
         let gain = if gain.is_finite() && gain > 0.0 && gain <= 4.0 { gain } else { 1.0 };
         let open = || -> anyhow::Result<_> {
-            let mss = MediaSourceStream::new(src.open(stats.stop.clone())?, Default::default());
+            let raw = src.open(stats.stop.clone())?;
+            // MP4: watch for the edit list (gapless AAC; see mp4gap).
+            let is_mp4 = src.ext().is_some_and(|e| matches!(e.as_str(), "m4a" | "mp4" | "m4b"));
+            let (media, edits): (Box<dyn symphonia::core::io::MediaSource>, _) = if is_mp4 {
+                let (s, found) = mp4gap::Sniff::new(raw);
+                (Box::new(s), Some(found))
+            } else {
+                (raw, None)
+            };
+            let mss = MediaSourceStream::new(media, Default::default());
             let mut hint = Hint::new();
             if let Some(ext) = src.ext() {
                 hint.with_extension(&ext);
             }
             let fmt = symphonia::default::get_probe().probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())?;
             let track = fmt.default_track(TrackType::Audio).ok_or_else(|| anyhow::anyhow!("no audio track"))?.clone();
-            Ok((fmt, track))
+            Ok((fmt, track, edits))
         };
         // The first track failing is the error to report. A later one
         // failing (a server hiccup, a 503) mustn't cut off what's still
         // buffered: retry once, then skip it and carry on with the queue.
-        let (mut fmt, track) = match open() {
+        let (mut fmt, track, edits) = match open() {
             Ok(x) => x,
             Err(e) if index > 0 && !stats.stop.load(Ordering::Acquire) => {
                 std::thread::sleep(Duration::from_millis(500));
@@ -617,7 +627,9 @@ fn decoder_thread(
         let fade_frames = (item.fade_ms as u64 * rate as u64 / 1000) as usize;
         // The track must be known to outlast the fade twice over, or the fade
         // would run past its end (into the next track); unknown length: gapless.
-        let num_frames = src.len_ms().map(|ms| ms * rate as u64 / 1000).or(track.num_frames);
+        // The MP4 edit list's priming and real length (exact, when present).
+        let edit_trims = edits.and_then(|f| f.lock().unwrap().trims(rate)).filter(|(d, t)| *d > 0 || *t > 0);
+        let num_frames = edit_trims.map(|(_, t)| t).or_else(|| src.len_ms().map(|ms| ms * rate as u64 / 1000)).or(track.num_frames);
         let long_enough = num_frames.is_some_and(|n| n >= 2 * fade_frames as u64);
         if fade_frames > 0 && !long_enough && num_frames.is_none() {
             eprintln!("[engine] no fade into {}: its length isn't known", src.label());
@@ -721,7 +733,9 @@ fn decoder_thread(
         if seeked {
             use symphonia::core::formats::{SeekMode, SeekTo};
             use symphonia::core::units::Time;
-            let time = Time::try_from_secs_f64((start_ms - preroll_ms) as f64 / 1000.0).unwrap_or_default();
+            // MP4 with an edit list: the raw timeline starts with the priming.
+            let priming_s = edit_trims.map(|(d, _)| d as f64 / rate as f64).unwrap_or(0.0);
+            let time = Time::try_from_secs_f64((start_ms - preroll_ms) as f64 / 1000.0 + priming_s).unwrap_or_default();
             if let Err(e) = fmt.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(track.id) }) {
                 track_failed!('tracks, 0, e.into())
             }
@@ -758,6 +772,7 @@ fn decoder_thread(
         // last page isn't flagged end-of-stream, and Plex never flags it.
         // Where decoded output starts on the track (the pre-roll is dropped).
         let start_frames = if index == 0 { start_ms * rate as u64 / 1000 } else { 0 };
+        let mut edit = edit_trims.map(|(delay, total)| mp4gap::EditList::new(delay, total, seeked, start_frames));
         loop {
             let packet = match fmt.next_packet() {
                 Ok(Some(p)) => p,
@@ -818,6 +833,15 @@ fn decoder_thread(
                 wide.resize(buf.frames() * ch, 0.0);
                 buf.copy_to_slice_interleaved(&mut wide[..]);
                 to_stereo(&wide, &weights, &mut scratch);
+            }
+            if let Some(e) = edit.as_mut() {
+                e.apply(&mut scratch, CHANNELS);
+                if scratch.is_empty() {
+                    if e.left == Some(0) {
+                        break; // the real audio has ended; the rest is padding
+                    }
+                    continue;
+                }
             }
             if preroll_frames > 0 {
                 let drop = preroll_frames.min(scratch.len() / CHANNELS);
