@@ -227,9 +227,12 @@ impl Progressive {
         // What a resume must still be: the same file (If-Range answers the
         // whole thing, not 206, if it changed). No validator, no resume.
         // Transcodes never resume: a new request is a new encode.
+        // Plex ignores If-Range (checked 2026-11-11: a stale one still gets
+        // 206), so the 206 must also carry the same validator. Weak ETags
+        // can't be used for ranges.
         let validator = ["etag", "last-modified"]
             .iter()
-            .find_map(|h| resp.headers().get(*h).and_then(|v| v.to_str().ok()).map(String::from))
+            .find_map(|h| resp.headers().get(*h).and_then(|v| v.to_str().ok()).filter(|v| !v.starts_with("W/")).map(|v| (*h, v.to_string())))
             .filter(|_| client == CLIENT);
         let n = ATTEMPT.fetch_add(1, Ordering::Relaxed);
         let part = cache.with_extension(format!("part.{}.{n}", std::process::id()));
@@ -265,7 +268,7 @@ impl Progressive {
                             // length is known and the server does ranges.
                             let (got, total) = (st2.written.load(Ordering::Acquire), st2.total.load(Ordering::Acquire));
                             let mut resumed = None;
-                            while resumed.is_none() && resumes < 5 && total > 0 && got < total && let Some(validator) = validator.as_deref() {
+                            while resumed.is_none() && resumes < 5 && total > 0 && got < total && let Some((vname, validator)) = validator.as_ref() {
                                 std::thread::sleep(Duration::from_millis(500 << resumes));
                                 resumes += 1;
                                 if cancel2.load(Ordering::Acquire) {
@@ -276,24 +279,25 @@ impl Progressive {
                                     .header("X-Plex-Token", &token)
                                     .header("X-Plex-Client-Identifier", &client)
                                     .header("Range", format!("bytes={got}-"))
-                                    .header("If-Range", validator)
+                                    .header("If-Range", validator.as_str())
                                     .send();
                                 // Only exactly the missing bytes, of a file the same size.
                                 let want = format!("bytes {got}-{}/{total}", total - 1);
                                 match r {
                                     Ok(r)
                                         if r.status() == reqwest::StatusCode::PARTIAL_CONTENT
-                                            && r.headers().get("content-range").and_then(|v| v.to_str().ok()) == Some(want.as_str()) =>
+                                            && r.headers().get("content-range").and_then(|v| v.to_str().ok()) == Some(want.as_str())
+                                            && r.headers().get(*vname).and_then(|v| v.to_str().ok()) == Some(validator.as_str()) =>
                                     {
                                         resumed = Some(r)
                                     }
                                     Ok(r) if r.status() == reqwest::StatusCode::PARTIAL_CONTENT => {
-                                        eprintln!("[download] resume at {got}: unexpected range {:?}", r.headers().get("content-range"));
+                                        eprintln!("[download] resume at {got}: not the same bytes of the same file ({:?})", r.headers().get("content-range"));
                                         break;
                                     }
                                     // 200 to an If-Range: the file changed; don't splice.
                                     Ok(r) if r.status() == reqwest::StatusCode::OK => {
-                                        eprintln!("[download] resume at {got}: the file changed on the server");
+                                        eprintln!("[download] resume at {got}: the server sent the whole file (changed, or no ranges)");
                                         break;
                                     }
                                     Ok(r) => eprintln!("[download] resume at {got}: {}", r.status()),
