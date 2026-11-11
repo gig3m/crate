@@ -30,7 +30,14 @@ fn main() -> anyhow::Result<()> {
     }
     anyhow::ensure!(!queue.is_empty(), "nothing to play");
 
-    let engine = Engine::play(queue.into_iter().map(Into::into).collect(), target)?;
+    // Test aid: CRATE_FADE_MS crossfades into every item after the first.
+    let fade_ms: u32 = std::env::var("CRATE_FADE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let items = queue
+        .into_iter()
+        .enumerate()
+        .map(|(i, src)| crate_audio::audio::Item { src, gain: 1.0, fade_ms: if i > 0 { fade_ms } else { 0 } })
+        .collect();
+    let engine = Engine::play(items, target)?;
     let st = engine.stats.clone();
     let mut tracks: Vec<(u64, u32, String)> = Vec::new();
     let mut reported = 0usize;

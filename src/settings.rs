@@ -320,7 +320,32 @@ impl Crate {
                 crate::theme::Leveling::Album => "Whole albums to the same loudness, keeping their own dynamics. Changes the samples.",
                 crate::theme::Leveling::Smart => "Smart: album gain when you play an album in order, track gain on shuffle and radio. Changes the samples.",
             }))
-            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child("Applies from the next track. Never boosts past a track's peak. Sweet fades and EQ aren't built yet."));
+            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child("Applies from the next track. Never boosts past a track's peak."));
+        let fade = self.fade_secs;
+        let fade_segs = crate::theme::FADES.into_iter().map(|secs| {
+            let on = secs == fade;
+            div()
+                .id(("fade", secs as usize))
+                .flex_1()
+                .h(px(30.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.0))
+                .text_size(px(13.0))
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .when(on, |d| d.bg(rgb(t.raised)).text_color(rgb(t.text_strong)))
+                .when(!on, |d| d.text_color(rgb(t.text2)).hover(|d| d.text_color(rgb(t.text_strong))))
+                .child(if secs == 0 { "Off".to_string() } else { format!("{secs} s") })
+                .on_click(cx.listener(move |this, _, _, cx| this.set_fade(secs, cx)))
+        });
+        let fades = card()
+            .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.text_strong)).child("Sweet fades"))
+            .child(div().p(px(3.0)).rounded(px(9.0)).border_1().border_color(rgb(t.raised)).bg(rgb(t.base)).flex().gap(px(2.0)).children(fade_segs))
+            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(
+                "Crossfades only between tracks from different albums. Gapless inside albums is never broken. Needs both tracks at the same sample rate; otherwise they play back to back.",
+            ));
 
         div()
             .id("audio-settings")
@@ -341,7 +366,7 @@ impl Crate {
                     .flex()
                     .gap(px(24.0))
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Output device")).children(devices))
-                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Signal")).child(bitperfect).child(later)),
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Signal")).child(bitperfect).child(later).child(fades)),
             )
             .when(!current.is_empty(), |d| {
                 d.child(div().font_family(MONO).text_size(px(11.0)).text_color(rgb(t.muted)).child(format!("Playing to {current}")))

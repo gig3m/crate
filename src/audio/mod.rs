@@ -38,12 +38,81 @@ pub use source::Source;
 pub struct Item {
     pub src: Source,
     pub gain: f32,
+    /// Crossfade from the previous track into this one, in ms (0 = gapless).
+    /// Only applied when both run at the same sample rate.
+    pub fade_ms: u32,
 }
 
 impl From<Source> for Item {
     fn from(src: Source) -> Self {
-        Item { src, gain: 1.0 }
+        Item { src, gain: 1.0, fade_ms: 0 }
     }
+}
+
+/// Where decoded samples go: the ring, plus the counters and stream
+/// activation that every push updates.
+struct Out<'a> {
+    prod: &'a mut rtrb::Producer<f32>,
+    cap: usize,
+    activated: &'a mut bool,
+    queued_frames: &'a mut u64,
+    queued_us: &'a mut u64,
+    stream_frames: &'a mut u64,
+}
+
+impl Out<'_> {
+    /// Push `data` (interleaved) at `rate`. False if the engine was stopped.
+    fn push(&mut self, data: &[f32], rate: u32, cmd_tx: &pw::channel::Sender<Cmd>, stats: &Stats) -> bool {
+        let mut off = 0;
+        while off < data.len() {
+            let free = self.prod.slots();
+            if free == 0 {
+                // A full ring on a stream that hasn't started can't drain: start it.
+                if !*self.activated {
+                    let _ = cmd_tx.send(Cmd::Activate);
+                    *self.activated = true;
+                }
+                if stats.stop.load(Ordering::Acquire) {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            let take = free.min(data.len() - off);
+            self.prod.write_chunk_uninit(take).unwrap().fill_from_iter(data[off..off + take].iter().copied());
+            off += take;
+        }
+        let prefill = (rate as usize / 10) * CHANNELS; // 100 ms
+        if !*self.activated && self.cap - self.prod.slots() >= prefill {
+            *self.activated = true;
+            let _ = cmd_tx.send(Cmd::Activate);
+        }
+        let frames = (data.len() / CHANNELS) as u64;
+        *self.queued_frames += frames;
+        *self.stream_frames += frames;
+        *self.queued_us += frames * 1_000_000 / rate.max(1) as u64;
+        true
+    }
+}
+
+/// Equal-power crossfade of `from` (fading out) into `into` (fading in), in
+/// place in `into`, starting `done` frames into a `total`-frame fade.
+/// Returns frames mixed.
+fn mix_fade(into: &mut [f32], from: &mut VecDeque<f32>, done: usize, total: usize) -> usize {
+    let mut frames = 0;
+    for fr in into.as_chunks_mut::<CHANNELS>().0 {
+        if from.len() < CHANNELS {
+            break;
+        }
+        let t = ((done + frames) as f32 + 0.5) / total.max(1) as f32;
+        let (out_g, in_g) = ((t * std::f32::consts::FRAC_PI_2).cos(), (t * std::f32::consts::FRAC_PI_2).sin());
+        for s in fr.iter_mut() {
+            let a = from.pop_front().unwrap_or(0.0);
+            *s = (a * out_g + *s * in_g).clamp(-1.0, 1.0);
+        }
+        frames += 1;
+    }
+    frames
 }
 
 pub const CHANNELS: usize = 2;
@@ -262,6 +331,15 @@ fn decoder_thread(
     let mut queued_frames = 0u64;
     let mut queued_us = 0u64;
     let mut scratch: Vec<f32> = Vec::new();
+    // Crossfades: the current track's held-back end (only while the next
+    // queued track will fade in), and the previous track's end being mixed
+    // into the current one's start.
+    let mut tail: VecDeque<f32> = VecDeque::new();
+    let mut tail_rate = 0u32;
+    let mut fading: VecDeque<f32> = VecDeque::new();
+    let mut fade_total = 0usize;
+    let mut fade_done = 0usize;
+    let mut drained: Vec<f32> = Vec::new();
     let mut first_audio_reported = false;
     let mut pending_reconnect: Option<(u32, u32, Instant)> = None;
     // Frames pushed since the current stream was built: a stream that never
@@ -281,6 +359,15 @@ fn decoder_thread(
         let (index, item) = match popped {
             Some(next) => next,
             None => {
+                // Nothing to fade into: the held-back end plays as is.
+                if !tail.is_empty() {
+                    drained.clear();
+                    drained.extend(tail.drain(..));
+                    let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, stream_frames: &mut stream_frames };
+                    if !out.push(&drained, tail_rate, &cmd_tx, &stats) {
+                        return Ok(());
+                    }
+                }
                 // Out of tracks for now. Let what's buffered play while an
                 // append (radio refill) may still arrive; once the ring is
                 // empty, close the queue and finish.
@@ -336,6 +423,35 @@ fn decoder_thread(
         };
         let rate = params.sample_rate.unwrap_or(48_000);
         let bits = params.bits_per_sample.unwrap_or(0);
+
+        // Crossfade into this track only at the same rate, with a held-back
+        // end to fade from, and not when starting mid-track (a seek).
+        let fade_frames = (item.fade_ms as u64 * rate as u64 / 1000) as usize;
+        let crossfade = fade_frames > 0 && rate == tail_rate && tail.len() >= CHANNELS && !(index == 0 && start_ms > 0);
+        if crossfade {
+            // Fade over the shorter of what's held and what this track asks for.
+            let keep = tail.len().min(fade_frames * CHANNELS);
+            let lead = tail.len() - keep;
+            if lead > 0 {
+                drained.clear();
+                drained.extend(tail.drain(..lead));
+                let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, stream_frames: &mut stream_frames };
+                if !out.push(&drained, tail_rate, &cmd_tx, &stats) {
+                    return Ok(());
+                }
+            }
+            fading = std::mem::take(&mut tail);
+            fade_total = fading.len() / CHANNELS;
+            fade_done = 0;
+        } else if !tail.is_empty() {
+            // Gapless (or a rate change ahead): the held-back end plays as is.
+            drained.clear();
+            drained.extend(tail.drain(..));
+            let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, stream_frames: &mut stream_frames };
+            if !out.push(&drained, tail_rate, &cmd_tx, &stats) {
+                return Ok(());
+            }
+        }
 
         if rate != cur_rate {
             stats.rebuilding.store(true, Ordering::Release);
@@ -395,7 +511,13 @@ fn decoder_thread(
             fmt.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(track.id) })?;
         }
 
-        let prefill = (rate as usize / 10) * CHANNELS; // 100 ms
+        // Hold back this track's end only if the next queued track will fade
+        // in (checked now; if the queue changes, the end just plays as is).
+        let hold = {
+            let q = queue.lock().unwrap();
+            q.items.front().map(|n| (n.fade_ms.min(12_000) as u64 * rate as u64 / 1000) as usize * CHANNELS).unwrap_or(0)
+        };
+        tail_rate = rate;
         let mut dec = symphonia::default::get_codecs()
             .make_audio_decoder(params, &AudioDecoderOptions::default().gapless(true))?;
         let limit_frames = track_limit.map(|s| (s * rate as f64) as u64);
@@ -422,35 +544,27 @@ fn decoder_thread(
                     *s = (*s * gain).clamp(-1.0, 1.0);
                 }
             }
-            let mut off = 0;
-            while off < scratch.len() {
-                let free = prod.slots();
-                if free == 0 {
-                    // A full ring on a stream that hasn't started can't drain: start it.
-                    if !activated {
-                        let _ = cmd_tx.send(Cmd::Activate);
-                        activated = true;
-                    }
-                    if stats.stop.load(Ordering::Acquire) {
+            track_frames += (scratch.len() / CHANNELS) as u64;
+            // The previous track's end fades out under this one's start.
+            if !fading.is_empty() {
+                fade_done += mix_fade(&mut scratch, &mut fading, fade_done, fade_total);
+            }
+            let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, stream_frames: &mut stream_frames };
+            if hold == 0 {
+                if !out.push(&scratch, rate, &cmd_tx, &stats) {
+                    return Ok(());
+                }
+            } else {
+                tail.extend(scratch.iter().copied());
+                if tail.len() > hold {
+                    let excess = tail.len() - hold;
+                    drained.clear();
+                    drained.extend(tail.drain(..excess));
+                    if !out.push(&drained, rate, &cmd_tx, &stats) {
                         return Ok(());
                     }
-                    std::thread::sleep(Duration::from_millis(5));
-                    continue;
                 }
-                let take = free.min(scratch.len() - off);
-                prod.write_chunk_uninit(take)
-                    .unwrap()
-                    .fill_from_iter(scratch[off..off + take].iter().copied());
-                off += take;
             }
-            if !activated && cap - prod.slots() >= prefill {
-                activated = true;
-                let _ = cmd_tx.send(Cmd::Activate);
-            }
-            queued_frames += (scratch.len() / CHANNELS) as u64;
-            stream_frames += (scratch.len() / CHANNELS) as u64;
-            queued_us += (scratch.len() / CHANNELS) as u64 * 1_000_000 / rate as u64;
-            track_frames += (scratch.len() / CHANNELS) as u64;
             if stats.got_data.load(Ordering::Acquire) {
                 if !first_audio_reported {
                     first_audio_reported = true;
@@ -462,6 +576,28 @@ fn decoder_thread(
                     let _ = ev.send(Event::Reconnected { from, to, silent_ms: t.elapsed().as_secs_f64() * 1000.0 });
                 }
             }
+        }
+        // A track shorter than the fade: the rest of the previous end fades
+        // out on its own after it.
+        if !fading.is_empty() {
+            drained.clear();
+            let rest = fading.len() / CHANNELS;
+            drained.resize(rest * CHANNELS, 0.0);
+            mix_fade(&mut drained, &mut fading, fade_done, fade_total);
+            fading.clear();
+            let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, stream_frames: &mut stream_frames };
+            if !out.push(&drained, rate, &cmd_tx, &stats) {
+                return Ok(());
+            }
+        }
+    }
+    // Nothing follows: the held-back end plays as is.
+    if !tail.is_empty() {
+        drained.clear();
+        drained.extend(tail.drain(..));
+        let mut out = Out { prod: &mut prod, cap, activated: &mut activated, queued_frames: &mut queued_frames, queued_us: &mut queued_us, stream_frames: &mut stream_frames };
+        if !out.push(&drained, tail_rate, &cmd_tx, &stats) {
+            return Ok(());
         }
     }
     if !activated {
@@ -718,4 +854,36 @@ fn pw_thread(
     mainloop.run();
     live.borrow_mut().take();
     Ok(())
+}
+
+#[cfg(test)]
+mod fade_tests {
+    use super::{CHANNELS, mix_fade};
+    use std::collections::VecDeque;
+
+    #[test]
+    fn equal_power_fade() {
+        let total = 1000;
+        // Fading a full-scale tail into silence follows cos: ~1 at the start, ~0 at the end.
+        let mut from: VecDeque<f32> = std::iter::repeat_n(1.0, total * CHANNELS).collect();
+        let mut into = vec![0.0f32; total * CHANNELS];
+        assert_eq!(mix_fade(&mut into, &mut from, 0, total), total);
+        assert!(from.is_empty());
+        assert!(into[0] > 0.999 && into[into.len() - 1] < 0.002);
+        assert!(into.windows(2).all(|w| w[1] <= w[0] + 1e-6));
+        // Silence into a full-scale track follows sin; split across two calls it lines up.
+        let mut from: VecDeque<f32> = std::iter::repeat_n(0.0, total * CHANNELS).collect();
+        let mut a = vec![1.0f32; 400 * CHANNELS];
+        let mut b = vec![1.0f32; 600 * CHANNELS];
+        let n = mix_fade(&mut a, &mut from, 0, total);
+        mix_fade(&mut b, &mut from, n, total);
+        let joined: Vec<f32> = a.into_iter().chain(b).collect();
+        assert!(joined[0] < 0.002 && joined[joined.len() - 1] > 0.999);
+        assert!(joined.windows(2).all(|w| w[1] + 1e-6 >= w[0]));
+        // Runs out of tail: stops mixing and leaves the rest of `into` as is.
+        let mut from: VecDeque<f32> = std::iter::repeat_n(0.5, 10 * CHANNELS).collect();
+        let mut into = vec![0.25f32; 20 * CHANNELS];
+        assert_eq!(mix_fade(&mut into, &mut from, 990, 1000), 10);
+        assert!(into[10 * CHANNELS..].iter().all(|&x| x == 0.25));
+    }
 }

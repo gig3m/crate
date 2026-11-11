@@ -84,6 +84,8 @@ struct Crate {
     /// Loudness leveling setting, and Plex's loudness analysis by track key.
     leveling: theme::Leveling,
     gains: HashMap<String, plex::Gain>,
+    /// Sweet fades between albums, in seconds (0 = off).
+    fade_secs: u32,
     /// A queue waiting on loudness before it starts (its queue_seq); cleared
     /// by any transport action or explicit start, which supersede it.
     pending_start: Option<u64>,
@@ -607,6 +609,7 @@ impl Crate {
             play_note: None,
             leveling: theme::saved_leveling(),
             gains: HashMap::new(),
+            fade_secs: theme::saved_fade(),
             pending_start: None,
             art: HashMap::new(),
             requested: HashSet::new(),
@@ -1105,6 +1108,19 @@ impl Crate {
         .detach();
     }
 
+    pub(crate) fn set_fade(&mut self, secs: u32, cx: &mut Context<Self>) {
+        if self.fade_secs == secs {
+            return;
+        }
+        self.fade_secs = secs;
+        if let Err(e) = theme::save_fade(secs) {
+            self.status = format!("Couldn't save the fade setting: {e}").into();
+        }
+        // Retune the engine's unopened tracks (the next transition onward).
+        self.sync_upcoming();
+        cx.notify();
+    }
+
     pub(crate) fn set_leveling(&mut self, l: theme::Leveling, cx: &mut Context<Self>) {
         if self.leveling == l {
             return;
@@ -1143,7 +1159,7 @@ impl Crate {
         }
         self.engine = None; // dropping stops the old one
         let range = self.engine_slice(&self.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default(), idx);
-        let queue = self.sources(&self.now.as_ref().map(|n| n.tracks[range.clone()].to_vec()).unwrap_or_default());
+        let queue = self.sources(&self.now.as_ref().map(|n| n.tracks[range.clone()].to_vec()).unwrap_or_default(), None);
         let Some(now) = self.now.as_mut() else { return };
         match Engine::play_from(queue, ms, self.target.clone()) {
             Ok(e) => {
@@ -1386,7 +1402,7 @@ impl Crate {
                                 && let Some(e) = this.engine.as_ref()
                                 && let Some(n) = this.now.as_ref()
                                 && n.engine_end == n.tracks.len() - more.len()
-                                && e.append(this.sources(&more))
+                                && e.append(this.sources(&more, n.tracks.len().checked_sub(more.len() + 1).and_then(|p| n.tracks.get(p))))
                                 && let Some(n) = this.now.as_mut()
                             {
                                 n.engine_end = n.tracks.len();

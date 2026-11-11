@@ -29,9 +29,24 @@ impl Crate {
         linear_gain(g, use_album)
     }
 
-    /// Engine items for `tracks`, with leveling gains.
-    pub(crate) fn sources(&self, tracks: &[Track]) -> Vec<Item> {
-        tracks.iter().map(|t| Item { src: self.source(t), gain: self.level_gain(t) }).collect()
+    /// Engine items for `tracks`, with leveling gains and sweet fades.
+    /// `prev` is the track played just before `tracks[0]` (None when the
+    /// first item starts the engine).
+    pub(crate) fn sources(&self, tracks: &[Track], prev: Option<&Track>) -> Vec<Item> {
+        let fade_ms = self.fade_secs.min(12) * 1000;
+        tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let before = if i == 0 { prev } else { tracks.get(i - 1) };
+                // Sweet fades only between albums: gapless inside an album is never broken.
+                let fade = match before {
+                    Some(b) if fade_ms > 0 && b.album_key != t.album_key => fade_ms,
+                    _ => 0,
+                };
+                Item { src: self.source(t), gain: self.level_gain(t), fade_ms: fade }
+            })
+            .collect()
     }
 
     fn source(&self, t: &Track) -> Source {
@@ -81,7 +96,8 @@ impl Crate {
             Repeat::One => first..first,
             _ => first..now.tracks.len(),
         };
-        let srcs = self.sources(&now.tracks[range.clone()]);
+        let prev = range.start.checked_sub(1).and_then(|p| now.tracks.get(p));
+        let srcs = self.sources(&now.tracks[range.clone()], prev);
         if !engine.replace_upcoming(started, srcs) {
             return false;
         }

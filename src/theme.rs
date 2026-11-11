@@ -126,6 +126,19 @@ pub fn saved_leveling() -> Leveling {
     Leveling::ALL.into_iter().find(|l| l.key() == v).unwrap_or_default()
 }
 
+/// Sweet fades between albums, seconds: one of 0 (off), 3, 6, 10.
+pub const FADES: [u32; 4] = [0, 3, 6, 10];
+
+pub fn saved_fade() -> u32 {
+    let raw = std::fs::read_to_string(config_path()).unwrap_or_default();
+    let map: HashMap<String, toml::Value> = toml::from_str(&raw).unwrap_or_default();
+    map.get("fade").and_then(|v| v.as_integer()).map(|v| v as u32).filter(|v| FADES.contains(v)).unwrap_or(0)
+}
+
+pub fn save_fade(secs: u32) -> std::io::Result<()> {
+    save_key("fade", toml::Value::Integer(secs as i64))
+}
+
 pub fn save_leveling(l: Leveling) -> std::io::Result<()> {
     save_key("leveling", toml::Value::String(l.key().into()))
 }
