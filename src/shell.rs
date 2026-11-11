@@ -308,6 +308,40 @@ impl Crate {
                     .child(div().size(px(8.0)).rounded(px(4.0)).bg(rgb(if self.home.is_some() { t.healthy } else { t.muted })))
                     .child(format!("{server} · direct play")),
             )
+            .child(self.settings_menu(t, cx))
+            .into_any_element()
+    }
+
+    /// The cog, top right: settings, quick theme switch, output device.
+    fn settings_menu(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::theme::Mode;
+        use gpui_component::{button::{Button, ButtonVariants}, menu::{DropdownMenu, PopupMenuItem}};
+        let this = cx.entity().downgrade();
+        let mode = self.theme_mode;
+        Button::new("settings-cog")
+            .ghost()
+            .child(icons::icon("settings", 18.0, t.text2))
+            .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
+                let open = this.clone();
+                let crate_t = this.clone();
+                let omarchy_t = this.clone();
+                let audio = this.clone();
+                menu.item(PopupMenuItem::new("Settings…").on_click(move |_, _, cx| {
+                    open.update(cx, |this, cx| this.open_audio_settings(cx)).ok();
+                }))
+                .separator()
+                .label("Theme")
+                .item(PopupMenuItem::new("Crate").checked(mode == Mode::Crate).on_click(move |_, _, cx| {
+                    crate_t.update(cx, |this, cx| this.set_theme_mode(Mode::Crate, cx)).ok();
+                }))
+                .item(PopupMenuItem::new("Follow Omarchy").checked(mode == Mode::Omarchy).on_click(move |_, _, cx| {
+                    omarchy_t.update(cx, |this, cx| this.set_theme_mode(Mode::Omarchy, cx)).ok();
+                }))
+                .separator()
+                .item(PopupMenuItem::new("Output device…").on_click(move |_, _, cx| {
+                    audio.update(cx, |this, cx| this.open_audio_settings(cx)).ok();
+                }))
+            })
             .into_any_element()
     }
 
