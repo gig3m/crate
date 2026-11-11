@@ -40,31 +40,43 @@ impl Crate {
     /// Hand the engine the tracks it hasn't opened yet, in `now.tracks` order.
     /// Retries if the decoder opens a track meanwhile.
     pub(crate) fn sync_upcoming(&mut self) {
-        let (Some(engine), Some(now)) = (self.engine.as_ref(), self.now.as_ref()) else { return };
         for _ in 0..5 {
-            let started = engine.started();
-            let first = now.start_idx + started;
-            if first > now.tracks.len() {
-                return;
-            }
-            let range = if self.repeat == Repeat::One { first..first } else { first..now.tracks.len() };
-            let srcs = self.sources(&now.tracks[range.clone()]);
-            if engine.replace_upcoming(started, srcs) {
-                let end = range.end;
-                if let Some(n) = self.now.as_mut() {
-                    n.engine_end = end;
-                }
+            let Some(started) = self.engine.as_ref().map(|e| e.started()) else { return };
+            if self.hand_over(started) {
                 return;
             }
         }
     }
 
+    /// Replace the engine's unopened tracks with `now.tracks` from the point
+    /// `started` implies. False if the decoder has moved on (or closed).
+    fn hand_over(&mut self, started: usize) -> bool {
+        let (Some(engine), Some(now)) = (self.engine.as_ref(), self.now.as_ref()) else { return true };
+        let first = now.start_idx + started;
+        if first > now.tracks.len() {
+            return true;
+        }
+        let range = if self.repeat == Repeat::One { first..first } else { first..now.tracks.len() };
+        let srcs = self.sources(&now.tracks[range.clone()]);
+        if !engine.replace_upcoming(started, srcs) {
+            return false;
+        }
+        let end = range.end;
+        if let Some(n) = self.now.as_mut() {
+            n.engine_end = end;
+        }
+        true
+    }
+
     pub(crate) fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
         self.shuffle = !self.shuffle;
-        let started = self.engine.as_ref().map(|e| e.started()).unwrap_or(0);
-        if let Some(n) = self.now.as_mut() {
-            // Only reorder what the decoder hasn't opened (and never the current track).
-            let from = (n.start_idx + started).max(n.idx + 1).min(n.tracks.len());
+        // Reorder and hand over against the SAME `started`: if the decoder opens a
+        // track in between, replace_upcoming fails and we redo it from the new point.
+        for _ in 0..5 {
+            let started = self.engine.as_ref().map(|e| e.started());
+            let Some(n) = self.now.as_mut() else { break };
+            let from = (n.start_idx + started.unwrap_or(0)).max(n.idx + 1).min(n.tracks.len());
+            let before = n.tracks[from..].to_vec();
             if self.shuffle {
                 crate::shuffle(&mut n.tracks[from..]);
             } else {
@@ -72,8 +84,17 @@ impl Crate {
                     n.orig_order.iter().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
                 n.tracks[from..].sort_by_key(|t| pos.get(t.rating_key.as_str()).copied().unwrap_or(usize::MAX));
             }
+            let Some(started) = started else { break };
+            if self.hand_over(started) {
+                break;
+            }
+            // The decoder opened a track meanwhile: the engine refused this order,
+            // so undo it and rebuild from the new position.
+            if let Some(n) = self.now.as_mut() {
+                n.tracks.truncate(from);
+                n.tracks.extend(before);
+            }
         }
-        self.sync_upcoming();
         let _ = self.mpris.send(crate::mpris::Update::Modes { shuffle: self.shuffle, repeat: self.repeat });
         cx.notify();
     }
@@ -84,7 +105,7 @@ impl Crate {
             Repeat::All => Repeat::One,
             Repeat::One => Repeat::Off,
         };
-        self.sync_upcoming();
+        self.apply_repeat(cx);
         let _ = self.mpris.send(crate::mpris::Update::Modes { shuffle: self.shuffle, repeat: self.repeat });
         cx.notify();
     }
@@ -92,7 +113,7 @@ impl Crate {
     pub(crate) fn set_modes(&mut self, shuffle: Option<bool>, repeat: Option<Repeat>, cx: &mut Context<Self>) {
         if let Some(r) = repeat {
             self.repeat = r;
-            self.sync_upcoming();
+            self.apply_repeat(cx);
         }
         if let Some(s) = shuffle
             && s != self.shuffle
@@ -102,6 +123,25 @@ impl Crate {
         }
         let _ = self.mpris.send(crate::mpris::Update::Modes { shuffle: self.shuffle, repeat: self.repeat });
         cx.notify();
+    }
+
+    /// Push the repeat mode to the engine. Repeat-one must loop the track
+    /// that's playing: if the decoder has already opened the next one (the
+    /// last seconds of a track), restart at the current position instead.
+    fn apply_repeat(&mut self, cx: &mut Context<Self>) {
+        if self.repeat == Repeat::One
+            && let (Some(e), Some(n)) = (self.engine.as_ref(), self.now.as_ref())
+            && n.start_idx + e.started() > n.idx + 1
+        {
+            let (i, ms) = (n.idx, n.elapsed_ms);
+            let paused = n.paused;
+            self.play_from(i, ms, cx);
+            if paused {
+                self.transport(crate::mpris::Transport::Pause, cx);
+            }
+            return;
+        }
+        self.sync_upcoming();
     }
 
     /// After the engine ran out: repeat-one replays, repeat-all wraps.

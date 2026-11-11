@@ -1010,9 +1010,16 @@ impl Crate {
                             let more: Vec<Track> = more.into_iter().filter(|t| !have.contains(&t.rating_key)).collect();
                             if more.is_empty() {
                                 now.refill = None; // station ran dry
+                                // The engine may already have finished: repeat-all wraps now.
+                                if now.finished && !now.stopped {
+                                    this.repeat_on_finish(cx);
+                                }
+                                cx.notify();
+                                return;
                             }
                             let thumbs: Vec<String> = more.iter().map(|t| t.thumb.clone()).collect();
                             now.tracks.extend(more.iter().cloned());
+                            now.orig_order.extend(more.iter().map(|t| t.rating_key.clone()));
                             // Gapless: hand them to the running engine (unless it already finished,
                             // or repeat-one keeps it to the current track).
                             if this.repeat != queue::Repeat::One
@@ -1024,8 +1031,6 @@ impl Crate {
                             {
                                 n.engine_end = n.tracks.len();
                             }
-                            let Some(now) = this.now.as_mut() else { return };
-                            let _ = &now;
                             for th in thumbs {
                                 this.request_thumb(&th);
                             }
@@ -1044,6 +1049,9 @@ impl Crate {
                             // Don't retry on every poll; the queue ends where it is.
                             eprintln!("[crate] refill: {e:#}");
                             now.refill = None;
+                            if now.finished && !now.stopped {
+                                this.repeat_on_finish(cx);
+                            }
                         }
                         Err(_) => {}
                     }

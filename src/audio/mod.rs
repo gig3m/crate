@@ -181,7 +181,10 @@ impl Engine {
                 .name("decoder".into())
                 .spawn(move || {
                     let stop_tx = cmd_tx.clone();
-                    if let Err(e) = decoder_thread(queue, start_ms, prod, cmd_tx, stats.clone(), ev_tx.clone()) {
+                    let res = decoder_thread(queue.clone(), start_ms, prod, cmd_tx, stats.clone(), ev_tx.clone());
+                    // Whatever ended the decoder, appends no longer have anyone to play them.
+                    queue.lock().unwrap().closed = true;
+                    if let Err(e) = res {
                         let _ = ev_tx.send(Event::Error(format!("decoder: {e:#}")));
                         // A fatal error ends the pipeline; nothing else would stop PipeWire.
                         stats.stop.store(true, Ordering::Release);
