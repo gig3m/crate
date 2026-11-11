@@ -252,8 +252,6 @@ pub struct ArtistInfo {
     pub similar: Vec<String>,
     pub blur: Option<[u32; 4]>,
     pub plays: u64,
-    /// Albums by other artists with tracks credited to this one (album keys).
-    pub appears_on: Vec<String>,
 }
 
 pub struct ArtistRequest {
@@ -1185,10 +1183,7 @@ impl Client {
                 Some((t.into_track()?, key, title, plays))
             })
             .collect();
-        let name = m["title"].as_str().unwrap_or_default().to_string();
-        let appears_on = self.appears_on(key, &name, section).await.unwrap_or_default();
         Ok(ArtistInfo {
-            appears_on,
             title: m["title"].as_str().unwrap_or_default().to_string(),
             summary: m["summary"].as_str().unwrap_or_default().replace("\\&", "&"),
             thumb: m["thumb"].as_str().unwrap_or_default().to_string(),
@@ -1202,8 +1197,9 @@ impl Client {
 
     /// Albums by other artists where this artist is credited on a track (the
     /// track artist, or "feat. <name>" in the title). Plex has no hub for
-    /// this, so it comes from search: best effort, up to 50 track matches.
-    async fn appears_on(&self, key: &str, name: &str, section: &str) -> anyhow::Result<Vec<String>> {
+    /// this, so it comes from search, which matches track titles only (so in
+    /// practice: "(feat. <name>)" credits). Best effort, up to 50 matches.
+    pub async fn appears_on(&self, key: &str, name: &str, section: &str) -> anyhow::Result<Vec<String>> {
         if name.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -1216,11 +1212,8 @@ impl Client {
                 if t["grandparentRatingKey"].as_str() == Some(key) {
                     continue;
                 }
-                let credited = t["originalTitle"].as_str().is_some_and(|o| o.to_lowercase().contains(&lname))
-                    || t["title"].as_str().is_some_and(|s| {
-                        let s = s.to_lowercase();
-                        ["feat. ", "feat ", "ft. ", "featuring ", "with "].iter().any(|f| s.contains(&format!("{f}{lname}")))
-                    });
+                let credited = t["originalTitle"].as_str().is_some_and(|o| credit_names(o).contains(&lname))
+                    || t["title"].as_str().is_some_and(|s| title_credits(s, &lname));
                 if credited
                     && let Some(album) = t["parentRatingKey"].as_str()
                     && !out.iter().any(|a| a == album)
@@ -1233,17 +1226,34 @@ impl Client {
     }
 
     /// Mix builder: each artist's most-played tracks, interleaved
-    /// (this artist, then each similar one in turn).
+    /// (this artist, then each similar one in turn). Fetched together; a
+    /// similar artist that fails is skipped, the main one failing is an error.
     pub async fn artist_mix(&self, section: &str, keys: Vec<String>, per: usize) -> anyhow::Result<Vec<Track>> {
-        let mut lists = Vec::new();
-        for k in &keys {
-            let env: Envelope = self
-                .get(&format!("/library/sections/{section}/all?type=10&artist.id={k}&sort=viewCount:desc&X-Plex-Container-Start=0&X-Plex-Container-Size={per}"))
-                .await?
-                .json()
-                .await
-                .context("artist mix")?;
-            lists.push(env.mc.metadata.into_iter().filter_map(Meta::into_track).take(per).collect::<Vec<_>>());
+        let mut set = tokio::task::JoinSet::new();
+        for (i, k) in keys.iter().enumerate() {
+            let (c, k, section) = (self.clone(), k.clone(), section.to_string());
+            set.spawn(async move {
+                let r: anyhow::Result<Vec<Track>> = async {
+                    let env: Envelope = c
+                        .get(&format!("/library/sections/{section}/all?type=10&artist.id={k}&sort=viewCount:desc&X-Plex-Container-Start=0&X-Plex-Container-Size={per}"))
+                        .await?
+                        .json()
+                        .await
+                        .context("artist mix")?;
+                    Ok(env.mc.metadata.into_iter().filter_map(Meta::into_track).take(per).collect())
+                }
+                .await;
+                (i, r)
+            });
+        }
+        let mut lists: Vec<Vec<Track>> = vec![Vec::new(); keys.len()];
+        while let Some(joined) = set.join_next().await {
+            let (i, r) = joined.map_err(|e| anyhow::anyhow!("artist mix: {e}"))?;
+            match r {
+                Ok(l) => lists[i] = l,
+                Err(e) if i == 0 => return Err(e),
+                Err(_) => {}
+            }
         }
         let mut out = Vec::new();
         for i in 0..per {
@@ -1263,6 +1273,58 @@ impl Client {
             urlencode(thumb)
         );
         Ok(self.get(&url).await?.bytes().await?.to_vec())
+    }
+}
+
+/// Names in a track-artist credit: "A, B & C feat. D" -> [a, b, c, d].
+fn credit_names(credit: &str) -> Vec<String> {
+    let mut s = credit.to_lowercase();
+    for sep in [" feat. ", " feat ", " ft. ", " featuring ", " & ", " and ", " x ", " with ", "; ", " / ", "/", ", "] {
+        s = s.replace(sep, "\u{1}");
+    }
+    s.split('\u{1}').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect()
+}
+
+/// A title credits `name` (lowercase) as a guest: "(feat. Name)", "[ft. Name]",
+/// "- feat. Name", ending the credit list after the name; a bare "with"
+/// only inside brackets ("(with Name)"), since "Stay with Me" isn't a credit.
+fn title_credits(title: &str, name: &str) -> bool {
+    let t = title.to_lowercase();
+    let boundary = |rest: &str| {
+        rest.is_empty() || rest.starts_with(')') || rest.starts_with(']') || rest.starts_with(',') || rest.starts_with(" &") || rest.starts_with(" and ") || rest.starts_with(" x ")
+    };
+    let mut hits = Vec::new();
+    for f in ["feat. ", "feat ", "ft. ", "featuring "] {
+        hits.extend(t.match_indices(f).map(|(i, _)| i + f.len()));
+    }
+    for f in ["(with ", "[with "] {
+        hits.extend(t.match_indices(f).map(|(i, _)| i + f.len()));
+    }
+    hits.into_iter().any(|start| {
+        // The name may be any one of a credit list: "feat. A, B & Name".
+        let tail = &t[start..];
+        let end = tail.find([')', ']']).unwrap_or(tail.len());
+        credit_names(&tail[..end]).iter().any(|n| n == name) && {
+            let at = tail.find(name).map(|i| i + name.len()).unwrap_or(0);
+            boundary(&tail[at..])
+        }
+    })
+}
+
+#[cfg(test)]
+mod credit_tests {
+    use super::{credit_names, title_credits};
+
+    #[test]
+    fn credits() {
+        assert_eq!(credit_names("Jay-Z & Kanye West feat. Frank Ocean"), vec!["jay-z", "kanye west", "frank ocean"]);
+        assert!(title_credits("Home (feat. Jon Batiste)", "jon batiste"));
+        assert!(title_credits("Song (feat. A, B & Jon Batiste)", "jon batiste"));
+        assert!(!title_credits("Track (feat. Drakeo the Ruler)", "drake"));
+        assert!(!title_credits("Stay with Me", "me"));
+        assert!(!title_credits("To Sir with Love", "love"));
+        assert!(title_credits("Glory (with Common)", "common"));
+        assert!(!credit_names("Blair").contains(&"air".to_string()));
     }
 }
 

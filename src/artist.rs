@@ -351,8 +351,10 @@ impl Crate {
             })
             .collect();
         // Appears on (canvas): albums by others with tracks credited to this artist.
-        let appears: Vec<(usize, Album)> = info
-            .map(|i| i.appears_on.iter().filter_map(|k| self.albums.iter().position(|a| a.rating_key == *k).map(|ix| (ix, self.albums[ix].clone()))).take(6).collect())
+        let appears: Vec<(usize, Album)> = self
+            .appears_on
+            .get(key)
+            .map(|v| v.iter().filter_map(|k| self.albums.iter().position(|a| a.rating_key == *k).map(|ix| (ix, self.albums[ix].clone()))).take(6).collect())
             .unwrap_or_default();
         let aside = div()
             .w(px(340.0))
@@ -431,12 +433,56 @@ impl Crate {
             .into_any_element()
     }
 
+    /// Appears on for `key`, fetched in the background (bounded 3 s) so the
+    /// artist page never waits on search; cached per artist.
+    pub(crate) fn request_appears_on(&mut self, key: String, name: String, cx: &mut Context<Self>) {
+        if self.appears_on.contains_key(&key) {
+            return;
+        }
+        self.appears_on.insert(key.clone(), Vec::new());
+        let section = crate::section();
+        let k = key.clone();
+        let rx = crate::plex_call(move |c| async move {
+            tokio::time::timeout(std::time::Duration::from_secs(3), c.appears_on(&k, &name, &section)).await.map_err(|_| anyhow::anyhow!("timed out"))?
+        });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok(Ok(v)) => {
+                        this.appears_on.insert(key.clone(), v);
+                        this.request_appears_art(&key);
+                    }
+                    // Failed: forget it so the next visit tries again.
+                    _ => {
+                        this.appears_on.remove(&key);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Covers for an artist's Appears on albums (when they or the album list arrive).
+    pub(crate) fn request_appears_art(&mut self, key: &str) {
+        let thumbs: Vec<String> =
+            self.appears_on.get(key).map(|v| v.iter().filter_map(|k| self.albums.iter().find(|a| a.rating_key == *k)).take(6).map(|a| a.thumb.clone()).collect()).unwrap_or_default();
+        for th in thumbs {
+            self.request_thumb(&th);
+        }
+    }
+
     /// Mix builder (canvas): this artist's most-played tracks interleaved with
     /// those of the three most sonically similar artists in the library.
     pub(crate) fn build_artist_mix(&mut self, key: String, name: String, cx: &mut Context<Self>) {
         let mut keys = vec![key.clone()];
         if let Some(Some(sim)) = self.sonic_artists.get(&key) {
             keys.extend(sim.iter().take(3).map(|s| s.0.clone()));
+        } else {
+            // Similar artists not loaded (yet, or it failed): ask for next time.
+            self.request_sonic_artists(key.clone(), cx);
         }
         let with_others = keys.len() > 1;
         self.play_intent += 1;
@@ -470,9 +516,7 @@ impl Crate {
     /// Art the artist page needs once its info arrives.
     pub(crate) fn request_artist_art(&mut self, info: &ArtistInfo) {
         self.request_thumb(&info.thumb.clone());
-        let mut thumbs: Vec<String> = info.popular.iter().take(5).map(|p| p.0.thumb.clone()).collect();
-        // Appears-on album covers.
-        thumbs.extend(info.appears_on.iter().filter_map(|k| self.albums.iter().find(|a| a.rating_key == *k)).take(6).map(|a| a.thumb.clone()));
+        let thumbs: Vec<String> = info.popular.iter().take(5).map(|p| p.0.thumb.clone()).collect();
         for th in thumbs {
             self.request_thumb(&th);
         }

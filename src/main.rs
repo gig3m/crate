@@ -190,6 +190,8 @@ struct Crate {
     sonic_albums: HashMap<String, Option<Vec<Album>>>,
     /// Card formats of other editions shown on album pages, by album key.
     edition_formats: HashMap<String, (u32, String)>,
+    /// Appears on, by artist key: album keys (fetched after the artist page shows).
+    appears_on: HashMap<String, Vec<String>>,
     sonic_artists: HashMap<String, Option<Vec<sonic::ArtistRef>>>,
     sonic: sonic::SonicState,
     /// Artist key -> (singles & EPs, live) album keys; and the open tab.
@@ -458,6 +460,11 @@ impl Crate {
                         this.albums = albums;
                         // Mix collages read album covers: Home may have landed first.
                         this.request_mix_art();
+                        // Same for an open artist page's Appears on covers.
+                        if let View::Artist { key, .. } = &this.view {
+                            let key = key.clone();
+                            this.request_appears_art(&key);
+                        }
                         let pos: HashMap<&str, usize> = this.albums.iter().enumerate().map(|(i, a)| (a.rating_key.as_str(), i)).collect();
                         let remap = |v: &mut View, key: &Option<String>| -> bool {
                             match (v, key) {
@@ -735,6 +742,7 @@ impl Crate {
             offline: offline::Offline::new(),
             sonic_albums: HashMap::new(),
             edition_formats: HashMap::new(),
+            appears_on: HashMap::new(),
             sonic_artists: HashMap::new(),
             sonic: sonic::SonicState::default(),
             artist_kinds: HashMap::new(),
@@ -916,6 +924,7 @@ impl Crate {
             Ok(Ok(info)) => {
                 this.update(cx, |this, cx| {
                     this.request_artist_art(&info);
+                    this.request_appears_on(key.clone(), info.title.clone(), cx);
                     if let View::Artist { key: k, info: slot, .. } = &mut this.view
                         && *k == key
                     {
