@@ -188,23 +188,28 @@ impl Crate {
                 self.play_from(at, 0, cx);
             } else {
                 // Leveling: the first new track needs its gain before it starts (bounded).
+                // Pause/Stop cancel the wait (they clear pending_start); Play/Next start at once.
+                self.pending_start = Some(qid);
                 let rx = crate::plex_call(move |c| async move {
                     tokio::time::timeout(std::time::Duration::from_millis(1500), c.track_gains(missing)).await.map_err(|_| anyhow::anyhow!("timed out"))?
                 });
                 cx.spawn(async move |this, cx| {
                     let res = rx.await;
                     this.update(cx, |this, cx| {
-                        if let Ok(Ok(found)) = res {
-                            this.gains.extend(found);
+                        match res {
+                            Ok(Ok(found)) => this.gains.extend(found),
+                            Ok(Err(e)) => eprintln!("[crate] loudness: {e:#}"),
+                            Err(_) => {}
                         }
-                        // Still the same finished queue, and nothing else started it.
-                        if let Some(n) = this.now.as_ref()
-                            && n.queue_id == qid
-                            && n.finished
-                            && !n.stopped
-                        {
+                        let current = this.now.as_ref().is_some_and(|n| n.queue_id == qid);
+                        // Start only if still waiting (nothing paused, stopped or started it).
+                        if current && this.pending_start == Some(qid) && this.now.as_ref().is_some_and(|n| n.finished && !n.stopped) {
                             this.play_from(at, 0, cx);
+                        }
+                        // Either way, while it's the current queue: retune and load the rest.
+                        if current {
                             let all = this.now.as_ref().map(|n| n.tracks.clone()).unwrap_or_default();
+                            this.sync_upcoming();
                             this.fill_gains(&all, at, cx);
                         }
                     })
