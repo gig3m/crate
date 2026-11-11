@@ -1586,6 +1586,87 @@ pub fn cache_dir() -> std::path::PathBuf {
     base.join("crate")
 }
 
+/// Where streamed tracks are cached: $CRATE_AUDIO_CACHE, else
+/// /scratch/crate-cache when it exists (desktop's disposable build drive,
+/// where the cache has always lived), else ~/.cache/crate/audio.
+pub fn audio_cache_dir() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        if let Some(d) = std::env::var_os("CRATE_AUDIO_CACHE").filter(|v| !v.is_empty()) {
+            return d.into();
+        }
+        let legacy = std::path::Path::new("/scratch/crate-cache");
+        if legacy.is_dir() { legacy.to_path_buf() } else { cache_dir().join("audio") }
+    })
+    .clone()
+}
+
+/// Most the streamed-track cache may hold before the least recently played
+/// tracks go.
+pub const AUDIO_CACHE_MAX: u64 = 10 << 30;
+
+/// Delete cached tracks (`part-*`, finished files only), least recently
+/// played first, until the cache is under `max` bytes. Files used in the
+/// last hour stay: one may be about to open. Returns (files, bytes) removed.
+pub fn prune_audio_cache(dir: &std::path::Path, max: u64) -> (usize, u64) {
+    let now = std::time::SystemTime::now();
+    let mut files: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            // Downloads in progress are `part-<id>.part.<pid>.<n>`.
+            if !name.starts_with("part-") || name.contains(".part.") {
+                return None;
+            }
+            let m = e.metadata().ok().filter(|m| m.is_file())?;
+            Some((m.modified().ok()?, m.len(), e.path()))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    files.sort_by_key(|f| f.0);
+    let (mut n, mut freed) = (0, 0);
+    for (when, len, path) in files {
+        if total <= max {
+            break;
+        }
+        if now.duration_since(when).is_ok_and(|age| age < std::time::Duration::from_secs(3600)) {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total -= len;
+            freed += len;
+            n += 1;
+        }
+    }
+    (n, freed)
+}
+
+#[cfg(test)]
+mod audio_cache_tests {
+    #[test]
+    fn prunes_oldest_part_files_only() {
+        let dir = std::env::temp_dir().join(format!("crate-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let day = std::time::Duration::from_secs(86400);
+        let now = std::time::SystemTime::now();
+        for (name, age_days, len) in [("part-1.flac", 3, 100), ("part-2.flac", 2, 100), ("part-3.flac", 0, 100), ("part-4.part.9.0", 5, 100), ("art-1.jpg", 9, 100)] {
+            let p = dir.join(name);
+            std::fs::write(&p, vec![0u8; len]).unwrap();
+            let f = std::fs::File::options().write(true).open(&p).unwrap();
+            f.set_modified(now - day * age_days).unwrap();
+        }
+        // 300 bytes of finished parts, cap 150: the oldest goes, then the
+        // next; the fresh one stays even though still over.
+        assert_eq!(super::prune_audio_cache(&dir, 150), (2, 200));
+        let left: std::collections::BTreeSet<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into()).collect();
+        assert_eq!(left, ["art-1.jpg", "part-3.flac", "part-4.part.9.0"].into_iter().map(String::from).collect());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
 fn art_cache_path(thumb: &str) -> std::path::PathBuf {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();

@@ -63,8 +63,8 @@ impl Source {
             // decoded audio and refuse seeks past that guess. Unseekable
             // with no length, it estimates nothing; seeks scan forward from
             // the start, which is fine since every seek reopens the source.
-            Source::Http { cache, prepare: Some(_), .. } if cache.exists() => Ok(Box::new(NoLength(File::open(cache)?))),
-            Source::Http { cache, .. } if cache.exists() => Ok(Box::new(File::open(cache)?)),
+            Source::Http { cache, prepare: Some(_), .. } if cache.exists() => Ok(Box::new(NoLength(open_cached(cache)?))),
+            Source::Http { cache, .. } if cache.exists() => Ok(Box::new(open_cached(cache)?)),
             Source::Http { url, token, cache, prepare: None, .. } => Ok(Box::new(Progressive::start(url, token, CLIENT, cache, stop)?)),
             Source::Http { url, token, cache, prepare: Some(prepare), .. } => {
                 // One transcode session per open, so a reopen (seek, restart)
@@ -216,6 +216,15 @@ impl Drop for Progressive {
 
 static ATTEMPT: AtomicU64 = AtomicU64::new(0);
 
+/// Open a cached track and mark it just played, so the cache's pruning
+/// (oldest modified first) keeps what's in use.
+fn open_cached(path: &std::path::Path) -> std::io::Result<File> {
+    if let Ok(f) = File::options().write(true).open(path) {
+        let _ = f.set_modified(std::time::SystemTime::now());
+    }
+    File::open(path)
+}
+
 impl Progressive {
     fn start(url: &str, token: &str, client: &str, cache: &std::path::Path, stop: Arc<AtomicBool>) -> anyhow::Result<Self> {
         // One temp file per attempt: overlapping downloads of the same track
@@ -236,6 +245,9 @@ impl Progressive {
             .filter(|_| client == CLIENT);
         let n = ATTEMPT.fetch_add(1, Ordering::Relaxed);
         let part = cache.with_extension(format!("part.{}.{n}", std::process::id()));
+        if let Some(dir) = cache.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
         let writer = File::create(&part)?;
         let reader = File::open(&part)?;
         let st = Arc::new(DlState {

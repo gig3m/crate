@@ -70,7 +70,7 @@ impl Crate {
                 url: format!("{base}/music/:/transcode/universal/start.mp3?{q}"),
                 token,
                 // Keeps `part-<id>.` so the engine label still names the part.
-                cache: std::path::PathBuf::from(format!("/scratch/crate-cache/part-{id}.tx{kbps}.mp3")),
+                cache: crate::plex::audio_cache_dir().join(format!("part-{id}.tx{kbps}.mp3")),
                 prepare: Some(format!("{base}/music/:/transcode/universal/decision?{q}")),
                 len_ms: (t.duration_ms > 0).then_some(t.duration_ms),
             };
@@ -79,7 +79,7 @@ impl Crate {
         Source::Http {
             url: format!("{base}{}", t.part_key),
             token,
-            cache: std::path::PathBuf::from(format!("/scratch/crate-cache/part-{id}.{ext}")),
+            cache: crate::plex::audio_cache_dir().join(format!("part-{id}.{ext}")),
             prepare: None,
             len_ms: None,
         }

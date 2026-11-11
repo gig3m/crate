@@ -1442,7 +1442,7 @@ impl Crate {
     }
 
     fn art_path(album_key: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(format!("/scratch/crate-cache/art-{album_key}.jpg"))
+        crate::plex::audio_cache_dir().join(format!("art-{album_key}.jpg"))
     }
 
     /// (Re)start the engine at album track `idx`, `ms` into it.
@@ -2676,6 +2676,23 @@ fn migrate_old_caches() {
 
 fn main() {
     migrate_old_caches();
+    // The track cache: make sure it exists (a missing folder fails every
+    // stream), and keep it under its cap, now and every half hour.
+    {
+        let dir = plex::audio_cache_dir();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("[crate] couldn't create {}: {e}", dir.display());
+        }
+        let _ = std::thread::Builder::new().name("cache-prune".into()).spawn(move || {
+            loop {
+                let (n, bytes) = plex::prune_audio_cache(&dir, plex::AUDIO_CACHE_MAX);
+                if n > 0 {
+                    eprintln!("[crate] cache: removed {n} tracks ({:.1} GB)", bytes as f64 / 1e9);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1800));
+            }
+        });
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,zbus=warn")).init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--sign-out") {
