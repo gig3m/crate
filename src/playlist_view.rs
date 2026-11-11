@@ -94,10 +94,10 @@ impl Crate {
                 }
                 match res {
                     Ok(Ok(d)) => {
-                        // While edits are still going to Plex, the page shows
-                        // where they lead; the last one reloads.
-                        let shown = matches!(&this.view, View::Playlist { key: cur, detail: Some(_), .. } if *cur == key);
-                        if shown && this.playlist_pending(&key) {
+                        // While edits are still going to Plex the server's order
+                        // is half-applied: keep what's on screen (or keep
+                        // loading); the last edit reloads.
+                        if this.playlist_pending(&key) {
                             return;
                         }
                         this.request_thumb(&d.thumb);
@@ -248,6 +248,7 @@ impl Crate {
                     (PlOp::Remove { .. }, Ok(Ok(()))) => this.say(format!("Removed \u{201c}{title}\u{201d}")),
                     (PlOp::Remove { .. }, Ok(Err(e))) => this.say(format!("Couldn't remove \u{201c}{title}\u{201d}: {e:#}")),
                     (PlOp::Move { .. }, Ok(Err(e))) => this.say(format!("Couldn't move \u{201c}{title}\u{201d}: {e:#}")),
+                    (_, Err(_)) => this.say(format!("Couldn't save the change to \u{201c}{title}\u{201d}: the request was dropped")),
                     _ => {}
                 }
                 // Later edits were made against the order this one left; after
@@ -260,9 +261,11 @@ impl Crate {
                     }
                 }
                 this.playlist_op_running = None;
-                // Copies pushed to history while this was in flight are stale too.
-                this.forget_playlist_history(&key);
                 if !this.playlist_pending(&key) {
+                    // Copies pushed to history meanwhile are stale now. (Not
+                    // before: a refetch mid-sequence would show a half-applied
+                    // order to edit against.)
+                    this.forget_playlist_history(&key);
                     if matches!(&this.view, View::Playlist { key: cur, .. } if *cur == key) {
                         this.load_playlist(key.clone(), cx);
                     }
@@ -444,7 +447,7 @@ impl Crate {
                 if missing > 0 {
                     more += &format!(" · {missing} unavailable (no file on the server)");
                 }
-                if d.loaded >= LIMIT && (d.loaded as u64) < n {
+                if d.count > d.loaded as u64 {
                     more += &format!(" · showing the first {LIMIT}");
                 }
                 let len = if mins >= 60 { format!("{} h {} min", mins / 60, mins % 60) } else { format!("{mins} min") };
@@ -619,6 +622,8 @@ impl Crate {
                     .filter(|&id| id > 0);
                 let reorder = !smart && d.item_ids.len() > 1;
                 let last = d.item_ids.len().saturating_sub(1);
+                // Capped at LIMIT: the last row shown isn't the playlist's last.
+                let capped = d.count > d.loaded as u64;
                 let rows: Vec<(usize, crate::plex::Track, u64)> = range.filter_map(|i| Some((i, d.tracks.get(i)?.clone(), d.item_ids.get(i).copied().unwrap_or(0)))).collect();
                 rows.into_iter()
                     .map(|(i, tr, item_id)| {
@@ -784,7 +789,7 @@ impl Crate {
                             if can_edit {
                                 menu = menu.separator();
                                 if reorder {
-                                    for (label, to, show) in [("Move to top", 0, i > 0), ("Move to bottom", last, i < last)] {
+                                    for (label, to, show) in [("Move to top", 0, i > 0), ("Move to bottom", last, i < last && !capped)] {
                                         if !show {
                                             continue;
                                         }
