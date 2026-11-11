@@ -86,13 +86,20 @@ impl Crate {
 
     /// Card formats for the editions of `album` not fetched yet.
     pub(crate) fn request_edition_formats(&mut self, album: &crate::plex::Album, cx: &mut Context<Self>) {
-        let keys: Vec<String> =
-            self.editions(album).iter().filter_map(|(i, _)| self.albums.get(*i)).map(|a| a.rating_key.clone()).filter(|k| !self.edition_formats.contains_key(k)).collect();
+        // Fetch what's unknown, and retry a format that didn't come back last time.
+        let keys: Vec<String> = self
+            .editions(album)
+            .iter()
+            .filter_map(|(i, _)| self.albums.get(*i))
+            .map(|a| a.rating_key.clone())
+            .filter(|k| self.edition_formats.get(k).is_none_or(|(n, f)| f.is_empty() && *n > 0))
+            .collect();
         if keys.is_empty() {
             return;
         }
         for k in &keys {
-            self.edition_formats.insert(k.clone(), (0, String::new()));
+            // Placeholder (keeps a known count) so other pages don't fetch it twice.
+            self.edition_formats.entry(k.clone()).or_insert((0, String::new()));
         }
         let pending = keys.clone();
         let rx = crate::plex_call(move |c| async move { c.edition_info(keys).await });
@@ -102,11 +109,13 @@ impl Crate {
                 // Drop the placeholders, then keep only real answers, so a failed or
                 // empty fetch is retried the next time the album opens.
                 for k in &pending {
-                    this.edition_formats.remove(k);
+                    if this.edition_formats.get(k).is_some_and(|(n, _)| *n == 0) {
+                        this.edition_formats.remove(k);
+                    }
                 }
                 if let Ok(Ok(found)) = res {
-                    // Only complete answers: a timed-out format retries next open.
-                    this.edition_formats.extend(found.into_iter().filter(|(_, _, f)| !f.is_empty()).map(|(k, n, f)| (k, (n, f))));
+                    // Keep a known count even if the format timed out (that retries next open).
+                    this.edition_formats.extend(found.into_iter().filter(|(_, n, f)| *n > 0 || !f.is_empty()).map(|(k, n, f)| (k, (n, f))));
                 }
                 cx.notify();
             })
@@ -577,16 +586,21 @@ impl Crate {
 
 /// Words that mark a release variant rather than a different record
 /// (matched as whole words).
-const EDITION_WORDS: [&str; 26] = [
-    "deluxe", "edition", "editions", "version", "versions", "remaster", "remastered", "remasters", "remix", "remixed", "anniversary",
-    "expanded", "bonus", "special", "standard", "reissue", "reissued", "collector", "collectors", "collector's", "mono", "stereo",
-    "explicit", "clean", "redux", "super",
+const EDITION_WORDS: [&str; 23] = [
+    "deluxe", "edition", "editions", "version", "versions", "remaster", "remastered", "remasters", "anniversary", "expanded", "bonus",
+    "special", "standard", "reissue", "reissued", "collector", "collectors", "collector's", "mono", "stereo", "explicit", "clean", "redux",
 ];
+/// Edition words that are also ordinary title words: alone after " - " / ": "
+/// they need another edition word or a number ("Songs: Clean" is a title).
+const AMBIGUOUS: [&str; 6] = ["clean", "special", "mono", "stereo", "explicit", "standard"];
 /// Words allowed alongside them in a " - " / ": " suffix ("20th Anniversary Edition").
 const EDITION_FILLER: [&str; 12] = ["the", "and", "with", "track", "tracks", "us", "u.s.", "uk", "international", "japanese", "limited", "digital"];
 
 fn words(s: &str) -> Vec<String> {
-    s.split(|c: char| c.is_whitespace() || matches!(c, ',' | '/' | '-' | '(' | ')' | '[' | ']')).filter(|w| !w.is_empty()).map(|w| w.to_lowercase()).collect()
+    s.split(|c: char| c.is_whitespace() || matches!(c, ',' | '/' | '-' | '(' | ')' | '[' | ']' | '&' | '+'))
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase().replace('\u{2019}', "'"))
+        .collect()
 }
 
 /// A bracketed group is an edition marker if it has an edition word.
@@ -598,7 +612,11 @@ fn bracket_is_edition(inner: &str) -> bool {
 /// "20th") and filler, so "TRON: Legacy Reconfigured" stays its own album.
 fn suffix_is_edition(suffix: &str) -> bool {
     let ws = words(suffix);
-    ws.iter().any(|w| EDITION_WORDS.contains(&w.as_str()))
+    let edition: Vec<&String> = ws.iter().filter(|w| EDITION_WORDS.contains(&w.as_str())).collect();
+    let numbered = ws.iter().any(|w| w.chars().any(|c| c.is_ascii_digit()));
+    let only_ambiguous = edition.iter().all(|w| AMBIGUOUS.contains(&w.as_str()));
+    !edition.is_empty()
+        && (!only_ambiguous || edition.len() > 1 || numbered)
         && ws.iter().all(|w| EDITION_WORDS.contains(&w.as_str()) || EDITION_FILLER.contains(&w.as_str()) || w.chars().any(|c| c.is_ascii_digit()))
 }
 
@@ -636,7 +654,7 @@ fn edition_split(title: &str) -> (String, Vec<String>) {
             break;
         }
         // A " - suffix" or ": suffix".
-        if let Some((i, sep)) = [" - ", ": "].iter().filter_map(|sep| rest.rfind(sep).map(|i| (i, sep.len()))).max_by_key(|(i, _)| *i) {
+        if let Some((i, sep)) = [" - ", " \u{2013} ", ": "].iter().filter_map(|sep| rest.rfind(sep).map(|i| (i, sep.len()))).max_by_key(|(i, _)| *i) {
             let suffix = rest[i + sep..].trim().to_string();
             if suffix_is_edition(&suffix) && i > 0 {
                 marks.push(suffix);
@@ -691,5 +709,11 @@ mod edition_tests {
         assert_eq!(edition_label("Greatest Hits: Standards"), "Original");
         assert_eq!(edition_label("OK Computer - 20th Anniversary Edition"), "20th Anniversary Edition");
         assert_eq!(edition_label("Hoobastank (20th Anniversary Edition)"), "20th Anniversary Edition");
+        assert_eq!(edition_label("Album: Collector\u{2019}s Edition"), "Collector\u{2019}s Edition");
+        assert_eq!(edition_label("Album: Expanded & Remastered"), "Expanded & Remastered");
+        assert_eq!(edition_label("Album \u{2013} Remastered"), "Remastered");
+        assert_eq!(edition_label("Songs: Clean"), "Original");
+        assert_eq!(edition_label("Live - Special"), "Original");
+        assert_eq!(edition_label("Album - Special Edition"), "Special Edition");
     }
 }
