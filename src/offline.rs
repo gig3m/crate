@@ -33,6 +33,12 @@ pub struct KeptAlbum {
     pub tracks: Vec<KeptTrack>,
     /// Every track is on disk.
     pub complete: bool,
+    /// Bytes on disk, updated when a download run ends (not stat'd per frame).
+    #[serde(default)]
+    pub bytes: u64,
+    /// Why the last download stopped, until it's retried.
+    #[serde(default)]
+    pub failed: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -60,38 +66,93 @@ pub struct Offline {
     pub index: Index,
     pub job: Option<Job>,
     pub queue: VecDeque<String>,
+    /// Part keys of kept tracks on this server: the only ones played locally.
+    pub kept_parts: std::collections::HashSet<String>,
+}
+
+impl Offline {
+    pub fn new() -> Self {
+        let index = load();
+        let queue = index.albums.iter().filter(|a| !a.complete && a.failed.is_none()).map(|a| a.key.clone()).collect();
+        let mut o = Offline { index, job: None, queue, kept_parts: Default::default() };
+        o.reindex();
+        o
+    }
+
+    fn reindex(&mut self) {
+        self.kept_parts = self.index.albums.iter().flat_map(|a| a.tracks.iter().map(|t| t.part_key.clone())).collect();
+    }
+
+    /// The local copy of a kept track, if it's on disk.
+    pub fn local(&self, part_key: &str) -> Option<PathBuf> {
+        if !self.kept_parts.contains(part_key) {
+            return None;
+        }
+        file_for(part_key).filter(|p| p.exists())
+    }
+}
+
+/// Offline files belong to one server: part ids are only unique per server.
+static SCOPE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Set once at startup from the account (server machine id, else its URL).
+pub fn set_scope(server_id: &str, url: &str) {
+    let key = if server_id.is_empty() {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        url.hash(&mut h);
+        format!("url-{:016x}", h.finish())
+    } else {
+        server_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect()
+    };
+    let _ = SCOPE.set(key);
 }
 
 pub fn dir() -> PathBuf {
     let base = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"));
-    base.join("crate/offline")
+    base.join("crate/offline").join(SCOPE.get().map(String::as_str).unwrap_or("default"))
 }
 
-/// Where a part's file lives once kept.
-pub fn file_for(part_key: &str) -> PathBuf {
-    let id = part_key.split('/').nth(3).unwrap_or("x");
-    let ext = part_key.rsplit('.').next().filter(|e| e.len() <= 5 && !e.contains('/')).unwrap_or("bin");
-    dir().join(format!("part-{id}.{ext}"))
+/// Where a part's file lives once kept: `/library/parts/<numeric id>/...`;
+/// anything else isn't kept (two tracks must never share a file).
+pub fn file_for(part_key: &str) -> Option<PathBuf> {
+    let mut seg = part_key.split('/');
+    let (_, lib, parts, id) = (seg.next(), seg.next(), seg.next(), seg.next());
+    if lib != Some("library") || parts != Some("parts") {
+        return None;
+    }
+    let id = id.filter(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()))?;
+    let ext = part_key.rsplit('.').next().filter(|e| (1..=5).contains(&e.len()) && e.bytes().all(|b| b.is_ascii_alphanumeric())).unwrap_or("bin");
+    Some(dir().join(format!("part-{id}.{ext}")))
 }
 
+/// A corrupt index is set aside (not overwritten) so its files stay findable.
 pub fn load() -> Index {
-    std::fs::read_to_string(dir().join("index.json")).ok().and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default()
-}
-
-fn save(idx: &Index) {
-    let d = dir();
-    let _ = std::fs::create_dir_all(&d);
-    let tmp = d.join("index.json.tmp");
-    if std::fs::write(&tmp, serde_json::to_vec_pretty(idx).unwrap_or_default()).is_ok() {
-        let _ = std::fs::rename(&tmp, d.join("index.json"));
+    let p = dir().join("index.json");
+    let Ok(raw) = std::fs::read_to_string(&p) else { return Index::default() };
+    match serde_json::from_str(&raw) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("[crate] offline index unreadable ({e}); moved aside");
+            let _ = std::fs::rename(&p, p.with_extension("json.corrupt"));
+            Index::default()
+        }
     }
 }
 
-/// Bytes on disk for a kept album.
+fn save(idx: &Index) -> std::io::Result<()> {
+    let d = dir();
+    std::fs::create_dir_all(&d)?;
+    let tmp = d.join("index.json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(idx).unwrap_or_default())?;
+    std::fs::rename(&tmp, d.join("index.json"))
+}
+
+/// Bytes on disk for a kept album (stats every file: call off the render path).
 pub fn album_bytes(a: &KeptAlbum) -> u64 {
-    a.tracks.iter().filter_map(|t| std::fs::metadata(file_for(&t.part_key)).ok()).map(|m| m.len()).sum()
+    a.tracks.iter().filter_map(|t| file_for(&t.part_key)).filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum()
 }
 
 pub fn fmt_bytes(b: u64) -> String {
@@ -104,9 +165,34 @@ pub fn fmt_bytes(b: u64) -> String {
 
 impl Crate {
     /// Keep an album offline (or, if kept, stop keeping it).
+    fn save_offline(&mut self) {
+        self.offline.reindex();
+        if let Err(e) = save(&self.offline.index) {
+            self.status = format!("Couldn't save the offline list: {e}").into();
+        }
+    }
+
     pub(crate) fn toggle_offline(&mut self, album: Album, tracks: Vec<Track>, cx: &mut Context<Self>) {
         if self.offline.index.get(&album.rating_key).is_some() {
             self.remove_offline(&album.rating_key, cx);
+        } else {
+            self.keep_offline(album, tracks, cx);
+        }
+    }
+
+    /// Retry a failed album.
+    pub(crate) fn retry_offline(&mut self, key: &str, cx: &mut Context<Self>) {
+        if let Some(a) = self.offline.index.albums.iter_mut().find(|a| a.key == key) {
+            a.failed = None;
+            self.offline.queue.push_back(key.to_string());
+            self.save_offline();
+            self.pump_offline(cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn keep_offline(&mut self, album: Album, tracks: Vec<Track>, cx: &mut Context<Self>) {
+        if self.offline.index.get(&album.rating_key).is_some() {
             return;
         }
         let kept = KeptAlbum {
@@ -116,13 +202,20 @@ impl Crate {
             thumb: album.thumb.clone(),
             tracks: tracks
                 .iter()
-                .filter(|t| !t.part_key.is_empty())
+                .filter(|t| file_for(&t.part_key).is_some())
                 .map(|t| KeptTrack { rating_key: t.rating_key.clone(), part_key: t.part_key.clone(), title: t.title.clone() })
                 .collect(),
             complete: false,
+            bytes: 0,
+            failed: None,
         };
+        if kept.tracks.is_empty() {
+            self.status = format!("{} has no files Crate can keep offline", album.title).into();
+            cx.notify();
+            return;
+        }
         self.offline.index.albums.push(kept);
-        save(&self.offline.index);
+        self.save_offline();
         self.offline.queue.push_back(album.rating_key);
         self.pump_offline(cx);
         cx.notify();
@@ -138,13 +231,12 @@ impl Crate {
             // Keep files another kept album still uses (the same part in a compilation).
             for t in &a.tracks {
                 let shared = self.offline.index.albums.iter().any(|o| o.tracks.iter().any(|x| x.part_key == t.part_key));
-                if !shared {
-                    let p = file_for(&t.part_key);
+                if !shared && let Some(p) = file_for(&t.part_key) {
+                    let _ = std::fs::remove_file(crate::plex::partial_path(&p));
                     let _ = std::fs::remove_file(&p);
-                    let _ = std::fs::remove_file(p.with_extension("part"));
                 }
             }
-            save(&self.offline.index);
+            self.save_offline();
         }
         cx.notify();
     }
@@ -172,17 +264,17 @@ impl Crate {
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
-                let dest = file_for(&t.part_key);
+                let Some(dest) = file_for(&t.part_key) else { continue };
                 if !dest.exists() {
                     let (pk, b, c, d) = (t.part_key.clone(), bytes.clone(), cancel.clone(), dest.clone());
                     let mut rx = crate::plex_call(move |cl| async move { cl.download(&pk, &d, b, c).await });
                     // Refresh the progress display while the file comes in (GPUI
                     // timer: this task doesn't run on tokio).
                     let res = loop {
-                        cx.background_executor().timer(Duration::from_millis(500)).await;
                         match rx.try_recv() {
                             Ok(r) => break Ok(r),
                             Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                                cx.background_executor().timer(Duration::from_millis(250)).await;
                                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                                     return;
                                 }
@@ -199,6 +291,7 @@ impl Crate {
                         }
                         Err(()) => {
                             eprintln!("[crate] offline: download task ended without a result");
+                            failed = Some(format!("{}: download ended unexpectedly", t.title));
                             break;
                         }
                     }
@@ -218,11 +311,14 @@ impl Crate {
             this.update(cx, |this, cx| {
                 let cancelled = cancel.load(Ordering::Relaxed);
                 this.offline.job = None;
+                let failed = failed.filter(|_| !cancelled);
                 if let Some(a) = this.offline.index.albums.iter_mut().find(|a| a.key == key) {
-                    a.complete = a.tracks.iter().all(|t| file_for(&t.part_key).exists());
+                    a.complete = !a.tracks.is_empty() && a.tracks.iter().all(|t| file_for(&t.part_key).is_some_and(|p| p.exists()));
+                    a.bytes = album_bytes(a);
+                    a.failed = if a.complete { None } else { failed.clone() };
                 }
-                save(&this.offline.index);
-                if let Some(e) = failed.filter(|_| !cancelled) {
+                this.save_offline();
+                if let Some(e) = failed {
                     this.status = format!("Offline download stopped: {e}").into();
                 }
                 this.pump_offline(cx);

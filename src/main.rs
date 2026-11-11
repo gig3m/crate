@@ -362,7 +362,7 @@ impl Crate {
                         if let Ok(key) = std::env::var("CRATE_KEEP_OFFLINE")
                             && let Some(album) = this.albums.iter().find(|a| a.rating_key == key).cloned()
                         {
-                            this.with_tracks(album, cx, |this, album, tracks, cx| this.toggle_offline(album, tracks, cx));
+                            this.with_tracks(album, cx, |this, album, tracks, cx| this.keep_offline(album, tracks, cx));
                         }
                         // Test hooks: CRATE_SORT=artist|title|year|plays, CRATE_FILTER=Decade:1990s:decade=1990
                         if let Ok(v) = std::env::var("CRATE_SORT") {
@@ -546,12 +546,8 @@ impl Crate {
             audio_info: None,
             prompt_copied: false,
             raise_requested: false,
-            offline: {
-                let index = offline::load();
-                // Albums left half-downloaded last time pick up where they stopped.
-                let queue = index.albums.iter().filter(|a| !a.complete).map(|a| a.key.clone()).collect();
-                offline::Offline { index, job: None, queue }
-            },
+            // Albums left half-downloaded last time pick up where they stopped.
+            offline: offline::Offline::new(),
             history: None,
             top_tracks: None,
             artist_cache: Vec::new(),
@@ -1909,6 +1905,7 @@ fn main() {
     instance::listen(transport_tx.clone());
     let acct = rt.block_on(account::ensure_reachable(acct));
     let (base, token, section) = (acct.url.clone(), acct.token.clone(), acct.section.clone());
+    offline::set_scope(&acct.server_id, &acct.url);
     let _ = SECTION.set(section.clone());
 
     // tokio lives on its own threads; GPUI never sees it except via channels.

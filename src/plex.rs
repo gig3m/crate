@@ -562,25 +562,39 @@ impl Client {
     ) -> anyhow::Result<u64> {
         use std::sync::atomic::Ordering;
         use tokio::io::AsyncWriteExt;
-        let mut res = self
+        let send = self
             .http
             .get(format!("{}{part_key}", self.base))
             .header("X-Plex-Token", &self.token)
             .header("X-Plex-Client-Identifier", client_id())
-            .send()
-            .await?
-            .error_for_status()?;
+            .send();
+        let mut res = tokio::time::timeout(std::time::Duration::from_secs(30), send).await.map_err(|_| anyhow::anyhow!("server didn't answer"))??.error_for_status()?;
         if let Some(dir) = dest.parent() {
             tokio::fs::create_dir_all(dir).await?;
         }
         // Read before the body: reqwest reports what's left once chunks are consumed.
         let expected = res.content_length();
-        let tmp = dest.with_extension("part");
+        let tmp = partial_path(dest);
         let mut f = tokio::fs::File::create(&tmp).await?;
         let mut n = 0u64;
         let r: anyhow::Result<()> = async {
-            while let Some(chunk) = res.chunk().await? {
+            // Wait for each chunk in 1 s slices so cancel takes effect even when
+            // the server stalls; 30 s with no data is a failure.
+            let mut idle = 0;
+            loop {
                 anyhow::ensure!(!cancel.load(Ordering::Relaxed), "cancelled");
+                let chunk = match tokio::time::timeout(std::time::Duration::from_secs(1), res.chunk()).await {
+                    Err(_) => {
+                        idle += 1;
+                        anyhow::ensure!(idle < 30, "the server stopped sending data");
+                        continue;
+                    }
+                    Ok(c) => match c? {
+                        Some(c) => c,
+                        None => break,
+                    },
+                };
+                idle = 0;
                 f.write_all(&chunk).await?;
                 n += chunk.len() as u64;
                 progress.fetch_add(chunk.len() as u64, Ordering::Relaxed);
@@ -921,6 +935,13 @@ fn urlencode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+/// Where a download is written before it's complete: `<file>.part`.
+pub fn partial_path(dest: &std::path::Path) -> std::path::PathBuf {
+    let mut name = dest.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(".part");
+    dest.with_file_name(name)
 }
 
 /// A per-install client id, so two machines running Crate are two clients

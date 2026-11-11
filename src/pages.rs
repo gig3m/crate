@@ -279,9 +279,9 @@ impl Crate {
     }
 
     pub(crate) fn offline_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use crate::offline::{album_bytes, fmt_bytes};
+        use crate::offline::fmt_bytes;
         let albums = self.offline.index.albums.clone();
-        let sizes: Vec<u64> = albums.iter().map(album_bytes).collect();
+        let sizes: Vec<u64> = albums.iter().map(|a| a.bytes).collect();
         let total: u64 = sizes.iter().sum();
         let rows: Vec<_> = albums
             .into_iter()
@@ -289,11 +289,15 @@ impl Crate {
             .enumerate()
             .map(|(i, (a, size))| {
                 let job = self.offline.job.as_ref().filter(|j| j.key == a.key);
+                let queued = self.offline.queue.contains(&a.key);
                 let state = match job {
                     Some(j) => format!("downloading {}/{}", j.done_tracks, j.total_tracks),
                     None if a.complete => format!("{} tracks · {}", a.tracks.len(), fmt_bytes(size)),
-                    None => "queued".into(),
+                    None if queued => "queued".into(),
+                    None => "download failed".into(),
                 };
+                let can_retry = job.is_none() && !a.complete && !queued;
+                let rk = a.key.clone();
                 let ix = self.albums.iter().position(|x| x.rating_key == a.key);
                 let key = a.key.clone();
                 div()
@@ -319,7 +323,32 @@ impl Crate {
                             .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(a.artist.clone()))
                             .when_some(ix, |d, ix| d.on_click(cx.listener(move |this, _, _, cx| this.open_album(ix, cx)))),
                     )
-                    .child(div().font_family(MONO).text_size(px(12.0)).text_color(rgb(if a.complete { t.healthy } else { t.muted })).child(state))
+                    .child(
+                        div()
+                            .font_family(MONO)
+                            .text_size(px(12.0))
+                            .text_color(rgb(if a.complete { t.healthy } else if can_retry { t.red } else { t.muted }))
+                            .child(state),
+                    )
+                    .when(can_retry, |d| {
+                        d.child(
+                            div()
+                                .id(("kept-retry", i))
+                                .px(px(10.0))
+                                .h(px(28.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(14.0))
+                                .border_1()
+                                .border_color(rgb(t.line))
+                                .text_size(px(12.0))
+                                .text_color(rgb(t.text2))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgb(t.raised)))
+                                .child("Retry")
+                                .on_click(cx.listener(move |this, _, _, cx| this.retry_offline(&rk, cx))),
+                        )
+                    })
                     .child(
                         div()
                             .id(("kept-rm", i))

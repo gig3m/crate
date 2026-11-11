@@ -246,7 +246,14 @@ impl Crate {
                         )
                     })
                     .when(job.is_none() && kept.as_ref().is_some_and(|k| !k.complete), |d| {
-                        d.child(div().font_family(MONO).text_size(px(12.0)).text_color(rgb(t.muted)).child("queued"))
+                        let queued = self.offline.queue.contains(&album.rating_key);
+                        d.child(
+                            div()
+                                .font_family(MONO)
+                                .text_size(px(12.0))
+                                .text_color(rgb(if queued { t.muted } else { t.red }))
+                                .child(if queued { "queued" } else { "failed: see Offline" }),
+                        )
                     })
                     .when(kept.as_ref().is_some_and(|k| k.complete), |d| {
                         d.child(div().font_family(MONO).text_size(px(12.0)).text_color(rgb(t.healthy)).child("offline"))
