@@ -407,6 +407,8 @@ impl Crate {
                         let cur_key = keys.next().flatten();
                         if !remap(&mut this.view, &cur_key) {
                             this.view = View::Library;
+                            // A track cursor would be read as a grid cell.
+                            this.cursor = None;
                         }
                         let back: Vec<View> = std::mem::take(&mut this.back);
                         this.back = back.into_iter().filter_map(|mut v| remap(&mut v, &keys.next().flatten()).then_some(v)).collect();
