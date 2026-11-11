@@ -2769,15 +2769,20 @@ fn main() {
     offline::set_scope(&acct.server_id, &saved_url);
     // Remote when the address in use is one Plex lists as not local (or a
     // relay), unless its host resolves to a private or Tailscale IP (e.g.
-    // plex.example.com over the tailnet): that never crosses the internet.
+    // plex.example.com over the tailnet): LAN and tailnet links are treated as
+    // fast enough for direct play, even though a tailnet path may cross the
+    // internet. Relays always stay remote.
     // An address Plex doesn't list (PLEX_URL) counts as local.
     // CRATE_REMOTE=1/0 overrides, for testing.
     let remote = match std::env::var("CRATE_REMOTE").ok().as_deref() {
         Some("1") => true,
         Some("0") => false,
         _ => {
-            acct.connections.iter().find(|c| c.uri == acct.url).is_some_and(|c| !c.local || c.relay)
-                && !rt.block_on(account::resolves_private(&acct.url))
+            match acct.connections.iter().find(|c| c.uri == acct.url) {
+                Some(c) if c.relay => true,
+                Some(c) if !c.local => !rt.block_on(account::resolves_private(&acct.url)),
+                _ => false,
+            }
         }
     };
     if std::env::var_os("CRATE_TRACE").is_some() {

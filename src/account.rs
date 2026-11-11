@@ -372,8 +372,8 @@ pub async fn music_sections(http: &reqwest::Client, url: &str, token: &str) -> a
 
 /// True when every address `url`'s host resolves to is on a private
 /// network: RFC 1918, Tailscale/CGNAT (100.64/10), loopback, link-local,
-/// or IPv6 ULA/link-local. Such a server is reached without crossing the
-/// internet (LAN or tailnet), whatever Plex labels the address.
+/// or IPv6 ULA/link-local: a LAN or tailnet (VPN) address, as opposed to a
+/// public one. A tailnet path may still cross the internet.
 pub async fn resolves_private(url: &str) -> bool {
     let Ok(u) = reqwest::Url::parse(url) else { return false };
     let Some(host) = u.host_str().map(str::to_owned) else { return false };
