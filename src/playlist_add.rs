@@ -13,6 +13,8 @@ pub(crate) enum NameFor {
     Albums(Vec<String>),
     /// A smart playlist from the library's album filter query.
     Smart(String),
+    /// A new name for this playlist.
+    Rename(String),
 }
 
 pub(crate) struct Naming {
@@ -73,6 +75,11 @@ impl Crate {
             NameFor::Smart(query) => {
                 let t = title.clone();
                 (crate::plex_call(move |c| async move { c.create_smart_playlist(&section, &t, &query).await }), None)
+            }
+            NameFor::Rename(key) => {
+                self.playlist_busy = false;
+                self.rename_playlist(key, title, cx);
+                return;
             }
         };
         self.say(format!("Creating \u{201c}{title}\u{201d}…"));
@@ -231,6 +238,7 @@ impl Crate {
             NameFor::Albums(ref k) if k.len() == 1 => "New playlist".to_string(),
             NameFor::Albums(ref k) => format!("New playlist · {} albums", k.len()),
             NameFor::Smart(_) => "New smart playlist · updates as the library changes".to_string(),
+            NameFor::Rename(_) => "Rename playlist".to_string(),
         };
         let btn = |id: &'static str, label: &'static str, primary: bool| {
             div()
@@ -292,7 +300,7 @@ impl Crate {
                                         .bg(rgb(t.surface))
                                         .child(Input::new(&n.input).appearance(false)),
                                 )
-                                .child(btn("naming-save", "Create", true).on_click(cx.listener(|this, _, _, cx| this.commit_naming(cx))))
+                                .child(btn("naming-save", if matches!(n.what, NameFor::Rename(_)) { "Rename" } else { "Create" }, true).on_click(cx.listener(|this, _, _, cx| this.commit_naming(cx))))
                                 .child(btn("naming-cancel", "Cancel", false).on_click(cx.listener(|this, _, _, cx| this.cancel_naming(cx)))),
                         ),
                 )

@@ -1043,6 +1043,36 @@ impl Client {
         })
     }
 
+    /// Rename a playlist.
+    pub async fn rename_playlist(&self, playlist: &str, title: &str) -> anyhow::Result<()> {
+        let res = self
+            .http
+            .put(format!("{}/playlists/{playlist}?title={}", self.base, urlencode(title)))
+            .timeout(std::time::Duration::from_secs(30))
+            .header("Accept", "application/json")
+            .header("X-Plex-Token", &self.token)
+            .header("X-Plex-Client-Identifier", client_id())
+            .send()
+            .await?;
+        anyhow::ensure!(res.status().is_success(), "Plex answered {}", res.status());
+        Ok(())
+    }
+
+    /// Delete a playlist (its tracks stay in the library).
+    pub async fn delete_playlist(&self, playlist: &str) -> anyhow::Result<()> {
+        let res = self
+            .http
+            .delete(format!("{}/playlists/{playlist}", self.base))
+            .timeout(std::time::Duration::from_secs(30))
+            .header("Accept", "application/json")
+            .header("X-Plex-Token", &self.token)
+            .header("X-Plex-Client-Identifier", client_id())
+            .send()
+            .await?;
+        anyhow::ensure!(res.status().is_success(), "Plex answered {}", res.status());
+        Ok(())
+    }
+
     /// Remove one item (by playlist item id) from a regular playlist.
     pub async fn remove_from_playlist(&self, playlist: &str, item_id: u64) -> anyhow::Result<()> {
         let res = self

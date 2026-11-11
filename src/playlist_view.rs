@@ -149,6 +149,79 @@ impl Crate {
         .detach();
     }
 
+    pub(crate) fn rename_playlist(&mut self, key: String, title: String, cx: &mut Context<Self>) {
+        self.playlist_busy = true;
+        let (k, t) = (key.clone(), title.clone());
+        let rx = crate::plex_call(move |c| async move { c.rename_playlist(&k, &t).await });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                this.playlist_busy = false;
+                match res {
+                    Ok(Ok(())) => {
+                        this.say(format!("Renamed to \u{201c}{title}\u{201d}"));
+                        if let View::Playlist { key: cur, title: t, .. } = &mut this.view
+                            && *cur == key
+                        {
+                            *t = title.clone();
+                        }
+                        this.forget_playlist_history(&key);
+                        if matches!(&this.view, View::Playlist { key: cur, .. } if *cur == key) {
+                            this.load_playlist(key, cx);
+                        }
+                        this.reload_playlists(cx);
+                    }
+                    Ok(Err(e)) => this.say(format!("Couldn't rename: {e:#}")),
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Test hook entry for the Delete button.
+    pub(crate) fn delete_playlist_clicked_pub(&mut self, key: String, title: String, cx: &mut Context<Self>) {
+        self.delete_playlist_clicked(key, title, cx);
+    }
+
+    /// Delete takes two clicks: the first arms it for a few seconds.
+    fn delete_playlist_clicked(&mut self, key: String, title: String, cx: &mut Context<Self>) {
+        let armed = self.playlist_delete_armed.as_ref().is_some_and(|(k, at)| *k == key && at.elapsed() < std::time::Duration::from_secs(4));
+        if !armed {
+            self.playlist_delete_armed = Some((key, std::time::Instant::now()));
+            self.say(format!("Click Delete again to delete \u{201c}{title}\u{201d} (its tracks stay in your library)"));
+            cx.notify();
+            return;
+        }
+        self.playlist_delete_armed = None;
+        let k = key.clone();
+        let rx = crate::plex_call(move |c| async move { c.delete_playlist(&k).await });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok(Ok(())) => {
+                        this.say(format!("Deleted \u{201c}{title}\u{201d}"));
+                        // Drop it from history, and leave its page.
+                        this.back.retain(|v| !matches!(v, View::Playlist { key: k, .. } if *k == key));
+                        this.fwd.retain(|v| !matches!(v, View::Playlist { key: k, .. } if *k == key));
+                        if matches!(&this.view, View::Playlist { key: cur, .. } if *cur == key) {
+                            this.view = View::Soon("playlists");
+                        }
+                        this.reload_playlists(cx);
+                    }
+                    Ok(Err(e)) => this.say(format!("Couldn't delete \u{201c}{title}\u{201d}: {e:#}")),
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Copies of a playlist page in Back/Forward history refetch on return.
     fn forget_playlist_history(&mut self, key: &str) {
         for v in self.back.iter_mut().chain(self.fwd.iter_mut()) {
@@ -287,7 +360,34 @@ impl Crate {
                     .hover(|d| d.bg(rgb(t.raised)))
                     .child(icons::icon("shuffle", 18.0, t.text))
                     .on_click(cx.listener(|this, _, _, cx| this.play_playlist_from(0, true, cx))),
-            );
+            )
+            .child(div().flex_1())
+            .when(detail.is_some(), |d| {
+                let (k1, t1, k2, t2) = (key.to_string(), title.to_string(), key.to_string(), title.to_string());
+                let armed = self.playlist_delete_armed.as_ref().is_some_and(|(k, at)| k == key && at.elapsed() < std::time::Duration::from_secs(4));
+                let pill = |id: &'static str, label: &'static str, color: u32| {
+                    div()
+                        .id(id)
+                        .h(px(34.0))
+                        .px(px(14.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(17.0))
+                        .border_1()
+                        .border_color(rgb(t.line))
+                        .text_size(px(13.0))
+                        .text_color(rgb(color))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(rgb(t.raised)))
+                        .child(label)
+                };
+                d.child(pill("pl-rename", "Rename", t.text).on_click(cx.listener(move |this, _, window, cx| {
+                    this.start_naming(crate::playlist_add::NameFor::Rename(k1.clone()), t1.clone(), window, cx);
+                })))
+                .child(pill("pl-delete", if armed { "Click again to delete" } else { "Delete" }, if armed { t.red } else { t.text2 }).on_click(cx.listener(
+                    move |this, _, _, cx| this.delete_playlist_clicked(k2.clone(), t2.clone(), cx),
+                )))
+            });
 
         let head = div()
             .mx(px(PAD_X))

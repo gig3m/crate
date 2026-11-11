@@ -115,6 +115,8 @@ struct Crate {
     playlist_error: Option<(String, String)>,
     /// Playlist item ids being removed: kept off any page load meanwhile.
     playlist_removing: HashSet<u64>,
+    /// A playlist's Delete clicked once (key, when): a second click deletes.
+    playlist_delete_armed: Option<(String, Instant)>,
     /// A queue waiting on loudness before it starts (its queue_seq); cleared
     /// by any transport action or explicit start, which supersede it.
     pending_start: Option<u64>,
@@ -727,6 +729,7 @@ impl Crate {
             playlist_load_gen: 0,
             playlist_error: None,
             playlist_removing: HashSet::new(),
+            playlist_delete_armed: None,
             eq_preset,
             eq_custom,
             eq_sliders,
@@ -2113,6 +2116,18 @@ impl Render for Crate {
                             }
                             k if k.starts_with("plopen:") => this.open_playlist(k[7..].to_string(), "test".into(), cx),
                             k if k.starts_with("plplay:") => this.play_playlist_from(k[7..].parse().unwrap_or(0), false, cx),
+                            k if k.starts_with("plrename:") => {
+                                if let View::Playlist { key, .. } = &this.view {
+                                    let key = key.clone();
+                                    this.start_naming(playlist_add::NameFor::Rename(key), k[9..].to_string(), window, cx);
+                                }
+                            }
+                            "pldel" => {
+                                if let View::Playlist { key, title, .. } = &this.view {
+                                    let (k, t) = (key.clone(), title.clone());
+                                    this.delete_playlist_clicked_pub(k, t, cx);
+                                }
+                            }
                             k if k.starts_with("plrm:") => this.remove_playlist_row(k[5..].parse().unwrap_or(0), cx),
                             k if k.starts_with("pladd:") => this.add_selection_to_playlist(k[6..].to_string(), "test".into(), cx),
                             "j" => this.move_cursor(1, cx),
