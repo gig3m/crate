@@ -21,6 +21,7 @@ mod library;
 mod pages;
 mod playlist_add;
 mod playlist_view;
+mod viz;
 mod palette;
 mod queue;
 mod mpris;
@@ -106,6 +107,8 @@ struct Crate {
     /// A playlist create/add is in flight (one at a time).
     playlist_busy: bool,
     playlist_scroll: UniformListScrollHandle,
+    /// Track bar visualizer (style, colors, live-view state, drag).
+    viz: std::cell::RefCell<viz::Viz>,
     /// Bumped per playlist page load; stale replies are dropped.
     playlist_load_gen: u64,
     /// (playlist key, error) when its page failed to load.
@@ -461,6 +464,7 @@ impl Crate {
             }
         })
         .detach();
+        Self::start_viz_ticker(cx);
         cx.subscribe(&search, |this, input, ev: &gpui_component::input::InputEvent, cx| {
             use gpui_component::input::InputEvent;
             if let InputEvent::Change = ev {
@@ -719,6 +723,7 @@ impl Crate {
             naming: None,
             playlist_busy: false,
             playlist_scroll: UniformListScrollHandle::new(),
+            viz: std::cell::RefCell::new(viz::Viz::load()),
             playlist_load_gen: 0,
             playlist_error: None,
             playlist_removing: HashSet::new(),

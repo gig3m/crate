@@ -115,24 +115,9 @@ impl Crate {
                     })
                     .on_click(cx.listener(|this, _, _, cx| this.cycle_repeat(cx)))
             });
+        // While dragging to seek, the time shows where the drop would land.
+        let shown_ms = self.viz.borrow().drag.map(|f| (f as f64 * len_ms as f64) as u64).unwrap_or(elapsed);
         let levels = now.and_then(|n| self.track_detail.get(&n.tracks[n.idx].rating_key)).and_then(|d| d.as_ref()).map(|d| &d.levels).filter(|l| !l.is_empty());
-        let bars: Vec<_> = (0..BARS)
-            .map(|i| {
-                let ms = len_ms * i as u64 / BARS as u64;
-                let filled = (i as f32 + 0.5) / BARS as f32 <= frac;
-                // Real loudness levels when the server has them, else a flat line.
-                let h = levels.and_then(|l| l.get(i)).map(|&v| (3.0 + 19.0 * v).round()).unwrap_or(4.0);
-                div()
-                    .id(("seek", i))
-                    .flex_1()
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .child(div().w_full().h(px(h)).rounded(px(1.0)).bg(rgb(if filled { t.accent } else { t.line })))
-                    .when(len_ms > 0, |d| d.on_click(cx.listener(move |this, _, _, cx| this.transport(Transport::SetPosition(ms), cx))))
-            })
-            .collect();
         let center = div()
             .flex_1()
             .min_w_0()
@@ -151,8 +136,8 @@ impl Crate {
                     .font_family(MONO)
                     .text_size(px(11.0))
                     .text_color(rgb(t.muted))
-                    .child(div().w(px(36.0)).flex().justify_end().child(fmt_ms(elapsed)))
-                    .child(div().flex_1().flex().gap(px(1.5)).children(bars))
+                    .child(div().w(px(36.0)).flex().justify_end().child(fmt_ms(shown_ms)))
+                    .child(self.track_viz("track-bar", 22.0, frac, len_ms, levels, cx))
                     .child(div().w(px(36.0)).child(fmt_ms(len_ms))),
             );
 

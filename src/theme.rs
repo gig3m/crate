@@ -139,6 +139,20 @@ pub fn save_fade(secs: u32) -> std::io::Result<()> {
     save_key("fade", toml::Value::Integer(secs as i64))
 }
 
+/// Track bar visualizer: (style key, palette index).
+pub fn saved_viz() -> (String, usize) {
+    let raw = std::fs::read_to_string(config_path()).unwrap_or_default();
+    let map: HashMap<String, toml::Value> = toml::from_str(&raw).unwrap_or_default();
+    let style = map.get("viz").and_then(|v| v.as_str()).unwrap_or("sonic").to_string();
+    let palette = map.get("viz_colors").and_then(|v| v.as_integer()).map(|v| v.max(0) as usize).unwrap_or(0);
+    (style, palette)
+}
+
+pub fn save_viz(style: &str, palette: usize) -> std::io::Result<()> {
+    save_key("viz", toml::Value::String(style.into()))?;
+    save_key("viz_colors", toml::Value::Integer(palette as i64))
+}
+
 /// Remote streaming quality, kbps: 0 = original file. Applies only when the
 /// server address in use isn't on this network (canvas: "Original on LAN").
 pub const REMOTE_QUALITIES: [u32; 4] = [0, 320, 192, 128];

@@ -163,6 +163,57 @@ pub struct Stats {
     pub eq_gains: [AtomicU32; 10],
     pub eq_preamp: AtomicU32,
     pub eq_gen: AtomicU64,
+    /// The last few thousand frames sent to PipeWire, for visualizers.
+    pub scope: Scope,
+}
+
+/// A lock-free tap of the output: the RT thread overwrites a ring of
+/// interleaved stereo samples (f32 bits) and bumps `head`; readers copy the
+/// latest frames. A torn read only costs a visual glitch.
+pub struct Scope {
+    ring: Box<[AtomicU32]>,
+    head: AtomicU64,
+    /// Rate of the samples in the ring (Hz).
+    pub rate: AtomicU32,
+}
+
+/// Frames the scope keeps.
+pub const SCOPE_FRAMES: usize = 4096;
+
+impl Default for Scope {
+    fn default() -> Self {
+        Self { ring: (0..SCOPE_FRAMES * CHANNELS).map(|_| AtomicU32::new(0)).collect(), head: AtomicU64::new(0), rate: AtomicU32::new(0) }
+    }
+}
+
+impl std::fmt::Debug for Scope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Scope")
+    }
+}
+
+impl Scope {
+    #[inline]
+    fn push(&self, at: u64, sample: f32) {
+        let n = self.ring.len() as u64;
+        self.ring[(at % n) as usize].store(sample.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The latest `frames` frames (oldest first), interleaved stereo, into `out`.
+    /// Returns false when nothing has played yet.
+    pub fn latest(&self, frames: usize, out: &mut Vec<f32>) -> bool {
+        let frames = frames.min(SCOPE_FRAMES);
+        let head = self.head.load(Ordering::Acquire);
+        out.clear();
+        if head == 0 {
+            return false;
+        }
+        let n = self.ring.len() as u64;
+        let want = (frames * CHANNELS) as u64;
+        let start = head.saturating_sub(want);
+        out.extend((start..head).map(|i| f32::from_bits(self.ring[(i % n) as usize].load(Ordering::Relaxed))));
+        true
+    }
 }
 
 impl Stats {
@@ -821,11 +872,16 @@ fn pw_thread(
                             if frames > 0 {
                                 let chunk = cons.read_chunk(frames * CHANNELS).unwrap();
                                 let (a, b) = chunk.as_slices();
+                                let scope = &rt.stats.scope;
+                                let base = scope.head.load(Ordering::Relaxed);
                                 for (i, s) in a.iter().chain(b).enumerate() {
                                     // Bypassed EQ writes the samples untouched (bit-perfect).
                                     let v = if eq_on { rt.eq.process(i % CHANNELS, *s) } else { *s };
                                     slice[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+                                    scope.push(base + i as u64, v);
                                 }
+                                scope.rate.store(sr, Ordering::Relaxed);
+                                scope.head.store(base + (frames * CHANNELS) as u64, Ordering::Release);
                                 chunk.commit_all();
                                 rt.stats.got_data.store(true, Ordering::Release);
                             }

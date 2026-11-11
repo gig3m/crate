@@ -13,17 +13,27 @@ pub(crate) fn rate_stars(
     off: u32,
     cx: &mut Context<Crate>,
     on_rate: impl Fn(&mut Crate, u8, &mut Context<Crate>) + Clone + 'static,
-) -> gpui::Div {
+) -> gpui::Stateful<gpui::Div> {
     let id: gpui::SharedString = id.into();
     let full = rating.map(|r| (r / 2.0).floor() as usize).unwrap_or(0);
-    div().flex().gap(px(2.0)).children((0..5u8).map(|i| {
-        let f = on_rate.clone();
-        div()
-            .id(gpui::SharedString::from(format!("{id}-{i}")))
-            .cursor_pointer()
-            .child(if (i as usize) < full { icons::icon("star", size, on) } else { icons::icon("star-outline", size, off) })
-            .on_click(cx.listener(move |this, _, _, cx| f(this, i + 1, cx)))
-    }))
+    // Rating sits inside clickable rows (play the track): clicks on the
+    // stars, or between them, stay here.
+    div()
+        .id(gpui::SharedString::from(format!("{id}-stars")))
+        .flex()
+        .gap(px(2.0))
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .children((0..5u8).map(|i| {
+            let f = on_rate.clone();
+            div()
+                .id(gpui::SharedString::from(format!("{id}-{i}")))
+                .cursor_pointer()
+                .child(if (i as usize) < full { icons::icon("star", size, on) } else { icons::icon("star-outline", size, off) })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    f(this, i + 1, cx)
+                }))
+        }))
 }
 
 fn long_date(iso: &str) -> String {

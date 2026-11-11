@@ -25,24 +25,8 @@ impl Crate {
         };
         let len = tr.duration_ms;
         let frac = if len > 0 { (n.elapsed_ms as f32 / len as f32).min(1.0) } else { 0.0 };
-        const BARS: usize = 56;
-        let levels = detail.as_ref().map(|d| d.levels.clone()).unwrap_or_default();
-        let bars: Vec<_> = (0..BARS)
-            .map(|i| {
-                let lv = if levels.is_empty() { None } else { levels.get(i * levels.len() / BARS).copied() };
-                let h = lv.map(|v| (4.0 + 24.0 * v).round()).unwrap_or(4.0);
-                let ms = len * i as u64 / BARS as u64;
-                div()
-                    .id(("t-seek", i))
-                    .flex_1()
-                    .h(px(28.0))
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .child(div().w_full().h(px(h)).rounded(px(1.0)).bg(if (i as f32 + 0.5) / BARS as f32 <= frac { white(1.0) } else { white(0.22) }))
-                    .on_click(cx.listener(move |this, _, _, cx| this.transport(Transport::SetPosition(ms), cx)))
-            })
-            .collect();
+        let levels = detail.as_ref().map(|d| d.levels.clone()).filter(|l| !l.is_empty());
+        let bars = self.track_viz("tile-bar", 28.0, frac, len, levels.as_ref(), cx);
         let format = n.formats.get(&n.idx).map(|&(rate, bits)| {
             if let Some(k) = n.transcoded.get(&n.idx) {
                 return format!("MP3 {k}k · transcoded");
@@ -133,7 +117,7 @@ impl Crate {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .child(div().flex().gap(px(2.0)).children(bars))
+                    .child(div().flex().child(bars))
                     .child(
                         div()
                             .flex()
