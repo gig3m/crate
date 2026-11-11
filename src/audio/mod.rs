@@ -231,10 +231,14 @@ impl Engine {
     /// Takes effect on the next audio cycle.
     pub fn set_eq(&self, gains: [f32; 10]) {
         let gains = gains.map(|g| if g.is_finite() { g.clamp(-12.0, 12.0) } else { 0.0 });
+        let pre = eq::preamp(&gains);
+        // Seqlock (one writer, the UI thread): odd while writing, even when done.
+        self.stats.eq_gen.fetch_add(1, Ordering::Relaxed);
+        std::sync::atomic::fence(Ordering::Release);
         for (slot, g) in self.stats.eq_gains.iter().zip(gains) {
             slot.store(g.to_bits(), Ordering::Relaxed);
         }
-        self.stats.eq_preamp.store(eq::preamp(&gains).to_bits(), Ordering::Relaxed);
+        self.stats.eq_preamp.store(pre.to_bits(), Ordering::Relaxed);
         self.stats.eq_gen.fetch_add(1, Ordering::Release);
     }
 
@@ -765,13 +769,17 @@ fn pw_thread(
                         let mut frames = 0;
                         // Uncontended except during a rebuild, when this stream is gone.
                         // EQ settings: recompute filters only when they or the rate change.
+                        // Seqlock read, never spinning: if a write is in progress (odd) or
+                        // landed meanwhile (changed), keep the old filters this cycle.
                         let gen_id = rt.stats.eq_gen.load(Ordering::Acquire);
                         let sr = rt.stats.stream_rate.load(Ordering::Relaxed);
-                        let gains = std::array::from_fn(|i| f32::from_bits(rt.stats.eq_gains[i].load(Ordering::Relaxed)));
-                        let pre = f32::from_bits(rt.stats.eq_preamp.load(Ordering::Relaxed));
-                        // Torn read (set_eq mid-update): keep the old filters this cycle.
-                        if rt.stats.eq_gen.load(Ordering::Acquire) == gen_id {
-                            rt.eq.update(gen_id, sr, &gains, pre);
+                        if gen_id % 2 == 0 {
+                            let gains = std::array::from_fn(|i| f32::from_bits(rt.stats.eq_gains[i].load(Ordering::Relaxed)));
+                            let pre = f32::from_bits(rt.stats.eq_preamp.load(Ordering::Relaxed));
+                            std::sync::atomic::fence(Ordering::Acquire);
+                            if rt.stats.eq_gen.load(Ordering::Relaxed) == gen_id {
+                                rt.eq.update(gen_id, sr, &gains, pre);
+                            }
                         }
                         let eq_on = rt.eq.active();
                         if let Ok(mut cons) = rt.cons.try_lock() {

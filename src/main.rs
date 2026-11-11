@@ -89,6 +89,8 @@ struct Crate {
     eq_custom: [f32; 10],
     eq_sliders: Vec<Entity<gpui_component::slider::SliderState>>,
     settings_scroll: gpui::ScrollHandle,
+    /// Debounces saving the EQ while a slider moves (keyboard steps send no release).
+    eq_save_gen: u64,
     /// Sweet fades between albums, in seconds (0 = off).
     fade_secs: u32,
     /// A queue waiting on loudness before it starts (its queue_seq); cleared
@@ -635,6 +637,7 @@ impl Crate {
             eq_preset,
             eq_custom,
             eq_sliders,
+            eq_save_gen: 0,
             settings_scroll: {
                 let h = gpui::ScrollHandle::new();
                 // Test hook: open Settings scrolled to the bottom.
@@ -1180,6 +1183,21 @@ impl Crate {
             *g = if db.is_finite() { db.clamp(-12.0, 12.0) } else { 0.0 };
         }
         self.apply_eq(save, cx);
+        if !save {
+            // No release for keyboard/assistive steps: save once things settle.
+            self.eq_save_gen += 1;
+            let gen_id = self.eq_save_gen;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(800)).await;
+                this.update(cx, |this, cx| {
+                    if this.eq_save_gen == gen_id {
+                        this.apply_eq(true, cx);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
     }
 
     pub(crate) fn set_fade(&mut self, secs: u32, cx: &mut Context<Self>) {

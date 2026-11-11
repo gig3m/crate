@@ -1,7 +1,8 @@
 //! Ten-band graphic EQ (canvas: 31 Hz .. 16 kHz, ±12 dB): RBJ peaking
 //! biquads, one octave wide, run on the PipeWire RT thread. A preamp equal
-//! to the cascade's peak boost keeps it from clipping. All zero = bypassed,
-//! so playback stays bit-perfect.
+//! to the cascade's peak boost (at any rate the engine runs) takes off the
+//! steady-state boost, and a soft knee above 0.95 catches phase overshoot
+//! instead of a hard clip. All zero = bypassed, so playback stays bit-perfect.
 
 pub const BANDS: [f32; 10] = [31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0];
 const Q: f64 = std::f64::consts::SQRT_2;
@@ -34,10 +35,30 @@ fn response_db(gains: &[f32; 10], f: f64, rate: f64) -> f64 {
     db
 }
 
-/// Linear preamp that cancels the cascade's highest boost (1.0 when it only cuts).
+/// Rates the engine runs at (a stream matches its file's rate).
+const RATES: [f64; 6] = [44_100.0, 48_000.0, 88_200.0, 96_000.0, 176_400.0, 192_000.0];
+
+/// Linear preamp that cancels the cascade's highest boost at any of the
+/// engine's rates (1.0 when it only cuts). Off the RT thread: ~6k evaluations.
 pub fn preamp(gains: &[f32; 10]) -> f32 {
-    let peak = (0..240).map(|i| 20.0 * 1000f64.powf(i as f64 / 239.0)).map(|f| response_db(gains, f, 48_000.0)).fold(0.0f64, f64::max);
+    let mut peak = 0.0f64;
+    for &rate in &RATES {
+        let top = 20_000f64.min(0.49 * rate);
+        for i in 0..1000 {
+            let f = 20.0 * (top / 20.0).powf(i as f64 / 999.0);
+            peak = peak.max(response_db(gains, f, rate));
+        }
+    }
     10f64.powf(-peak / 20.0) as f32
+}
+
+/// Under 0.95 untouched; above, bend smoothly toward 1.0 (phase shifts can
+/// push a waveform's peak past what the steady-state preamp covers).
+#[inline]
+fn soft_clip(x: f64) -> f64 {
+    const KNEE: f64 = 0.95;
+    let a = x.abs();
+    if a <= KNEE { x } else { x.signum() * (KNEE + (1.0 - KNEE) * ((a - KNEE) / (1.0 - KNEE)).tanh()) }
 }
 
 /// Per-stream filter state, owned by the RT callback. No allocation.
@@ -45,7 +66,10 @@ pub struct Eq {
     gen_seen: u64,
     rate: u32,
     active: bool,
+    /// Preamp now and its target: ramped over ~10 ms so a change doesn't click.
     pre: f64,
+    pre_target: f64,
+    pre_step: f64,
     coef: [[f64; 5]; 10],
     on: [bool; 10],
     /// [channel][band] = (z1, z2), transposed direct form II.
@@ -54,7 +78,7 @@ pub struct Eq {
 
 impl Default for Eq {
     fn default() -> Self {
-        Eq { gen_seen: u64::MAX, rate: 0, active: false, pre: 1.0, coef: [[0.0; 5]; 10], on: [false; 10], z: [[(0.0, 0.0); 10]; 2] }
+        Eq { gen_seen: u64::MAX, rate: 0, active: false, pre: 1.0, pre_target: 1.0, pre_step: 0.0, coef: [[0.0; 5]; 10], on: [false; 10], z: [[(0.0, 0.0); 10]; 2] }
     }
 }
 
@@ -69,8 +93,14 @@ impl Eq {
         }
         self.gen_seen = gen_id;
         self.rate = rate;
+        let was_active = self.active;
         self.active = gains.iter().any(|&g| g != 0.0) && rate > 0;
-        self.pre = preamp as f64;
+        self.pre_target = preamp as f64;
+        if !was_active {
+            // Coming out of bypass the filters start fresh; no ramp needed from 1.0.
+            self.pre = self.pre_target;
+        }
+        self.pre_step = (self.pre_target - self.pre) / (0.01 * rate.max(1) as f64);
         for i in 0..10 {
             self.on[i] = gains[i] != 0.0 && (BANDS[i] as f64) < 0.45 * rate as f64;
             if self.on[i] {
@@ -89,6 +119,12 @@ impl Eq {
     /// Filter one sample on channel `ch` (0 or 1).
     #[inline]
     pub fn process(&mut self, ch: usize, x: f32) -> f32 {
+        if self.pre != self.pre_target && ch == 0 {
+            self.pre += self.pre_step;
+            if (self.pre_step > 0.0 && self.pre > self.pre_target) || (self.pre_step < 0.0 && self.pre < self.pre_target) {
+                self.pre = self.pre_target;
+            }
+        }
         let mut y = x as f64 * self.pre;
         for ((zi, coef), on) in self.z[ch & 1].iter_mut().zip(&self.coef).zip(&self.on) {
             if !on {
@@ -97,10 +133,12 @@ impl Eq {
             let [b0, b1, b2, a1, a2] = *coef;
             let (z1, z2) = *zi;
             let out = b0 * y + z1;
-            *zi = (b1 * y - a1 * out + z2, b2 * y - a2 * out);
+            let (n1, n2) = (b1 * y - a1 * out + z2, b2 * y - a2 * out);
+            // Flush what decays toward denormals in silence (slow on some CPUs).
+            *zi = (if n1.abs() < 1e-20 { 0.0 } else { n1 }, if n2.abs() < 1e-20 { 0.0 } else { n2 });
             y = out;
         }
-        (y as f32).clamp(-1.0, 1.0)
+        (soft_clip(y) as f32).clamp(-1.0, 1.0)
     }
 }
 
@@ -135,5 +173,30 @@ mod tests {
             }
         }
         assert!((peak - 0.5).abs() < 0.01, "{peak}");
+        // Treble at 192 kHz: the preamp covers the real peak there.
+        let tr = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 4.5, 5.5];
+        let worst = (0..2000).map(|i| 20.0 * 1000f64.powf(i as f64 / 1999.0)).map(|f| response_db(&tr, f, 192_000.0)).fold(0.0f64, f64::max);
+        assert!(20.0 * (preamp(&tr) as f64).log10() <= -worst + 1e-6);
+        // Silence after an impulse drains to exact zero (no denormal state).
+        let mut g = [0.0; 10];
+        g[9] = 12.0;
+        let mut e = Eq::default();
+        e.update(1, 48_000, &g, preamp(&g));
+        e.process(0, 1.0);
+        for _ in 0..48_000 {
+            e.process(0, 0.0);
+        }
+        assert!(e.z[0].iter().all(|&(a, b)| a == 0.0 && b == 0.0));
+        // A cut-only square wave can overshoot; the knee keeps it under 1.0.
+        let mut g = [0.0; 10];
+        g[5] = -12.0;
+        let mut e = Eq::default();
+        e.update(1, 48_000, &g, preamp(&g));
+        let mut top = 0.0f32;
+        for n in 0..48_000 {
+            let x = if (n / 240) % 2 == 0 { 0.99 } else { -0.99 };
+            top = top.max(e.process(0, x).abs());
+        }
+        assert!(top < 1.0, "{top}");
     }
 }

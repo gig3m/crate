@@ -68,7 +68,6 @@ Trade-off to mention to me: while a file plays at, say, 44.1 kHz, other apps tha
 }
 
 impl Crate {
-    /// Theme: Crate's own palette, or follow Omarchy.
     /// Ten-band EQ (canvas): preset chips over one vertical slider per band.
     fn eq_card(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         use crate::theme::EqPreset;
@@ -121,13 +120,14 @@ impl Crate {
             .child(div().flex().flex_wrap().gap(px(6.0)).children(chips))
             .child(div().pt(px(6.0)).flex().gap(px(4.0)).opacity(if cur == EqPreset::Off { 0.45 } else { 1.0 }).children(bands))
             .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(if active {
-                "Heard right away. Changes the samples; a preamp cancels the biggest boost so nothing clips."
+                "Heard right away. Changes the samples. A preamp takes off the biggest boost and a soft knee rounds any peak past 0.95 instead of clipping it."
             } else {
                 "Off: bypassed, samples untouched (bit-perfect). Moving a slider switches to Custom."
             }))
             .into_any_element()
     }
 
+    /// Theme: Crate's own palette, or follow Omarchy.
     fn theme_section(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         use crate::theme::{Mode, Theme as Th};
         let option = |id: &'static str, mode: Mode, title: &'static str, blurb: &'static str, preview: Th, cx: &mut Context<Self>| {
