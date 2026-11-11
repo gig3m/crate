@@ -171,6 +171,8 @@ impl Setup {
     }
 
     fn manual_continue(&mut self, cx: &mut Context<Self>) {
+        // A server found earlier via plex.tv isn't the one being typed in.
+        self.found = None;
         let url = self.url_in.read(cx).value().trim().trim_end_matches('/').to_string();
         let token = self.token_in.read(cx).value().trim().to_string();
         if url.is_empty() || token.is_empty() {

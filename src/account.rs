@@ -53,31 +53,50 @@ impl Account {
     }
 }
 
-/// At launch: if the saved address doesn't answer (another network, a
-/// changed IP), find the server again among its known addresses and save
-/// the one that works. Returns the account to use.
+/// At launch: make sure the saved address is still this server, and move
+/// to a better one when it isn't, or isn't the best (a remote or relay
+/// address saved while away, now that the local one may answer). Bounded to
+/// ~5 s; a relay address is used for the session but never saved.
 pub async fn ensure_reachable(mut a: Account) -> Account {
     let http = reqwest::Client::new();
-    let ok = http
-        .get(format!("{}/identity", a.url))
-        .timeout(std::time::Duration::from_secs(2))
-        .send()
-        .await
-        .is_ok_and(|r| r.status().is_success());
-    if ok || a.connections.is_empty() {
+    // The saved address must still be this server (not some other host that
+    // now answers there): check its machine id when we know it.
+    let ok = async {
+        let v: serde_json::Value = http
+            .get(format!("{}/identity", a.url))
+            .header("Accept", "application/json")
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        Some(a.server_id.is_empty() || v["MediaContainer"]["machineIdentifier"].as_str() == Some(a.server_id.as_str()))
+    }
+    .await
+    .unwrap_or(false);
+    let saved_rank = a.connections.iter().find(|c| c.uri == a.url).map(|c| rank(c.local, c.uri.starts_with("https://"), c.relay));
+    if a.connections.is_empty() || (ok && saved_rank.is_none_or(|r| r == 0)) {
         return a;
     }
-    match pick_connection(&http, &a.as_server()).await {
-        Ok((url, _)) if url != a.url => {
-            eprintln!("[crate] {} didn't answer; using {url}", a.url);
+    let found = tokio::time::timeout(std::time::Duration::from_secs(5), pick_connection_with(&http, &a.as_server(), true)).await;
+    if let Ok(Ok((url, _))) = found
+        && url != a.url
+    {
+        let new_rank = a.connections.iter().find(|c| c.uri == url).map(|c| rank(c.local, true, c.relay)).unwrap_or(3);
+        // Only move when the saved one failed, or the new one is better.
+        if !ok || saved_rank.is_none_or(|r| new_rank < r) {
+            eprintln!("[crate] using {url} instead of {}", a.url);
             a.url = url;
-            if from_env().is_none() {
+            if new_rank < 3 && from_env().is_none() {
                 let _ = save(&a);
             }
-            a
         }
-        _ => a,
     }
+    a
 }
 
 fn path() -> PathBuf {
@@ -260,22 +279,34 @@ pub async fn servers(http: &reqwest::Client, account_token: &str) -> anyhow::Res
 /// sections). A local address that belongs to some other host on this
 /// network never wins, and a working remote route is kept as the fallback.
 pub async fn pick_connection(http: &reqwest::Client, s: &Server) -> anyhow::Result<(String, Vec<(String, String)>)> {
+    pick_connection_with(http, s, false).await
+}
+
+/// Rank of an address: local https 0, local http 1, remote https 2, relay 3.
+pub fn rank(local: bool, https: bool, relay: bool) -> u8 {
+    match (local, https, relay) {
+        (_, _, true) => 3,
+        (true, true, _) => 0,
+        (true, false, _) => 1,
+        _ => 2,
+    }
+}
+
+/// `automatic` (at launch, unattended): https only, and only with a known
+/// server id, so the token never goes in cleartext to whatever answers at a
+/// remembered LAN address on someone else's network.
+pub async fn pick_connection_with(http: &reqwest::Client, s: &Server, automatic: bool) -> anyhow::Result<(String, Vec<(String, String)>)> {
+    anyhow::ensure!(!automatic || !s.id.is_empty(), "no saved server id");
     let mut set = tokio::task::JoinSet::new();
     for (uri, local, relay) in s.connections.clone() {
         let https = uri.starts_with("https://");
         // Never send the token in cleartext beyond the local network.
-        if !https && !local {
+        if !https && (!local || automatic) {
             continue;
         }
         let (http, token, want) = (http.clone(), s.token.clone(), s.id.clone());
         set.spawn(async move {
-            // local https, local http, remote https, relay
-            let rank = match (local, https, relay) {
-                (_, _, true) => 3,
-                (true, true, _) => 0,
-                (true, false, _) => 1,
-                _ => 2,
-            };
+            let rank = rank(local, https, relay);
             let check = async {
                 let id: serde_json::Value = http
                     .get(format!("{uri}/identity"))

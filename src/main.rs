@@ -912,6 +912,8 @@ impl Crate {
         // These work with nothing playing.
         match t {
             Transport::Raise => {
+                // Ask Hyprland now: a hidden window may not render to act on the flag.
+                instance::focus_hint();
                 self.raise_requested = true;
                 cx.notify();
                 return;
@@ -1493,7 +1495,6 @@ impl Render for Crate {
         }
         if std::mem::take(&mut self.raise_requested) {
             window.activate_window();
-            instance::focus_hint();
         }
         if std::mem::take(&mut self.reset_search) {
             self.search.update(cx, |s, cx| s.set_value("", window, cx));
@@ -1845,8 +1846,23 @@ fn main() {
             let http = reqwest::Client::new();
             match account::servers(&http, &a.token).await {
                 Ok(list) => {
-                    let host = a.url.split("://").nth(1).unwrap_or_default().split(':').next().unwrap_or_default().to_lowercase();
-                    let pick = list.iter().find(|s| s.token == a.token || s.name.eq_ignore_ascii_case(&host) || s.name.eq_ignore_ascii_case(&a.server));
+                    // The saved machine id, else an exact name, else the only
+                    // server this token belongs to; anything ambiguous is refused.
+                    // The saved machine id, else the id the saved URL reports,
+                    // else the only server this token belongs to; never a name.
+                    let probed: Option<String> = async {
+                        let v: serde_json::Value =
+                            http.get(format!("{}/identity", a.url)).header("Accept", "application/json").send().await.ok()?.json().await.ok()?;
+                        v["MediaContainer"]["machineIdentifier"].as_str().map(String::from)
+                    }
+                    .await;
+                    let want = if a.server_id.is_empty() { probed } else { Some(a.server_id.clone()) };
+                    let by_token: Vec<_> = list.iter().filter(|s| s.token == a.token).collect();
+                    let pick = match want {
+                        Some(id) => list.iter().find(|s| s.id == id),
+                        None if by_token.len() == 1 => Some(by_token[0]),
+                        None => None,
+                    };
                     match pick {
                         Some(s) => {
                             a.remember(s);
@@ -1855,7 +1871,7 @@ fn main() {
                                 Err(e) => eprintln!("couldn't save: {e:#}"),
                             }
                         }
-                        None => eprintln!("none of this account's servers matches {}", a.url),
+                        None => eprintln!("can't tell which server {} is (no saved id, name or unique token match)", a.url),
                     }
                 }
                 Err(e) => eprintln!("servers: {e:#}"),
@@ -1868,9 +1884,12 @@ fn main() {
         return;
     };
     // One Crate at a time: a second launch raises the first and exits.
-    if instance::hand_off() {
+    if !instance::acquire() {
+        instance::hand_off();
         return;
     }
+    let (transport_tx, transport_rx) = mpsc::unbounded_channel::<Transport>();
+    instance::listen(transport_tx.clone());
     let acct = rt.block_on(account::ensure_reachable(acct));
     let (base, token, section) = (acct.url.clone(), acct.token.clone(), acct.section.clone());
     let _ = SECTION.set(section.clone());
@@ -1881,10 +1900,7 @@ fn main() {
     let (albums_tx, albums_rx) = mpsc::unbounded_channel();
     let (tracks_tx, tracks_rx) = mpsc::unbounded_channel::<TracksRequest>();
     let plex_creds = (base.clone(), token.clone());
-    let (transport_tx, transport_rx) = mpsc::unbounded_channel::<Transport>();
-    if !instance::listen(transport_tx.clone()) && instance::hand_off() {
-        return;
-    }
+
     let (search_tx, search_rx) = mpsc::unbounded_channel::<SearchRequest>();
     let (hubs_tx, hubs_rx) = mpsc::unbounded_channel::<HubsRequest>();
     let (artist_tx, artist_rx) = mpsc::unbounded_channel::<ArtistRequest>();
