@@ -95,14 +95,16 @@ impl Out<'_> {
     }
 }
 
-/// Two loud tracks at equal-power gains can sum past full scale (up to
-/// ~1.41 mid-fade): pass anything under 0.7 untouched and bend the rest
-/// toward 1.0 (1.0 -> 0.93, 1.41 -> 0.995). mix_fade weights it by the
-/// overlap, so it's off at the fade's edges.
-fn soft_limit(x: f32) -> f32 {
-    const KNEE: f32 = 0.7;
-    let m = x.abs();
-    if m <= KNEE { x } else { x.signum() * (KNEE + (1.0 - KNEE) * ((m - KNEE) / (1.0 - KNEE)).tanh()) }
+/// Bound a crossfade sum under full scale without touching what can't clip.
+/// With inputs within ±1, |x| ≤ m = out_g + in_g (1 at the fade's edges,
+/// √2 mid-fade). Samples under 2 − m pass untouched; [2 − m, m] bends
+/// smoothly into [2 − m, 1). At the edges (m = 1) it's the identity, so the
+/// fade joins the unfaded audio with no step.
+fn fade_limit(x: f32, m: f32) -> f32 {
+    let span = m - 1.0;
+    let k = 1.0 - span;
+    let a = x.abs();
+    if span <= 1e-6 || a <= k { x } else { x.signum() * (k + span * ((a - k) / span).tanh()) }
 }
 
 /// Equal-power crossfade of `from` (fading out) into `into` (fading in), in
@@ -116,14 +118,10 @@ fn mix_fade(into: &mut [f32], from: &mut VecDeque<f32>, done: usize, total: usiz
         }
         let t = ((done + frames) as f32 + 0.5) / total.max(1) as f32;
         let (out_g, in_g) = ((t * std::f32::consts::FRAC_PI_2).cos(), (t * std::f32::consts::FRAC_PI_2).sin());
-        // The limiter fades in and out with the overlap (0 at both edges, so
-        // the fade joins the unfaded audio without a step; full mid-fade,
-        // where the sum can pass full scale).
-        let w = (t * std::f32::consts::PI).sin().clamp(0.0, 1.0);
+        let m = out_g + in_g;
         for s in fr.iter_mut() {
             let a = from.pop_front().unwrap_or(0.0);
-            let x = a * out_g + *s * in_g;
-            *s = (x + (soft_limit(x) - x) * w).clamp(-1.0, 1.0);
+            *s = fade_limit(a * out_g + *s * in_g, m).clamp(-1.0, 1.0);
         }
         frames += 1;
     }
@@ -923,7 +921,22 @@ mod fade_tests {
         let mut into = vec![1.0f32; 2 * CHANNELS];
         mix_fade(&mut into, &mut from, 499, 1000);
         assert!(into.iter().all(|&x| x < 1.0 && x > 0.95));
-        assert_eq!(super::soft_limit(0.5), 0.5);
-        assert!(super::soft_limit(1.2) < super::soft_limit(1.4) && super::soft_limit(1.4) < 1.0);
+        // In-phase full scale at every point of the fade: under 1.0 before any
+        // clamp, rising with the sum, identity at the edges.
+        use super::fade_limit;
+        let half_pi = std::f32::consts::FRAC_PI_2;
+        let mut prev = 0.0;
+        for i in 1..100 {
+            let t = i as f32 / 100.0;
+            let m = (t * half_pi).cos() + (t * half_pi).sin();
+            let y = fade_limit(m, m);
+            assert!(y < 1.0, "t={t}: {y}");
+            assert!(y >= prev - 0.02);
+            prev = y;
+            // Anything under 2 - m is untouched.
+            assert_eq!(fade_limit((2.0 - m) * 0.99, m), (2.0 - m) * 0.99);
+        }
+        assert_eq!(fade_limit(1.0, 1.0), 1.0);
+        assert_eq!(fade_limit(-0.8, 1.0), -0.8);
     }
 }
