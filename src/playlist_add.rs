@@ -129,6 +129,7 @@ impl Crate {
             return;
         }
         self.playlist_busy = true;
+        let key = playlist.clone();
         let rx = crate::plex_call(move |c| async move { c.add_to_playlist(&playlist, &keys).await });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
@@ -139,6 +140,8 @@ impl Crate {
                     Ok(Ok(n)) => {
                         this.say(format!("Added {n} track{} to \u{201c}{title}\u{201d}", if n == 1 { "" } else { "s" }));
                         this.reload_playlists(cx);
+                        // Its page, open or in history, shows the new tracks.
+                        this.refresh_playlist_page(&key, cx);
                     }
                     Ok(Err(e)) => this.say(format!("Couldn't add to \u{201c}{title}\u{201d}: {e:#}")),
                     Err(_) => {}

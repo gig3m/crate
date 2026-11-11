@@ -124,6 +124,8 @@ pub struct PlaylistDetail {
     pub item_ids: Vec<u64>,
     /// Items fetched, playable or not (to tell a cap from missing files).
     pub loaded: usize,
+    /// The fetch hit its limit: there may be items past the last row.
+    pub capped: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1044,6 +1046,7 @@ impl Client {
             thumb: m["thumb"].as_str().or(m["composite"].as_str()).unwrap_or_default().to_string(),
             tracks,
             item_ids,
+            capped: loaded >= limit,
             loaded,
         })
     }

@@ -416,6 +416,19 @@ impl Crate {
         .detach();
     }
 
+    /// After a change made elsewhere (tracks added): refetch the page if it's
+    /// on screen, and have history copies refetch on return. While edits are
+    /// pending the last one reloads instead.
+    pub(crate) fn refresh_playlist_page(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self.playlist_pending(key) {
+            return;
+        }
+        self.forget_playlist_history(key);
+        if matches!(&self.view, View::Playlist { key: cur, .. } if cur == key) {
+            self.load_playlist(key.to_string(), cx);
+        }
+    }
+
     /// Copies of a playlist page in Back/Forward history refetch on return.
     fn forget_playlist_history(&mut self, key: &str) {
         for v in self.back.iter_mut().chain(self.fwd.iter_mut()) {
@@ -447,7 +460,7 @@ impl Crate {
                 if missing > 0 {
                     more += &format!(" · {missing} unavailable (no file on the server)");
                 }
-                if d.count > d.loaded as u64 {
+                if d.capped {
                     more += &format!(" · showing the first {LIMIT}");
                 }
                 let len = if mins >= 60 { format!("{} h {} min", mins / 60, mins % 60) } else { format!("{mins} min") };
@@ -623,7 +636,7 @@ impl Crate {
                 let reorder = !smart && d.item_ids.len() > 1;
                 let last = d.item_ids.len().saturating_sub(1);
                 // Capped at LIMIT: the last row shown isn't the playlist's last.
-                let capped = d.count > d.loaded as u64;
+                let capped = d.capped;
                 let rows: Vec<(usize, crate::plex::Track, u64)> = range.filter_map(|i| Some((i, d.tracks.get(i)?.clone(), d.item_ids.get(i).copied().unwrap_or(0)))).collect();
                 rows.into_iter()
                     .map(|(i, tr, item_id)| {
