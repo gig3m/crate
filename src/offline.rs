@@ -97,15 +97,21 @@ static SCOPE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Set once at startup from the account (server machine id, else its URL).
 pub fn set_scope(server_id: &str, url: &str) {
-    let key = if server_id.is_empty() {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        url.hash(&mut h);
-        format!("url-{:016x}", h.finish())
-    } else {
-        server_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect()
-    };
-    let _ = SCOPE.set(key);
+    // FNV-1a: a fixed algorithm, so the folder name never changes with the toolchain.
+    let url_key = format!("url-{:016x}", url.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3)));
+    let id: String = server_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    let key = if id.is_empty() { url_key.clone() } else { id };
+    let _ = SCOPE.set(key.clone());
+    // Albums kept before the server id was known move to the id's folder.
+    if key != url_key {
+        let root = dir().parent().map(|p| p.to_path_buf());
+        if let Some(root) = root {
+            let (old, new) = (root.join(&url_key), root.join(&key));
+            if old.is_dir() && !new.exists() {
+                let _ = std::fs::rename(old, new);
+            }
+        }
+    }
 }
 
 pub fn dir() -> PathBuf {
@@ -131,8 +137,17 @@ pub fn file_for(part_key: &str) -> Option<PathBuf> {
 /// A corrupt index is set aside (not overwritten) so its files stay findable.
 pub fn load() -> Index {
     let p = dir().join("index.json");
-    let Ok(raw) = std::fs::read_to_string(&p) else { return Index::default() };
-    match serde_json::from_str(&raw) {
+    // Only a missing file means "nothing kept"; anything unreadable is set aside.
+    let raw = match std::fs::read(&p) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Index::default(),
+        Err(e) => {
+            eprintln!("[crate] offline index unreadable ({e}); moved aside");
+            let _ = std::fs::rename(&p, p.with_extension("json.corrupt"));
+            return Index::default();
+        }
+    };
+    match serde_json::from_slice(&raw) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("[crate] offline index unreadable ({e}); moved aside");
@@ -164,7 +179,6 @@ pub fn fmt_bytes(b: u64) -> String {
 }
 
 impl Crate {
-    /// Keep an album offline (or, if kept, stop keeping it).
     fn save_offline(&mut self) {
         self.offline.reindex();
         if let Err(e) = save(&self.offline.index) {
@@ -172,6 +186,7 @@ impl Crate {
         }
     }
 
+    /// Keep an album offline (or, if kept, stop keeping it).
     pub(crate) fn toggle_offline(&mut self, album: Album, tracks: Vec<Track>, cx: &mut Context<Self>) {
         if self.offline.index.get(&album.rating_key).is_some() {
             self.remove_offline(&album.rating_key, cx);
@@ -182,6 +197,10 @@ impl Crate {
 
     /// Retry a failed album.
     pub(crate) fn retry_offline(&mut self, key: &str, cx: &mut Context<Self>) {
+        let busy = self.offline.queue.iter().any(|k| k == key) || self.offline.job.as_ref().is_some_and(|j| j.key == key);
+        if busy {
+            return;
+        }
         if let Some(a) = self.offline.index.albums.iter_mut().find(|a| a.key == key) {
             a.failed = None;
             self.offline.queue.push_back(key.to_string());

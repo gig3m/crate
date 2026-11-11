@@ -294,7 +294,7 @@ impl Crate {
                     Some(j) => format!("downloading {}/{}", j.done_tracks, j.total_tracks),
                     None if a.complete => format!("{} tracks · {}", a.tracks.len(), fmt_bytes(size)),
                     None if queued => "queued".into(),
-                    None => "download failed".into(),
+                    None => a.failed.clone().map(|f| format!("failed: {f}")).unwrap_or_else(|| "download failed".into()),
                 };
                 let can_retry = job.is_none() && !a.complete && !queued;
                 let rk = a.key.clone();
@@ -328,6 +328,8 @@ impl Crate {
                             .font_family(MONO)
                             .text_size(px(12.0))
                             .text_color(rgb(if a.complete { t.healthy } else if can_retry { t.red } else { t.muted }))
+                            .max_w(px(360.0))
+                            .truncate()
                             .child(state),
                     )
                     .when(can_retry, |d| {
