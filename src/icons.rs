@@ -36,6 +36,7 @@ const ICONS: &[(&str, &str, bool, f32)] = &[
     ("queue", "M3 6h18M3 12h18M3 18h11M18 15v6M15 18h6", false, 2.0),
     ("device", "M6 3h12v18H6zM12 7h.01M12 11a3 3 0 1 0 0 6 3 3 0 0 0 0-6z", false, 2.0),
     ("volume", "M4 9v6h4l5 4V5L8 9zM16 9a4 4 0 0 1 0 6", false, 2.0),
+    ("volume-off", "M4 9v6h4l5 4V5L8 9zM17 9l5 6M22 9l-5 6", false, 2.0),
     ("mini", "M3 5h18v14H3zM12 12h7v5h-7z", false, 2.0),
     ("sonic", "M5 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM19 9a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM7 17c6 0 4-10 10-10", false, 2.0),
     ("more", "M5 12h.01M12 12h.01M19 12h.01", false, 3.0),

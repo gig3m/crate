@@ -209,8 +209,56 @@ impl Crate {
                     .hover(|d| d.bg(rgb(t.raised)))
                     .on_click(cx.listener(|this, _, _, cx| this.open_audio_settings(cx))),
             )
-            .child(icons::icon("volume", 17.0, t.line))
-            .child(div().w(px(72.0)).h(px(4.0)).rounded(px(2.0)).bg(rgb(t.border)).child(div().w_full().h_full().rounded(px(2.0)).bg(rgb(t.line))));
+            .child(
+                div()
+                    .id("mute")
+                    .size(px(28.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(t.raised)))
+                    .child(icons::icon(if self.volume == 0.0 { "volume-off" } else { "volume" }, 17.0, t.text2))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_mute(cx))),
+            )
+            .child({
+                // 20 click targets across the bar; scroll nudges by 5%.
+                const STEPS: usize = 20;
+                let v = self.volume;
+                div()
+                    .id("volume")
+                    .w(px(84.0))
+                    .h(px(16.0))
+                    .flex()
+                    .items_center()
+                    .relative()
+                    .on_scroll(cx.listener(|this, ev: &gpui::ScrollEvent, _, cx| {
+                        let dy: f32 = ev.delta.pixel_delta(px(20.0)).y.into();
+                        if dy != 0.0 {
+                            this.set_volume(this.volume + if dy > 0.0 { 0.05 } else { -0.05 }, cx);
+                        }
+                    }))
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .h(px(4.0))
+                            .rounded(px(2.0))
+                            .bg(rgb(t.border))
+                            .child(div().h_full().rounded(px(2.0)).w(gpui::relative(v)).bg(rgb(if v < 1.0 { t.text } else { t.healthy }))),
+                    )
+                    .child(div().absolute().inset_0().flex().children((0..STEPS).map(|i| {
+                        let to = (i + 1) as f32 / STEPS as f32;
+                        div()
+                            .id(("vol", i))
+                            .flex_1()
+                            .h_full()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| this.set_volume(to, cx)))
+                    })))
+            });
 
         div()
             .h(px(88.0))

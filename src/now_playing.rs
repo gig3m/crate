@@ -345,6 +345,7 @@ impl Crate {
                     None => codec.clone(),
                 };
                 let native = fmt.is_some_and(|(rate, _)| n.graph_rate == rate);
+                let bitperfect = native && self.volume >= 1.0;
                 let output = match fmt {
                     Some((rate, _)) if n.graph_rate == rate => format!("PipeWire · {} kHz matched", khz(rate)),
                     Some((rate, _)) if n.graph_rate > 0 => format!("PipeWire resamples {} → {} kHz", khz(rate), khz(n.graph_rate)),
@@ -357,6 +358,11 @@ impl Crate {
                     ("Decoder", "symphonia · lock-free ring buffer".into(), true),
                     ("Loudness leveling", gain, false),
                     ("EQ", "Bypassed".into(), false),
+                    (
+                        "Volume",
+                        if self.volume >= 1.0 { "100% · samples untouched".into() } else { format!("{:.0}% · PipeWire software volume (not bit-perfect)", self.volume * 100.0) },
+                        self.volume >= 1.0,
+                    ),
                     ("Output", output, native),
                 ];
                 div()
@@ -390,8 +396,14 @@ impl Crate {
                             .font_family(MONO)
                             .font_weight(FontWeight::MEDIUM)
                             .text_size(px(12.0))
-                            .text_color(if native { rgb(t.healthy).into() } else { white(0.72) })
-                            .child(if native { "● native rate · no resampling" } else { "● resampled by PipeWire to the graph rate" }),
+                            .text_color(if bitperfect { rgb(t.healthy).into() } else { white(0.72) })
+                            .child(if bitperfect {
+                                "● bit-perfect: native rate, volume 100%"
+                            } else if native {
+                                "● native rate · volume below 100% changes the samples"
+                            } else {
+                                "● resampled by PipeWire to the graph rate"
+                            }),
                     )
             }
             _ => {

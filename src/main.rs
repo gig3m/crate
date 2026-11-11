@@ -45,7 +45,7 @@ use crate_audio::audio::{Engine, Event as AudioEvent, Source};
 use mpris::{Transport, Update as MprisUpdate};
 use plex::{Album, ArtRequest, ArtResult, ArtistInfo, ArtistRequest, HubsRequest, SearchHit, SearchRequest, Track, TracksRequest};
 
-gpui::actions!(crate_app, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch, ToggleNowPlaying, PaletteRadio, Rate1, Rate2, Rate3, Rate4, Rate5, GoHome, GoStations, ShowLyrics, ShowQueue]);
+gpui::actions!(crate_app, [PlayPause, NextTrack, PrevTrack, SeekForward, SeekBack, Back, FocusSearch, ToggleNowPlaying, PaletteRadio, Rate1, Rate2, Rate3, Rate4, Rate5, GoHome, GoStations, ShowLyrics, ShowQueue, VolumeUp, VolumeDown]);
 
 #[derive(Clone)]
 enum View {
@@ -112,6 +112,10 @@ struct Crate {
     play_intent: u64,
     shuffle: bool,
     repeat: queue::Repeat,
+    /// Perceptual volume 0..=1 (the engine gets volume³), and the level to
+    /// restore when unmuting.
+    volume: f32,
+    unmute_to: f32,
     /// Album grid order for the current sort/filters (None: the cached list as-is).
     lib_view: Option<Vec<usize>>,
     lib_filters: Vec<library::LibFilter>,
@@ -500,6 +504,8 @@ impl Crate {
             play_intent: 0,
             shuffle: false,
             repeat: queue::Repeat::Off,
+            volume: theme::saved_volume(),
+            unmute_to: 1.0,
             lib_view: None,
             lib_filters: Vec::new(),
             lib_sort: library::LibSort::Added,
@@ -849,6 +855,7 @@ impl Crate {
         let Some(now) = self.now.as_mut() else { return };
         match Engine::play_from(queue, ms, self.target.clone()) {
             Ok(e) => {
+                e.set_volume(self.volume.powi(3));
                 self.engine = Some(e);
                 now.start_idx = idx;
                 now.start_ms = ms;
@@ -929,6 +936,7 @@ impl Crate {
             Transport::SetPosition(ms) => self.play_from(idx, ms, cx),
             Transport::SetShuffle(on) => self.set_modes(Some(on), None, cx),
             Transport::SetRepeat(r) => self.set_modes(None, Some(r), cx),
+            Transport::SetVolume(v) => self.set_volume(v, cx),
             Transport::Stop => {
                 self.engine = None;
                 now.finished = true;
@@ -1186,6 +1194,28 @@ impl Crate {
         }
         self.now_playing = true;
         cx.notify();
+    }
+
+    /// Set volume (perceptual 0..=1): applied live, saved, reported to MPRIS.
+    pub(crate) fn set_volume(&mut self, v: f32, cx: &mut Context<Self>) {
+        let v = (v.clamp(0.0, 1.0) * 100.0).round() / 100.0;
+        if v > 0.0 {
+            self.unmute_to = v;
+        }
+        self.volume = v;
+        if let Some(e) = &self.engine {
+            e.set_volume(v.powi(3));
+        }
+        let _ = theme::save_volume(v);
+        let _ = self.mpris.send(MprisUpdate::Volume(v as f64));
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_mute(&mut self, cx: &mut Context<Self>) {
+        let to = if self.volume > 0.0 { 0.0 } else { self.unmute_to.max(0.05) };
+        let keep = self.unmute_to;
+        self.set_volume(to, cx);
+        self.unmute_to = keep;
     }
 
     /// 1–5 keys: rate the playing track.
@@ -1532,6 +1562,8 @@ impl Render for Crate {
                 this.nav_to("stations", window, cx)
             }))
             .on_action(cx.listener(|this, _: &ShowLyrics, _, cx| this.open_now_playing(None, cx)))
+            .on_action(cx.listener(|this, _: &VolumeUp, _, cx| this.set_volume(this.volume + 0.05, cx)))
+            .on_action(cx.listener(|this, _: &VolumeDown, _, cx| this.set_volume(this.volume - 0.05, cx)))
             .on_action(cx.listener(|this, _: &ShowQueue, _, cx| this.open_now_playing(Some(0), cx)))
             .on_action(cx.listener(|this, _: &Rate1, _, cx| this.rate_playing(1, cx)))
             .on_action(cx.listener(|this, _: &Rate2, _, cx| this.rate_playing(2, cx)))
@@ -1711,6 +1743,8 @@ fn main() {
             gpui::KeyBinding::new("g h", GoHome, Some("Crate && !Input")),
             gpui::KeyBinding::new("g s", GoStations, Some("Crate && !Input")),
             gpui::KeyBinding::new("l", ShowLyrics, Some("Crate && !Input")),
+            gpui::KeyBinding::new("=", VolumeUp, Some("Crate && !Input")),
+            gpui::KeyBinding::new("-", VolumeDown, Some("Crate && !Input")),
             gpui::KeyBinding::new("q", ShowQueue, Some("Crate && !Input")),
             gpui::KeyBinding::new("1", Rate1, Some("Crate && !Input")),
             gpui::KeyBinding::new("2", Rate2, Some("Crate && !Input")),

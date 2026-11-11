@@ -75,10 +75,26 @@ pub fn saved_mode() -> Mode {
 
 /// Save the theme choice, keeping any other keys in the config file.
 pub fn save_mode(mode: Mode) -> std::io::Result<()> {
+    save_key("theme", toml::Value::String(if mode == Mode::Omarchy { "omarchy" } else { "crate" }.into()))
+}
+
+/// Saved volume (perceptual 0..=1), full when unset.
+pub fn saved_volume() -> f32 {
+    let raw = std::fs::read_to_string(config_path()).unwrap_or_default();
+    let map: HashMap<String, toml::Value> = toml::from_str(&raw).unwrap_or_default();
+    map.get("volume").and_then(|v| v.as_float()).map(|v| v.clamp(0.0, 1.0) as f32).unwrap_or(1.0)
+}
+
+pub fn save_volume(v: f32) -> std::io::Result<()> {
+    save_key("volume", toml::Value::Float(((v as f64) * 100.0).round() / 100.0))
+}
+
+/// Set one key in ~/.config/crate/config.toml, keeping the others.
+fn save_key(key: &str, value: toml::Value) -> std::io::Result<()> {
     let path = config_path();
     let raw = std::fs::read_to_string(&path).unwrap_or_default();
     let mut map: toml::Table = toml::from_str(&raw).unwrap_or_default();
-    map.insert("theme".into(), toml::Value::String(if mode == Mode::Omarchy { "omarchy" } else { "crate" }.into()));
+    map.insert(key.into(), value);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

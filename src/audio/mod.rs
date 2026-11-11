@@ -58,6 +58,16 @@ pub struct Stats {
     pub drained: AtomicBool,
     /// The pending drain is the end of the queue (quit after it).
     pub final_drain: AtomicBool,
+    /// Volume as attenuation in millionths (0 = full volume, the default):
+    /// applied as PipeWire's stream channelVolumes, re-applied on rebuilds.
+    pub attenuation: AtomicU32,
+}
+
+impl Stats {
+    /// Linear stream volume, 0.0..=1.0.
+    pub fn volume(&self) -> f32 {
+        1.0 - self.attenuation.load(Ordering::Acquire) as f32 / 1_000_000.0
+    }
 }
 
 #[derive(Debug)]
@@ -77,6 +87,8 @@ enum Cmd {
     Activate,
     /// Caller pause (false) / resume (true).
     SetActive(bool),
+    /// Stream volume changed (read from Stats::attenuation).
+    Volume,
     /// Play out what the stream has queued. `last`: quit afterwards.
     Drain { last: bool },
     /// End without draining (the stream never received audio).
@@ -110,6 +122,14 @@ impl Engine {
     pub fn stop(&self) {
         self.stats.stop.store(true, Ordering::Release);
         let _ = self.cmd.send(Cmd::Stop);
+    }
+
+    /// Linear volume 0.0..=1.0 (PipeWire software volume; 1.0 leaves the
+    /// samples untouched, anything lower is no longer bit-perfect).
+    pub fn set_volume(&self, linear: f32) {
+        let att = ((1.0 - linear.clamp(0.0, 1.0)) * 1_000_000.0).round() as u32;
+        self.stats.attenuation.store(att, Ordering::Release);
+        let _ = self.cmd.send(Cmd::Volume);
     }
 
     /// Add tracks to the end. False once the decoder has finished the queue
@@ -604,7 +624,11 @@ fn pw_thread(
             ready.set(false);
             draining2.set(false);
             match build(rate) {
-                Ok(l) => *live2.borrow_mut() = Some(l),
+                Ok(l) => {
+                    let v = stats2.volume();
+                    let _ = l.0.set_control(spa_sys::SPA_PROP_channelVolumes, &[v; CHANNELS]);
+                    *live2.borrow_mut() = Some(l);
+                }
                 Err(e) => {
                     let _ = ev2.send(Event::Error(format!("stream: {e:#}")));
                 }
@@ -618,6 +642,12 @@ fn pw_thread(
         Cmd::SetActive(on) => {
             stats2.paused.store(!on, Ordering::Release);
             apply();
+        }
+        Cmd::Volume => {
+            if let Some((s, _)) = live2.borrow().as_ref() {
+                let v = stats2.volume();
+                let _ = s.set_control(spa_sys::SPA_PROP_channelVolumes, &[v; CHANNELS]);
+            }
         }
         Cmd::Stop => {
             live2.borrow_mut().take();

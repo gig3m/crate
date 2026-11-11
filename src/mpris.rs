@@ -19,6 +19,8 @@ pub enum Transport {
     Stop,
     SetShuffle(bool),
     SetRepeat(crate::queue::Repeat),
+    /// 0.0..=1.0
+    SetVolume(f32),
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +30,7 @@ pub enum Update {
     Position(u64),
     Seeked(u64),
     Modes { shuffle: bool, repeat: crate::queue::Repeat },
+    Volume(f64),
 }
 
 /// Start the MPRIS server. Returns the sender for state updates.
@@ -85,6 +88,12 @@ pub fn start(cmds: mpsc::UnboundedSender<Transport>) -> mpsc::UnboundedSender<Up
                 }
                 {
                     let c = cmds.clone();
+                    player.connect_set_volume(move |_, v| {
+                        let _ = c.send(Transport::SetVolume(v.clamp(0.0, 1.0) as f32));
+                    });
+                }
+                {
+                    let c = cmds.clone();
                     player.connect_set_shuffle(move |_, on| {
                         let _ = c.send(Transport::SetShuffle(on));
                     });
@@ -134,6 +143,7 @@ pub fn start(cmds: mpsc::UnboundedSender<Transport>) -> mpsc::UnboundedSender<Up
                             Ok(())
                         }
                         Update::Seeked(ms) => player.seeked(Time::from_millis(ms as i64)).await,
+                        Update::Volume(v) => player.set_volume(v).await,
                         Update::Modes { shuffle, repeat } => {
                             use crate::queue::Repeat;
                             let st = match repeat {
