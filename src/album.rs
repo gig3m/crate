@@ -494,7 +494,7 @@ impl Crate {
             .unwrap_or_default();
         // The track list failed to load: say so, with Retry, instead of an
         // empty table.
-        let failed = (tracks.is_none()).then(|| self.album_error.as_ref().filter(|(k, _)| *k == album.rating_key).map(|(_, e)| e.clone())).flatten();
+        let failed = (tracks.is_none()).then(|| self.album_error.get(&album.rating_key).cloned()).flatten();
         let error_row = failed.map(|e| {
             div()
                 .px(px(12.0))

@@ -345,10 +345,11 @@ impl Crate {
         // The rest of the page doesn't wait on PipeWire: only the device
         // list and the signal card need it.
         let info = self.audio_info.clone().unwrap_or_default();
-        let pw_note = self.audio_info.is_none().then(|| {
-            let msg = match &self.audio_info_error {
-                Some(e) => format!("Couldn't read PipeWire ({e}): devices aren't listed."),
-                None => "Reading PipeWire…".to_string(),
+        let pw_note = (self.audio_info.is_none() || self.audio_info_error.is_some()).then(|| {
+            let msg = match (&self.audio_info_error, self.audio_info.is_some()) {
+                (Some(e), true) => format!("Couldn't read PipeWire again ({e}): showing the last reading."),
+                (Some(e), false) => format!("Couldn't read PipeWire ({e}): devices and the signal check need it."),
+                (None, _) => "Reading PipeWire…".to_string(),
             };
             div()
                 .flex()
@@ -593,8 +594,8 @@ impl Crate {
                 div()
                     .flex()
                     .gap(px(24.0))
-                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Output device")).children(pw_note).children(devices))
-                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Signal")).child(bitperfect).child(later).child(fades).child(quality).child(self.eq_card(t, cx))),
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Output device")).children(pw_note).when(self.audio_info.is_some(), |d| d.children(devices)))
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).child(h2("Signal")).when(self.audio_info.is_some(), |d| d.child(bitperfect)).child(later).child(fades).child(quality).child(self.eq_card(t, cx))),
             )
             .when(!current.is_empty(), |d| {
                 d.child(div().font_family(MONO).text_size(px(11.0)).text_color(rgb(t.muted)).child(format!("Playing to {current}")))

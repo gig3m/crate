@@ -254,7 +254,7 @@ struct Crate {
     audio_info_error: Option<String>,
     /// An album whose track list failed to load (rating key, error), shown
     /// on its page with Retry.
-    pub(crate) album_error: Option<(String, String)>,
+    pub(crate) album_error: HashMap<String, String>,
     prompt_copied: bool,
     /// Another launch (or MPRIS Raise) asked for the window.
     raise_requested: bool,
@@ -829,7 +829,7 @@ impl Crate {
             compact_playing: true,
             audio_info: None,
             audio_info_error: None,
-            album_error: None,
+            album_error: HashMap::new(),
             prompt_copied: false,
             raise_requested: false,
             // Albums left half-downloaded last time pick up where they stopped.
@@ -1001,6 +1001,7 @@ impl Crate {
                 Ok(Ok(t)) => {
                     this.update(cx, |this, cx| {
                         this.server_down_until = None;
+                        this.album_error.remove(&album.rating_key);
                         this.refresh_kept_details(&album.rating_key, &t, cx);
                         f(this, album, t, cx)
                     })
@@ -1023,7 +1024,7 @@ impl Crate {
                         }
                         this.status = format!("Couldn't load {title}: {e:#}").into();
                         let why = if down { "can't reach your Plex server".to_string() } else { format!("{e:#}") };
-                        this.album_error = Some((album.rating_key.clone(), why));
+                        this.album_error.insert(album.rating_key.clone(), why);
                         cx.notify();
                     })
                     .ok();
@@ -1374,9 +1375,7 @@ impl Crate {
 
     pub(crate) fn load_album_tracks(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(album) = self.album(ix).cloned() else { return };
-        if self.album_error.as_ref().is_some_and(|(k, _)| *k == album.rating_key) {
-            self.album_error = None;
-        }
+        self.album_error.remove(&album.rating_key);
         self.with_tracks(album, cx, move |this, _album, tracks, cx| {
             if let View::Album { ix: cur, tracks: slot } = &mut this.view
                 && *cur == ix {
