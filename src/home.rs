@@ -5,7 +5,7 @@ use gpui::{Context, FontWeight, ObjectFit, div, img, linear_color_stop, linear_g
 
 use crate::{Aulos, PAD_X, View, icons, plex::Album, shell::MONO, theme::{Theme, mix}};
 
-fn ago(ts: i64) -> String {
+pub(crate) fn ago(ts: i64) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(ts);
     let s = (now - ts).max(0);
     match s {

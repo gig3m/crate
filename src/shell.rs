@@ -55,6 +55,7 @@ impl Aulos {
         if id == "stations" {
             self.refresh_sonic_progress(cx);
         }
+        self.load_page(id, cx);
         if !same || id == "albums" {
             self.go(v);
         }

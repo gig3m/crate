@@ -13,6 +13,7 @@ mod artist;
 mod home;
 mod icons;
 mod library;
+mod pages;
 mod palette;
 mod mpris;
 mod now_playing;
@@ -118,6 +119,12 @@ struct Aulos {
     /// Server sonic analysis progress, for the Stations page.
     sonic_progress: Option<u32>,
     audio_info: Option<settings::AudioInfo>,
+    history: Option<Vec<plex::HistoryItem>>,
+    top_tracks: Option<Vec<(Track, u64)>>,
+    /// Artists derived from the album list: (key, name, album count).
+    artist_cache: Vec<(String, String, usize)>,
+    artist_cache_for: usize,
+    artist_scroll: UniformListScrollHandle,
     /// Album rating key -> details (None while loading).
     album_detail: HashMap<String, Option<plex::AlbumDetail>>,
     focus: gpui::FocusHandle,
@@ -284,6 +291,11 @@ impl Aulos {
                         if std::env::var_os("AULOS_AUDIO_SETTINGS").is_some() {
                             this.open_audio_settings(cx);
                         }
+                        if let Ok(page) = std::env::var("AULOS_PAGE") {
+                            let page: &'static str = Box::leak(page.into_boxed_str());
+                            this.go(View::Soon(page));
+                            this.load_page(page, cx);
+                        }
                         if std::env::var_os("AULOS_STATIONS").is_some() {
                             this.go(View::Soon("stations"));
                             this.refresh_sonic_progress(cx);
@@ -423,6 +435,11 @@ impl Aulos {
             sonic_progress: None,
             compact_playing: true,
             audio_info: None,
+            history: None,
+            top_tracks: None,
+            artist_cache: Vec::new(),
+            artist_cache_for: usize::MAX,
+            artist_scroll: UniformListScrollHandle::new(),
             np_tab: std::env::var("AULOS_NP_TAB").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             album_detail: HashMap::new(),
             fwd: Vec::new(),
@@ -1142,6 +1159,11 @@ impl Render for Aulos {
             View::Library => grid.into_any_element(),
             View::Soon("stations") => self.stations_view(&t, cx),
             View::Soon("audio") => self.audio_settings_view(&t, cx),
+            View::Soon("artists") => self.artists_view(&t, cx),
+            View::Soon("tracks") => self.tracks_view(&t, cx),
+            View::Soon("history") => self.history_view(&t, cx),
+            View::Soon("playlists") => self.playlists_view(&t, cx),
+            View::Soon("genres") => self.genres_view(&t, cx),
             View::Soon(name) => self.soon_view(name, &t),
             View::Album { ix, tracks } => {
                 let (ix, tracks) = (*ix, tracks.clone());

@@ -198,6 +198,17 @@ pub fn parse_lrc(text: &str) -> Vec<(u64, String)> {
     out
 }
 
+#[derive(Clone, Debug)]
+pub struct HistoryItem {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_key: String,
+    pub rating_key: String,
+    pub viewed_at: i64,
+    pub thumb: String,
+}
+
 pub struct HubsRequest {
     pub reply: oneshot::Sender<anyhow::Result<Home>>,
 }
@@ -530,6 +541,63 @@ impl Client {
             .and_then(|a| a.iter().find(|x| x["type"].as_str() == Some("media.generate.music.analysis")))
             .and_then(|x| x["progress"].as_u64())
             .map(|p| p as u32))
+    }
+
+    /// Recent plays from every client: (title, artist, album title, album key,
+    /// track key, viewed at, album cover).
+    pub async fn history(&self, section: &str, n: usize) -> anyhow::Result<Vec<HistoryItem>> {
+        let res = self
+            .http
+            .get(format!("{}/status/sessions/history/all?librarySectionID={section}&sort=viewedAt:desc", self.base))
+            .header("Accept", "application/json")
+            .header("X-Plex-Token", &self.token)
+            .header("X-Plex-Container-Start", "0")
+            .header("X-Plex-Container-Size", n.to_string())
+            .send()
+            .await?;
+        anyhow::ensure!(res.status().is_success(), "history -> {}", res.status());
+        let v: serde_json::Value = res.json().await.context("history")?;
+        Ok(v["MediaContainer"]["Metadata"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|m| HistoryItem {
+                        title: m["title"].as_str().unwrap_or_default().into(),
+                        artist: m["grandparentTitle"].as_str().unwrap_or_default().into(),
+                        album: m["parentTitle"].as_str().unwrap_or_default().into(),
+                        album_key: m["parentKey"].as_str().unwrap_or_default().rsplit('/').next().unwrap_or_default().into(),
+                        rating_key: m["ratingKey"].as_str().unwrap_or_default().into(),
+                        viewed_at: m["viewedAt"].as_i64().unwrap_or(0),
+                        thumb: m["parentThumb"].as_str().unwrap_or_default().into(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// The library's most played tracks with their play counts.
+    pub async fn top_tracks(&self, section: &str, n: usize) -> anyhow::Result<Vec<(Track, u64)>> {
+        let res = self
+            .http
+            .get(format!("{}/library/sections/{section}/all?type=10&sort=viewCount:desc", self.base))
+            .header("Accept", "application/json")
+            .header("X-Plex-Token", &self.token)
+            .header("X-Plex-Container-Start", "0")
+            .header("X-Plex-Container-Size", n.to_string())
+            .send()
+            .await?;
+        anyhow::ensure!(res.status().is_success(), "top tracks -> {}", res.status());
+        let env: Envelope = res.json().await.context("top tracks")?;
+        Ok(env
+            .mc
+            .metadata
+            .into_iter()
+            .filter_map(|m| {
+                let plays = m.view_count.unwrap_or(0);
+                Some((m.into_track()?, plays))
+            })
+            .filter(|(_, p)| *p > 0)
+            .collect())
     }
 
     /// The first `limit` tracks of a playlist.
