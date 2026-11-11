@@ -173,6 +173,8 @@ pub fn save_remote_kbps(kbps: u32) -> std::io::Result<()> {
 pub enum EqPreset {
     #[default]
     Off,
+    /// A headphone correction from AutoEq (curve kept separately).
+    AutoEq,
     BassBoost,
     Vocal,
     Treble,
@@ -180,11 +182,12 @@ pub enum EqPreset {
 }
 
 impl EqPreset {
-    pub const ALL: [EqPreset; 5] = [EqPreset::Off, EqPreset::BassBoost, EqPreset::Vocal, EqPreset::Treble, EqPreset::Custom];
+    pub const ALL: [EqPreset; 6] = [EqPreset::Off, EqPreset::AutoEq, EqPreset::BassBoost, EqPreset::Vocal, EqPreset::Treble, EqPreset::Custom];
 
     pub fn label(self) -> &'static str {
         match self {
             EqPreset::Off => "Off",
+            EqPreset::AutoEq => "AutoEQ",
             EqPreset::BassBoost => "Bass boost",
             EqPreset::Vocal => "Vocal",
             EqPreset::Treble => "Treble",
@@ -195,6 +198,7 @@ impl EqPreset {
     fn key(self) -> &'static str {
         match self {
             EqPreset::Off => "off",
+            EqPreset::AutoEq => "autoeq",
             EqPreset::BassBoost => "bass",
             EqPreset::Vocal => "vocal",
             EqPreset::Treble => "treble",
@@ -208,7 +212,7 @@ impl EqPreset {
             EqPreset::BassBoost => Some([6.0, 5.0, 4.0, 2.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0]),
             EqPreset::Vocal => Some([-2.0, -1.5, -0.5, 0.5, 2.0, 3.0, 3.0, 1.5, 0.0, -1.0]),
             EqPreset::Treble => Some([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 4.5, 5.5]),
-            EqPreset::Off | EqPreset::Custom => None,
+            EqPreset::Off | EqPreset::AutoEq | EqPreset::Custom => None,
         }
     }
 }
@@ -230,6 +234,27 @@ pub fn saved_eq() -> (EqPreset, [f32; 10]) {
 pub fn save_eq(preset: EqPreset, custom: &[f32; 10]) -> std::io::Result<()> {
     save_key("eq", toml::Value::String(preset.key().into()))?;
     save_key("eq_custom", toml::Value::Array(custom.iter().map(|g| toml::Value::Float(((*g as f64) * 10.0).round() / 10.0)).collect()))
+}
+
+/// The saved AutoEQ profile: (headphone name, ten gains).
+pub fn saved_autoeq() -> Option<(String, [f32; 10])> {
+    let raw = std::fs::read_to_string(config_path()).unwrap_or_default();
+    let map: HashMap<String, toml::Value> = toml::from_str(&raw).unwrap_or_default();
+    let name = map.get("eq_autoeq_name")?.as_str()?.to_string();
+    let arr = map.get("eq_autoeq")?.as_array()?;
+    if arr.len() != 10 {
+        return None;
+    }
+    let mut g = [0.0f32; 10];
+    for (x, v) in g.iter_mut().zip(arr) {
+        *x = v.as_float().or(v.as_integer().map(|i| i as f64)).filter(|f| f.is_finite())?.clamp(-12.0, 12.0) as f32;
+    }
+    Some((name, g))
+}
+
+pub fn save_autoeq(name: &str, gains: &[f32; 10]) -> std::io::Result<()> {
+    save_key("eq_autoeq_name", toml::Value::String(name.into()))?;
+    save_key("eq_autoeq", toml::Value::Array(gains.iter().map(|g| toml::Value::Float(((*g as f64) * 10.0).round() / 10.0)).collect()))
 }
 
 pub fn save_leveling(l: Leveling) -> std::io::Result<()> {

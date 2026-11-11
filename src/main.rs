@@ -22,6 +22,7 @@ mod pages;
 mod playlist_add;
 mod playlist_view;
 mod viz;
+mod autoeq;
 mod palette;
 mod queue;
 mod mpris;
@@ -107,6 +108,11 @@ struct Crate {
     /// A playlist create/add is in flight (one at a time).
     playlist_busy: bool,
     playlist_scroll: UniformListScrollHandle,
+    /// The AutoEQ profile in use (headphone, gains), the open picker, and
+    /// the fetched index.
+    eq_autoeq: Option<(String, [f32; 10])>,
+    autoeq_picker: Option<autoeq::Picker>,
+    autoeq_index: Option<Arc<Vec<autoeq::Entry>>>,
     /// Track bar visualizer (style, colors, live-view state, drag).
     viz: std::cell::RefCell<viz::Viz>,
     /// Bumped per playlist page load; stale replies are dropped.
@@ -443,7 +449,13 @@ impl Crate {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search, play, or run a command"));
         let sonic_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search for a track to start or end at"));
         let (eq_preset, eq_custom) = theme::saved_eq();
-        let shown = eq_preset.curve().unwrap_or(eq_custom);
+        let saved_autoeq = theme::saved_autoeq();
+        // AutoEQ saved without its profile: fall back to off.
+        let eq_preset = if eq_preset == theme::EqPreset::AutoEq && saved_autoeq.is_none() { theme::EqPreset::Off } else { eq_preset };
+        let shown = match eq_preset {
+            theme::EqPreset::AutoEq => saved_autoeq.as_ref().map(|a| a.1).unwrap_or(eq_custom),
+            p => p.curve().unwrap_or(eq_custom),
+        };
         let eq_sliders: Vec<_> = (0..10)
             .map(|i| cx.new(|_| gpui_component::slider::SliderState::new().min(-12.0).max(12.0).step(0.5).default_value(shown[i])))
             .collect();
@@ -726,6 +738,9 @@ impl Crate {
             playlist_busy: false,
             playlist_scroll: UniformListScrollHandle::new(),
             viz: std::cell::RefCell::new(viz::Viz::load()),
+            eq_autoeq: saved_autoeq,
+            autoeq_picker: None,
+            autoeq_index: None,
             playlist_load_gen: 0,
             playlist_error: None,
             playlist_removing: HashSet::new(),
@@ -1310,7 +1325,15 @@ impl Crate {
         match self.eq_preset {
             theme::EqPreset::Off => [0.0; 10],
             theme::EqPreset::Custom => self.eq_custom,
-            p => p.curve().unwrap_or([0.0; 10]),
+            p => self.preset_curve(p).unwrap_or([0.0; 10]),
+        }
+    }
+
+    /// A preset's fixed curve (AutoEQ: the loaded profile's).
+    pub(crate) fn preset_curve(&self, p: theme::EqPreset) -> Option<[f32; 10]> {
+        match p {
+            theme::EqPreset::AutoEq => self.eq_autoeq.as_ref().map(|a| a.1),
+            p => p.curve(),
         }
     }
 
@@ -1326,8 +1349,10 @@ impl Crate {
 
     /// A preset chip: load its curve into the sliders (Off keeps them as they are).
     pub(crate) fn set_eq_preset(&mut self, p: theme::EqPreset, window: &mut Window, cx: &mut Context<Self>) {
+        // AutoEQ without a profile yet: nothing to switch to.
+        let p = if p == theme::EqPreset::AutoEq && self.eq_autoeq.is_none() { self.eq_preset } else { p };
         self.eq_preset = p;
-        let shown = p.curve().unwrap_or(self.eq_custom);
+        let shown = self.preset_curve(p).unwrap_or(self.eq_custom);
         for (s, g) in self.eq_sliders.iter().zip(shown) {
             s.update(cx, |s, cx| s.set_value(g, window, cx));
         }
@@ -1336,7 +1361,7 @@ impl Crate {
 
     /// A slider moved: that makes the curve Custom (starting from what was shown).
     fn set_eq_band(&mut self, i: usize, db: f32, save: bool, cx: &mut Context<Self>) {
-        if let Some(curve) = self.eq_preset.curve() {
+        if let Some(curve) = self.preset_curve(self.eq_preset) {
             self.eq_custom = curve;
         }
         self.eq_preset = theme::EqPreset::Custom;
@@ -2114,6 +2139,21 @@ impl Render for Crate {
                                 this.start_naming(playlist_add::NameFor::Smart(query), name, window, cx);
                             }
                             "commit" => this.commit_naming(cx),
+                            k if k.starts_with("autoeq:") => {
+                                if this.autoeq_picker.is_none() {
+                                    this.toggle_autoeq_picker(window, cx);
+                                }
+                                if let Some(p) = &this.autoeq_picker {
+                                    let q = k[7..].to_string();
+                                    p.input.update(cx, |s, cx| s.set_value(q, window, cx));
+                                }
+                            }
+                            k if k.starts_with("autoeqpick:") => {
+                                let i: usize = k[11..].parse().unwrap_or(0);
+                                if let Some(e) = this.autoeq_picker.as_ref().and_then(|p| p.results.get(i).cloned()) {
+                                    this.pick_autoeq(e, window, cx);
+                                }
+                            }
                             k if k.starts_with("plnewkey:") => {
                                 this.start_naming(playlist_add::NameFor::Albums(vec![k[9..].to_string()]), "Crate test".into(), window, cx)
                             }

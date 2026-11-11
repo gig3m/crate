@@ -88,11 +88,69 @@ impl Crate {
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(if on { t.text_strong } else { t.text2 }))
                 .cursor_pointer()
-                .child(p.label())
-                .on_click(cx.listener(move |this, _, window, cx| this.set_eq_preset(p, window, cx)))
+                .child(match (p, self.eq_autoeq.as_ref()) {
+                    (EqPreset::AutoEq, Some((name, _))) => format!("AutoEQ · {name}"),
+                    (EqPreset::AutoEq, None) => "AutoEQ…".to_string(),
+                    _ => p.label().to_string(),
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    // AutoEQ: pick a headphone first, or again when it's already on.
+                    if p == EqPreset::AutoEq && (this.eq_autoeq.is_none() || this.eq_preset == EqPreset::AutoEq) {
+                        this.toggle_autoeq_picker(window, cx);
+                    } else {
+                        this.set_eq_preset(p, window, cx);
+                    }
+                }))
+        });
+        let picker = self.autoeq_picker.as_ref().map(|pk| {
+            let rows = pk.results.iter().enumerate().map(|(i, e)| {
+                let e2 = e.clone();
+                div()
+                    .id(("autoeq-hit", i))
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgb(t.raised)))
+                    .child(div().text_size(px(13.0)).text_color(rgb(t.text)).truncate().child(e.name.clone()))
+                    .child(div().flex_none().text_size(px(11.0)).text_color(rgb(t.muted)).child(e.source.clone()))
+                    .on_click(cx.listener(move |this, _, window, cx| this.pick_autoeq(e2.clone(), window, cx)))
+            });
+            let note = if pk.loading {
+                Some("Loading the AutoEq list…")
+            } else if pk.results.is_empty() && !pk.input.read(cx).value().trim().is_empty() {
+                Some("No headphone by that name in AutoEq")
+            } else {
+                None
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .p(px(8.0))
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(rgb(t.raised))
+                .bg(rgb(t.base))
+                .child(
+                    div()
+                        .h(px(32.0))
+                        .px(px(4.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(rgb(t.border))
+                        .bg(rgb(t.surface))
+                        .child(gpui_component::input::Input::new(&pk.input).appearance(false)),
+                )
+                .children(note.map(|n| div().px(px(10.0)).py(px(4.0)).text_size(px(12.0)).text_color(rgb(t.muted)).child(n)))
+                .children(rows)
+                .child(div().px(px(10.0)).text_size(px(11.0)).text_color(rgb(t.muted)).child("Corrections from the AutoEq project (github.com/jaakkopasanen/AutoEq), ten bands at Q 1.41."))
         });
         let gains = self.eq_gains();
-        let shown = cur.curve().unwrap_or(self.eq_custom);
+        let shown = self.preset_curve(cur).unwrap_or(self.eq_custom);
         let bands = self.eq_sliders.iter().enumerate().map(|(i, s)| {
             let f = crate_audio::audio::eq::BANDS[i];
             let label = if f >= 1000.0 { format!("{}k", f / 1000.0) } else { format!("{f}") };
@@ -118,6 +176,7 @@ impl Crate {
             .gap(px(8.0))
             .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.text_strong)).child("Ten-band equalizer"))
             .child(div().flex().flex_wrap().gap(px(6.0)).children(chips))
+            .children(picker)
             .child(div().pt(px(6.0)).flex().gap(px(4.0)).opacity(if cur == EqPreset::Off { 0.45 } else { 1.0 }).children(bands))
             .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(if active {
                 "Heard right away. Changes the samples. A preamp takes off the biggest boost and a soft knee rounds any peak past 0.98 instead of clipping it."
