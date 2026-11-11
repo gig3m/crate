@@ -190,7 +190,7 @@ impl Crate {
                 icon_btn("queue", "queue", 17.0, t.text2, None, cx)
                     .cursor_pointer()
                     .hover(|d| d.bg(rgb(t.raised)))
-                    .on_click(cx.listener(|this, _, _, cx| this.open_now_playing(Some(0), cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.open_queue(cx))),
             )
             .child(
                 icon_btn("device", "device", 17.0, if self.target.is_some() { t.accent } else { t.text2 }, None, cx)

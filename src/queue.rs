@@ -109,7 +109,12 @@ impl Crate {
     /// Tracks the engine should get starting at queue index `from`: just that
     /// one under repeat-one (it ends, and we replay it), else the rest.
     pub(crate) fn engine_slice(&self, tracks: &[Track], from: usize) -> std::ops::Range<usize> {
-        if self.repeat == Repeat::One { from..(from + 1).min(tracks.len()) } else { from..tracks.len() }
+        if self.repeat == Repeat::One {
+            from..(from + 1).min(tracks.len())
+        } else {
+            // "Stop after": the engine gets nothing past that track.
+            from..self.stop_after.map(|s| (s + 1).max(from + 1)).unwrap_or(tracks.len()).min(tracks.len())
+        }
     }
 
     /// Hand the engine the tracks it hasn't opened yet, in `now.tracks` order.
@@ -136,7 +141,8 @@ impl Crate {
         let range = match self.repeat {
             Repeat::One if started == 0 => first..(first + 1).min(now.tracks.len()),
             Repeat::One => first..first,
-            _ => first..now.tracks.len(),
+            // "Stop after": nothing past that track.
+            _ => first..self.stop_after.map(|s| (s + 1).max(first)).unwrap_or(now.tracks.len()).min(now.tracks.len()),
         };
         let prev = range.start.checked_sub(1).and_then(|p| now.tracks.get(p));
         let srcs = self.sources(&now.tracks[range.clone()], prev);
@@ -148,6 +154,135 @@ impl Crate {
             n.engine_end = end;
         }
         true
+    }
+
+    /// The first queue index that can still be edited: after the current
+    /// track and after anything the decoder has already opened.
+    pub(crate) fn first_editable(&self) -> usize {
+        let Some(now) = self.now.as_ref() else { return usize::MAX };
+        let decoded = self.engine.as_ref().map(|e| e.started()).unwrap_or(0);
+        (now.idx + 1).max(now.start_idx + decoded)
+    }
+
+    /// Edit the upcoming tracks with `f` (which returns false to refuse) and
+    /// hand the result to the engine, against the same decoder position; if
+    /// the decoder moves on meanwhile, undo and try again.
+    fn edit_upcoming(&mut self, mut f: impl FnMut(&mut crate::Now, usize) -> bool) -> bool {
+        for _ in 0..5 {
+            let started = self.engine.as_ref().filter(|e| !e.is_closed()).map(|e| e.started());
+            let first = self.first_editable();
+            let Some(now) = self.now.as_mut() else { return false };
+            let before = (now.tracks.clone(), now.orig_order.clone(), now.engine_end);
+            if !f(now, first) {
+                return false;
+            }
+            match started {
+                None => return true,
+                Some(s) if self.hand_over(s) => return true,
+                Some(_) => {
+                    if let Some(now) = self.now.as_mut() {
+                        (now.tracks, now.orig_order, now.engine_end) = before;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Drop upcoming track `i` from the queue.
+    pub(crate) fn remove_upcoming(&mut self, i: usize, cx: &mut Context<Self>) {
+        let ok = self.edit_upcoming(|now, first| {
+            if i < first || i >= now.tracks.len() {
+                return false;
+            }
+            let t = now.tracks.remove(i);
+            if let Some(p) = now.orig_order.iter().rposition(|k| *k == t.rating_key) {
+                now.orig_order.remove(p);
+            }
+            if now.engine_end > i {
+                now.engine_end -= 1;
+            }
+            true
+        });
+        if ok {
+            if let Some(s) = self.stop_after.as_mut()
+                && *s >= i
+                && *s > 0
+            {
+                *s -= 1;
+            }
+        } else {
+            self.say("That track has already started loading; it can't be removed now");
+        }
+        cx.notify();
+    }
+
+    /// Move upcoming track `from` to position `to` (both still editable).
+    pub(crate) fn move_upcoming(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from == to {
+            return;
+        }
+        let ok = self.edit_upcoming(|now, first| {
+            if from < first || to < first || from >= now.tracks.len() || to >= now.tracks.len() {
+                return false;
+            }
+            let t = now.tracks.remove(from);
+            now.tracks.insert(to, t);
+            true
+        });
+        if !ok {
+            self.say("Those tracks have already started loading; they can't be moved now");
+        }
+        cx.notify();
+    }
+
+    /// Remove every upcoming track that can still be removed.
+    pub(crate) fn clear_upcoming(&mut self, cx: &mut Context<Self>) {
+        let mut removed = 0;
+        let ok = self.edit_upcoming(|now, first| {
+            if first >= now.tracks.len() {
+                return false;
+            }
+            let gone: Vec<Track> = now.tracks.drain(first..).collect();
+            removed = gone.len();
+            for t in &gone {
+                if let Some(p) = now.orig_order.iter().rposition(|k| *k == t.rating_key) {
+                    now.orig_order.remove(p);
+                }
+            }
+            now.engine_end = now.engine_end.min(now.tracks.len());
+            // Radio: cleared means cleared, not refilled behind your back.
+            now.refill = None;
+            true
+        });
+        if ok {
+            self.stop_after = None;
+            self.say(format!("Cleared {removed} upcoming track{}", if removed == 1 { "" } else { "s" }));
+        }
+        cx.notify();
+    }
+
+    /// Stop after the current track (`album`: after the rest of its album in
+    /// the queue); again to cancel.
+    pub(crate) fn toggle_stop_after(&mut self, album: bool, cx: &mut Context<Self>) {
+        let Some(now) = self.now.as_ref() else { return };
+        let idx = now.idx;
+        let end = if album {
+            let key = now.tracks.get(idx).map(|t| t.album_key.clone()).unwrap_or_default();
+            let mut e = idx;
+            while now.tracks.get(e + 1).is_some_and(|t| t.album_key == key) {
+                e += 1;
+            }
+            e
+        } else {
+            idx
+        };
+        let (was, label) = (self.stop_after, if album { "this album" } else { "this track" });
+        self.stop_after = if was == Some(end) && self.stop_after_album == album { None } else { Some(end) };
+        self.stop_after_album = album;
+        self.sync_upcoming();
+        self.say(if self.stop_after.is_some() { format!("Stopping after {label}") } else { "Won't stop early".to_string() });
+        cx.notify();
     }
 
     /// Play next (right after what the engine has already opened) or add to

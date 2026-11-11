@@ -493,7 +493,24 @@ impl Crate {
                             .items_center()
                             .justify_between()
                             .child(div().font_family(MONO).font_weight(FontWeight::MEDIUM).text_size(px(11.0)).text_color(white(0.66)).child(label))
-                            .children(dj),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(10.0))
+                                    .child(
+                                        div()
+                                            .id("np-full-queue")
+                                            .font_family(MONO)
+                                            .text_size(px(10.0))
+                                            .text_color(white(0.66))
+                                            .cursor_pointer()
+                                            .hover(|d| d.text_color(white(1.0)))
+                                            .child("FULL QUEUE")
+                                            .on_click(cx.listener(|this, _, _, cx| this.open_queue(cx))),
+                                    )
+                                    .children(dj),
+                            ),
                     )
                     .when(rows.is_empty(), |d| d.child(div().px(px(6.0)).text_size(px(13.0)).text_color(white(0.6)).child("End of queue")))
                     .children(rows)

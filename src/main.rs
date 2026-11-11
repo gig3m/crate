@@ -27,6 +27,7 @@ mod viz;
 mod autoeq;
 mod palette;
 mod queue;
+mod queue_view;
 mod mpris;
 mod now_playing;
 mod offline;
@@ -181,6 +182,14 @@ struct Crate {
     view_size: (f32, f32),
     /// Now Playing shows lyrics when the track has them (saved).
     np_lyrics: bool,
+    /// "Stop after": the queue index playback stops after (the engine is
+    /// handed nothing past it), and whether it was set for the album.
+    pub(crate) stop_after: Option<usize>,
+    queue_scroll: UniformListScrollHandle,
+    pub(crate) stop_after_album: bool,
+    /// The last track change was the user's (Next, Prev, a click), not
+    /// the queue moving on: "stop after" doesn't catch it.
+    user_jump: bool,
     /// Pages whose data failed to load (History, Tracks), with the error.
     pub(crate) page_error: HashMap<&'static str, String>,
     /// Until when the server counts as unreachable (after a connect or
@@ -787,6 +796,10 @@ impl Crate {
             content_w: 1000.0,
             view_size: (1280.0, 800.0),
             np_lyrics: theme::saved_lyrics(),
+            stop_after: None,
+            queue_scroll: UniformListScrollHandle::new(),
+            stop_after_album: false,
+            user_jump: false,
             page_error: HashMap::new(),
             server_down_until: None,
             hubs_tx: hubs_tx_keep,
@@ -1418,6 +1431,7 @@ impl Crate {
         }
         self.queue_seq += 1;
         self.play_intent += 1;
+        self.stop_after = None;
         // A note is for one named play; any other queue drops it.
         if self.play_note.as_ref().is_some_and(|(ctx, _)| *ctx != context) {
             self.play_note = None;
@@ -1666,6 +1680,7 @@ impl Crate {
     fn play_from(&mut self, idx: usize, ms: u64, cx: &mut Context<Self>) {
         // Read first, so an early return can't leave it set for a later play.
         let start_paused = std::mem::take(&mut self.start_paused);
+        self.user_jump = true;
         // An explicit start supersedes a queue waiting on loudness.
         self.pending_start = None;
         // The new engine reports its own gains; don't show the old one's meanwhile.
@@ -1786,8 +1801,13 @@ impl Crate {
                     // from the top at the end of the queue, else from the current
                     // track (an error or a radio refill that ran dry mid-queue).
                     if !matches!(t, Transport::Pause) {
+                        let stopped_here = self.stop_after == Some(idx);
+                        self.stop_after = None;
                         let from = if idx + 1 >= n {
                             0
+                        } else if stopped_here {
+                            // Stopped on purpose after this track: go on.
+                            idx + 1
                         } else if now.failed_at == Some(idx) {
                             // That track couldn't start: go on to the next.
                             idx + 1
@@ -1954,6 +1974,23 @@ impl Crate {
         if announced {
             self.detail_failed.remove(&rk);
             self.save_resume();
+            // Past the stop point. If the engine had already opened the next
+            // track when "stop after" was set (its last seconds), stop now,
+            // paused at that track's start; a skip past it just ends it.
+            // Whether this track started because of the user (Next, a click,
+            // a new queue) rather than the queue playing on.
+            let jumped = std::mem::take(&mut self.user_jump);
+            if let Some(stop) = self.stop_after
+                && let Some(idx) = self.now.as_ref().map(|n| n.idx)
+                && idx > stop
+            {
+                self.stop_after = None;
+                if idx == stop + 1 && !jumped {
+                    self.start_paused = true;
+                    self.play_from(idx, 0, cx);
+                    self.say("Stopped after that track, as asked");
+                }
+            }
         }
         self.request_track_detail(rk, cx);
         // Now Playing's ambient field comes from the album's UltraBlur colors.
@@ -2011,6 +2048,7 @@ impl Crate {
                                 && n.finished
                                 && !n.stopped
                                 && n.engine_end < n.tracks.len()
+                                && this.stop_after.is_none_or(|s| n.engine_end <= s)
                             {
                                 let from = n.engine_end;
                                 this.play_from(from, 0, cx);
@@ -2033,12 +2071,14 @@ impl Crate {
             .detach();
         }
         // The engine reached the end of its queue but the queue has grown.
-        if now.finished && !failed && !now.stopped && now.engine_end < now.tracks.len() && self.repeat != queue::Repeat::One {
+        // ("Stop after" ends it at its track: that's why the engine got no more.)
+        let stop_here = self.stop_after.is_some_and(|s| now.engine_end > s);
+        if now.finished && !failed && !now.stopped && !stop_here && now.engine_end < now.tracks.len() && self.repeat != queue::Repeat::One {
             let from = now.engine_end;
             self.play_from(from, 0, cx);
             return false;
         }
-        if now.finished && !failed && self.repeat_on_finish(cx) {
+        if now.finished && !failed && !stop_here && self.repeat_on_finish(cx) {
             return false;
         }
         let Some(now) = self.now.as_mut() else { return false };
@@ -2479,6 +2519,16 @@ impl Render for Crate {
                             }
                             k if k.starts_with("pladd:") => this.add_selection_to_playlist(k[6..].to_string(), "test".into(), cx),
                             "np" => this.open_now_playing(None, cx),
+                            "queue" => this.open_queue(cx),
+                            k if k.starts_with("qrm:") => this.remove_upcoming(k[4..].parse().unwrap_or(0), cx),
+                            k if k.starts_with("qmv:") => {
+                                let mut it = k[4..].split(':').map(|v| v.parse::<usize>().unwrap_or(0));
+                                let (f, t) = (it.next().unwrap_or(0), it.next().unwrap_or(0));
+                                this.move_upcoming(f, t, cx);
+                            }
+                            "qclear" => this.clear_upcoming(cx),
+                            "qstop" => this.toggle_stop_after(false, cx),
+                            "qstopalbum" => this.toggle_stop_after(true, cx),
                             "lyrics" => {
                                 this.np_lyrics = !this.np_lyrics;
                                 cx.notify();
@@ -2632,6 +2682,7 @@ impl Render for Crate {
             View::Soon("playlists") => self.playlists_view(&t, cx),
             View::Soon("genres") => self.genres_view(&t, cx),
             View::Soon("offline") => self.offline_view(&t, cx),
+            View::Soon("queue") => self.queue_view(&t, cx),
             View::Soon("sonic") => self.sonic_view(&t, cx),
             View::Soon(name) => self.soon_view(name, &t),
             View::Album { ix, tracks } => {
@@ -2717,7 +2768,7 @@ impl Render for Crate {
             .on_action(cx.listener(|this, _: &ShowLyrics, _, cx| this.open_now_playing(None, cx)))
             .on_action(cx.listener(|this, _: &VolumeUp, _, cx| this.set_volume(this.volume + 0.05, cx)))
             .on_action(cx.listener(|this, _: &VolumeDown, _, cx| this.set_volume(this.volume - 0.05, cx)))
-            .on_action(cx.listener(|this, _: &ShowQueue, _, cx| this.open_now_playing(Some(0), cx)))
+            .on_action(cx.listener(|this, _: &ShowQueue, _, cx| this.open_queue(cx)))
             .on_action(cx.listener(|this, _: &CursorNext, _, cx| this.move_cursor(1, cx)))
             .on_action(cx.listener(|this, _: &CursorPrev, _, cx| this.move_cursor(-1, cx)))
             .on_action(cx.listener(|this, _: &ActivateCursor, _, cx| this.activate_cursor(cx)))
