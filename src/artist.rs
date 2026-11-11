@@ -185,8 +185,54 @@ impl Crate {
         let main_w = (self.content_w - 340.0 - 40.0).max(400.0);
         let cols = ((main_w + 20.0) / (150.0 + 20.0)).floor().clamp(2.0, 5.0) as usize;
         let card_w = ((main_w - 20.0 * (cols as f32 - 1.0)) / cols as f32).floor();
+        // Discography tabs (canvas): Albums / Singles & EPs / Live, from the
+        // library's Format and Subformat tags (plus "Live at…" titles, since
+        // live albums are often untagged). Only tabs with albums show.
+        let kinds = self.artist_kinds.get(key).cloned().flatten();
+        let kind_of = |a: &Album| -> usize {
+            let t = a.title.to_lowercase();
+            let live_title = t.starts_with("live at") || t.starts_with("live from") || t.contains("(live");
+            match &kinds {
+                Some((small, _)) if small.contains(&a.rating_key) => 1,
+                Some((_, live)) if live.contains(&a.rating_key) => 2,
+                _ if live_title => 2,
+                _ => 0,
+            }
+        };
+        let counts = albums.iter().fold([0usize; 3], |mut c, (_, a)| {
+            c[kind_of(a)] += 1;
+            c
+        });
+        let tab = if counts[self.artist_tab.min(2)] > 0 { self.artist_tab.min(2) } else { 0 };
+        let tabs_el = (counts[1] + counts[2] > 0).then(|| {
+            div().flex().gap(px(4.0)).p(px(4.0)).rounded(px(10.0)).bg(rgb(t.surface)).border_1().border_color(rgb(t.raised)).children(
+                ["Albums", "Singles & EPs", "Live"].iter().enumerate().filter(|(i, _)| counts[*i] > 0).map(|(i, label)| {
+                    let on = i == tab;
+                    div()
+                        .id(("dtab", i))
+                        .h(px(32.0))
+                        .px(px(12.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .rounded(px(7.0))
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .bg(rgb(if on { t.raised } else { t.surface }))
+                        .text_color(rgb(if on { t.text_strong } else { t.text2 }))
+                        .cursor_pointer()
+                        .child(*label)
+                        .child(div().font_family(MONO).text_size(px(11.0)).text_color(rgb(t.muted)).child(counts[i].to_string()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.artist_tab = i;
+                            cx.notify();
+                        }))
+                }),
+            )
+        });
         let cards: Vec<_> = albums
             .iter()
+            .filter(|(_, a)| kind_of(a) == tab)
             .map(|(ix, a)| {
                 let ix = *ix;
                 let cover = match self.art.get(&a.thumb).cloned() {
@@ -214,7 +260,14 @@ impl Crate {
             .flex_col()
             .gap(px(32.0))
             .when(!popular.is_empty(), |d| d.child(div().flex().flex_col().gap(px(8.0)).child(h2("Popular in your library")).children(popular)))
-            .child(div().flex().flex_col().gap(px(14.0)).child(h2("Albums")).child(div().flex().flex_wrap().gap(px(20.0)).children(cards)));
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(14.0))
+                    .child(div().flex().items_center().justify_between().child(h2(["Albums", "Singles & EPs", "Live"][tab])).children(tabs_el))
+                    .child(div().flex().flex_wrap().gap(px(20.0)).children(cards)),
+            );
 
         // Aside: similar artists you have, biography.
         // Sonically similar artists when the server has them, else Plex's

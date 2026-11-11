@@ -155,6 +155,9 @@ struct Crate {
     sonic_albums: HashMap<String, Option<Vec<Album>>>,
     sonic_artists: HashMap<String, Option<Vec<sonic::ArtistRef>>>,
     sonic: sonic::SonicState,
+    /// Artist key -> (singles & EPs, live) album keys; and the open tab.
+    artist_kinds: HashMap<String, Option<sonic::AlbumKinds>>,
+    artist_tab: usize,
     sonic_search: Entity<InputState>,
     history: Option<Vec<plex::HistoryItem>>,
     top_tracks: Option<Vec<(Track, u64)>>,
@@ -579,6 +582,8 @@ impl Crate {
             sonic_albums: HashMap::new(),
             sonic_artists: HashMap::new(),
             sonic: sonic::SonicState::default(),
+            artist_kinds: HashMap::new(),
+            artist_tab: 0,
             sonic_search,
             history: None,
             top_tracks: None,
@@ -719,6 +724,8 @@ impl Crate {
         }
         self.go(View::Artist { key: key.clone(), name, info: None });
         self.request_sonic_artists(key.clone(), cx);
+        self.artist_tab = 0;
+        self.request_artist_kinds(key.clone(), cx);
         self.album_scroll = gpui::ScrollHandle::new();
         cx.notify();
         self.load_artist_info(key, cx);

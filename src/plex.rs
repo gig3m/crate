@@ -703,6 +703,33 @@ impl Client {
             .collect())
     }
 
+    /// An artist's albums by kind, from the library's Format (EP, Single) and
+    /// Subformat (Live) tags: (singles & EPs, live) as album keys.
+    pub async fn artist_album_kinds(
+        &self,
+        section: &str,
+        artist_key: &str,
+    ) -> anyhow::Result<(std::collections::HashSet<String>, std::collections::HashSet<String>)> {
+        let fp = format!("/library/sections/{section}/format");
+        let sp = format!("/library/sections/{section}/subformat");
+        let (formats, subformats) = tokio::join!(self.directory(&fp), self.directory(&sp));
+        let pick = |dir: &[(String, String)], names: &[&str]| -> Vec<String> {
+            dir.iter().filter(|(_, t)| names.contains(&t.as_str())).map(|(k, _)| k.clone()).collect()
+        };
+        let small = pick(&formats.unwrap_or_default(), &["EP", "Single"]);
+        let live = pick(&subformats.unwrap_or_default(), &["Live"]);
+        let keys = |filter: String| async move {
+            if filter.is_empty() {
+                return Ok::<_, anyhow::Error>(std::collections::HashSet::new());
+            }
+            Ok(self.album_keys_where(section, &format!("artist.id={artist_key}&{filter}")).await?.into_iter().collect())
+        };
+        let small_f = if small.is_empty() { String::new() } else { format!("format={}", small.join(",")) };
+        let live_f = if live.is_empty() { String::new() } else { format!("subformat={}", live.join(",")) };
+        let (a, b) = tokio::join!(keys(small_f), keys(live_f));
+        Ok((a?, b?))
+    }
+
     /// Sonically nearest items to a track, album or artist (needs the
     /// server's sonic analysis). Distances run 0 (same) upward.
     async fn nearest_meta(&self, key: &str, limit: usize) -> anyhow::Result<Vec<Meta>> {

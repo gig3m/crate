@@ -65,6 +65,29 @@ impl Crate {
         .detach();
     }
 
+    pub(crate) fn request_artist_kinds(&mut self, key: String, cx: &mut Context<Self>) {
+        if self.artist_kinds.contains_key(&key) {
+            return;
+        }
+        self.artist_kinds.insert(key.clone(), None);
+        let (k, section) = (key.clone(), crate::section());
+        let rx = crate::plex_call(move |c| async move { c.artist_album_kinds(&section, &k).await });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| match res {
+                Ok(Ok(kinds)) => {
+                    this.artist_kinds.insert(key, Some(kinds));
+                    cx.notify();
+                }
+                _ => {
+                    this.artist_kinds.remove(&key);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Sonic radio: the tracks that sound most like `seed`, starting with it.
     pub(crate) fn play_sonic_radio(&mut self, seed: Track, cx: &mut Context<Self>) {
         self.play_intent += 1;
@@ -452,6 +475,8 @@ fn pill_small(id: (&'static str, usize), label: &'static str, t: &Theme) -> gpui
 
 /// (artist key, name, photo)
 pub type ArtistRef = (String, String, String);
+/// (singles & EPs, live) album keys.
+pub type AlbumKinds = (std::collections::HashSet<String>, std::collections::HashSet<String>);
 
 #[derive(Default)]
 pub struct SonicState {
