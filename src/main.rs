@@ -681,6 +681,10 @@ impl Crate {
         // Art results stream back the same way.
         cx.spawn(async move |this, cx| {
             while let Some(res) = art_rx.recv().await {
+                if res.bytes.is_some() {
+                    static FIRST_ART: std::sync::Once = std::sync::Once::new();
+                    FIRST_ART.call_once(|| startup_mark("first cover arrived"));
+                }
                 let ok = this
                     .update(cx, |this, cx| {
                         if let Some(bytes) = res.bytes {
@@ -1247,6 +1251,9 @@ impl Crate {
 
     fn home_loaded(&mut self, home: plex::Home, cx: &mut Context<Self>) {
         let first = self.home.is_none();
+        if first {
+            startup_mark("home loaded");
+        }
         // Pinned playlists' current covers (any playlist, not just recent ones).
         let pinned_covers: Vec<String> = self
             .pins
@@ -2516,6 +2523,8 @@ fn report(b: &Bench, art_loaded: usize) {
 
 impl Render for Crate {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        static FIRST: std::sync::Once = std::sync::Once::new();
+        FIRST.call_once(|| startup_mark("first frame"));
         let t0 = Instant::now();
         // The live bars this frame shows register again as they're built.
         self.viz.borrow_mut().clear_live_bars();
@@ -3117,7 +3126,19 @@ fn fetch_more(key: String) -> tokio::sync::oneshot::Receiver<anyhow::Result<Vec<
     })
 }
 
+/// When the process started, for CRATE_TRACE startup timings.
+static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// CRATE_TRACE: print how long after launch a startup step happened.
+pub(crate) fn startup_mark(step: &str) {
+    if std::env::var_os("CRATE_TRACE").is_some() {
+        let ms = T0.get_or_init(Instant::now).elapsed().as_millis();
+        eprintln!("[startup] {ms:>5} ms  {step}");
+    }
+}
+
 fn main() {
+    T0.get_or_init(Instant::now);
     // Answer these before anything starts (no window, no cache work).
     let first = std::env::args().nth(1);
     match first.as_deref() {
@@ -3246,6 +3267,7 @@ fn main() {
         });
         return;
     }
+    startup_mark("runtime up");
     let Some(acct) = account::load() else {
         run_setup(rt);
         return;
@@ -3260,7 +3282,9 @@ fn main() {
     // Offline files are scoped by the address the account was saved with,
     // not whichever one answers this session.
     let saved_url = acct.url.clone();
+    startup_mark("account loaded");
     let acct = rt.block_on(account::ensure_reachable(acct));
+    startup_mark("server reachable");
     let (base, token, section) = (acct.url.clone(), acct.token.clone(), acct.section.clone());
     offline::set_scope(&acct.server_id, &saved_url);
     // Remote when the address in use is one Plex lists as not local (or a
@@ -3309,7 +3333,9 @@ fn main() {
         })
         .unwrap();
 
+    startup_mark("before gpui");
     gpui_platform::application().with_assets(icons::Icons).run(move |cx: &mut App| {
+        startup_mark("gpui running");
         gpui_component::init(cx);
         // Closing the window quits (so the on-quit report goes out).
         cx.on_window_closed(|cx, _| cx.quit()).detach();
@@ -3343,6 +3369,7 @@ fn main() {
             gpui::KeyBinding::new("tab", PaletteRadio, Some("Palette > Input")),
             gpui::KeyBinding::new("ctrl-k", FocusSearch, Some("Crate")),
         ]);
+        startup_mark("fonts and keys");
         let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
         cx.open_window(
             WindowOptions {
@@ -3354,8 +3381,10 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
+                startup_mark("window created");
                 let view = cx.new(|cx| {
                     let mut c = Crate::new(window, cx, art_tx, art_rx, albums_rx, tracks_tx, plex_creds, transport_rx, mpris_tx, search_tx, hubs_tx, artist_tx);
+                    startup_mark("app state built");
                     c.check_saved_output(cx);
                     c.load_home(cx);
                     c.restore_resume(cx);
@@ -3369,6 +3398,7 @@ fn main() {
                     for th in c.pins.iter().map(|p| p.thumb.clone()).collect::<Vec<_>>() {
                         c.request_thumb(&th);
                     }
+                    startup_mark("resume and pins");
                     // Home goes stale in a long session: refresh it when the
                     // window comes back after ten minutes or more.
                     cx.observe_window_activation(window, |this: &mut Crate, window, cx| {
@@ -3388,6 +3418,7 @@ fn main() {
             },
         )
         .unwrap();
+        startup_mark("window opened");
         cx.activate(true);
     });
 }

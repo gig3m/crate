@@ -1848,10 +1848,19 @@ pub async fn run(
         let client = client.clone();
         let section = section.clone();
         tokio::spawn(async move {
+            let mut first = true;
             while let Some(req) = hubs_rx.recv().await {
                 let (client, section) = (client.clone(), section.clone());
+                let mark = std::mem::take(&mut first);
                 tokio::spawn(async move {
-                    let _ = req.reply.send(client.home(&section).await);
+                    if mark {
+                        crate::startup_mark("home requested");
+                    }
+                    let home = client.home(&section).await;
+                    if mark {
+                        crate::startup_mark("home fetched");
+                    }
+                    let _ = req.reply.send(home);
                 });
             }
         });
