@@ -17,7 +17,6 @@ set -eu
 main() {
     REPO="gig3m/crate"
     ASSET="crate-player-x86_64-linux.tar.gz"
-    URL="${CRATE_RELEASE_URL:-https://github.com/$REPO/releases/latest/download/$ASSET}"
 
     LIBDIR="$HOME/.local/lib/crate-player"
     BIN="$LIBDIR/crate-player"
@@ -34,21 +33,38 @@ main() {
     [ "$(uname -m)" = x86_64 ] || die "the prebuilt release is for x86_64; on $(uname -m), build from source (see the README)."
     command -v curl >/dev/null || die "curl is needed."
     command -v tar >/dev/null || die "tar is needed."
-    if [ -e "$WRAPPER" ] && ! is_ours "$WRAPPER"; then
-        die "$WRAPPER exists and isn't Crate's; not touching it."
-    fi
+    for f in "$WRAPPER" "$DESKTOP"; do
+        if [ -e "$f" ] && ! is_ours "$f"; then
+            die "$f exists and isn't Crate's; not touching it."
+        fi
+    done
     check_libraries
 
+    # One release for both downloads: resolve "latest" to its tag first.
+    if [ -n "${CRATE_RELEASE_URL:-}" ]; then
+        URL="$CRATE_RELEASE_URL"
+        need_sum=""
+    else
+        latest=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest") || die "couldn't reach GitHub."
+        tag=${latest##*/}
+        case "$tag" in v*) ;; *) die "couldn't find the latest release (got $latest)." ;; esac
+        URL="https://github.com/$REPO/releases/download/$tag/$ASSET"
+        need_sum=1
+    fi
+
     tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
+    trap cleanup EXIT
     say "Downloading Crate…"
     curl -fsSL "$URL" -o "$tmp/crate.tar.gz" || die "couldn't download $URL"
-    # The release publishes a checksum next to the archive: check it when
-    # it's there (a release without one is still accepted, with a note).
-    if curl -fsSL "$URL.sha256" -o "$tmp/crate.sha256" 2>/dev/null && command -v sha256sum >/dev/null; then
+    # Every release publishes a checksum next to the archive: it must match
+    # (only a CRATE_RELEASE_URL test download may come without one).
+    if curl -fsSL "$URL.sha256" -o "$tmp/crate.sha256" 2>/dev/null; then
+        command -v sha256sum >/dev/null || die "sha256sum is needed to check the download."
         want=$(cut -d' ' -f1 < "$tmp/crate.sha256")
         have=$(sha256sum "$tmp/crate.tar.gz" | cut -d' ' -f1)
         [ "$want" = "$have" ] || die "the download's checksum doesn't match the release's; not installing."
+    elif [ -n "$need_sum" ]; then
+        die "couldn't download the release's checksum; not installing (try again)."
     else
         say "(No checksum to verify against; continuing.)"
     fi
@@ -65,20 +81,20 @@ main() {
         die "not installing. (The release needs glibc 2.39 or newer; see the README.)"
     fi
 
-    # All checked: swap the files in (each with a rename, so none is ever
-    # half written).
-    mkdir -p "$LIBDIR" "$(dirname "$WRAPPER")" "$(dirname "$ICON")" "$(dirname "$DESKTOP")"
-    place "$tmp/x/crate-player" "$BIN" 755
-    place "$tmp/x/crate-player.svg" "$ICON" 644
+    # All checked: build every file, stage them next to their places, then
+    # swap them all in together (or none).
     cat > "$tmp/wrapper" <<'SH'
 #!/bin/sh
 # Crate launcher. Crate keeps its own Plex sign-in (~/.config/crate/account.toml).
 exec "$HOME/.local/lib/crate-player/crate-player" "$@"
 SH
-    place "$tmp/wrapper" "$WRAPPER" 755
     grep -v '^Exec=' "$tmp/x/crate-player.desktop" > "$tmp/desktop"
     printf 'Exec="%s"\n' "$(desktop_quote "$WRAPPER")" >> "$tmp/desktop"
-    place "$tmp/desktop" "$DESKTOP" 644
+    stage "$tmp/x/crate-player" "$BIN" 755
+    stage "$tmp/x/crate-player.svg" "$ICON" 644
+    stage "$tmp/wrapper" "$WRAPPER" 755
+    stage "$tmp/desktop" "$DESKTOP" 644
+    commit
     refresh_launcher
 
     say "$version installed. Open Crate from your app launcher, or run: crate-player"
@@ -99,11 +115,56 @@ is_ours() {
     grep -q 'Crate launcher' "$1" 2>/dev/null || grep -q '^StartupWMClass=crate$' "$1" 2>/dev/null
 }
 
-# Copy $1 next to $2, then rename over it.
-place() {
-    cp "$1" "$2.new.$$"
-    chmod "$3" "$2.new.$$"
-    mv -f "$2.new.$$" "$2"
+# All-or-nothing update. `stage SRC DEST MODE` copies SRC into a new,
+# exclusively created file next to DEST (nothing is followed or
+# overwritten); `commit` renames every staged file into place, backing up
+# what was there first, and puts it all back if any step fails.
+check_dest() {
+    if [ -L "$1" ] || [ -d "$1" ]; then die "$1 is a directory or a link; not touching it."; fi
+}
+stage() {
+    check_dest "$2"
+    mkdir -p "$(dirname "$2")" || die "couldn't create $(dirname "$2")."
+    t=$(mktemp "$(dirname "$2")/.crate-player-new.XXXXXX") || die "couldn't write next to $2."
+    printf '%s\t%s\n' "$t" "$2" >> "$tmp/plan"
+    cp "$1" "$t" && chmod "$3" "$t" || die "couldn't write next to $2."
+}
+commit() {
+    : > "$tmp/done"
+    while IFS='	' read -r t d; do
+        b=""
+        if [ -e "$d" ]; then
+            if ! b=$(mktemp "$(dirname "$d")/.crate-player-old.XXXXXX") || ! cp -p "$d" "$b"; then
+                failed=$d
+                if [ -n "$b" ]; then rm -f "$b"; fi
+                rollback
+                die "couldn't back up $failed; the previous install is back in place."
+            fi
+        fi
+        if ! mv -f -T "$t" "$d"; then
+            # This one is untouched; undo the ones already swapped in.
+            failed=$d
+            if [ -n "$b" ]; then rm -f "$b"; fi
+            rollback
+            die "couldn't write $failed; the previous install is back in place."
+        fi
+        printf '%s\t%s\t%s\n' "$t" "$d" "$b" >> "$tmp/done"
+    done < "$tmp/plan"
+    while IFS='	' read -r t d b; do
+        if [ -n "$b" ]; then rm -f "$b"; fi
+    done < "$tmp/done"
+}
+rollback() {
+    while IFS='	' read -r t d b; do
+        if [ -n "$b" ]; then mv -f -T "$b" "$d" 2>/dev/null || true; else rm -f "$d"; fi
+    done < "$tmp/done"
+}
+# On any exit: staged files that weren't committed, and the work dir.
+cleanup() {
+    if [ -f "$tmp/plan" ]; then
+        while IFS='	' read -r t d; do rm -f "$t"; done < "$tmp/plan"
+    fi
+    rm -rf "$tmp"
 }
 
 # A path as a desktop-entry Exec argument inside double quotes: escape
@@ -114,7 +175,10 @@ desktop_quote() {
 
 check_libraries() {
     # ldconfig lives in /sbin on some systems (not on a user's PATH).
-    ldc=$(PATH="$PATH:/sbin:/usr/sbin" command -v ldconfig || true)
+    ldc=""
+    for c in /sbin/ldconfig /usr/sbin/ldconfig "$(command -v ldconfig || true)"; do
+        if [ -n "$c" ] && [ -x "$c" ]; then ldc=$c; break; fi
+    done
     if [ -z "$ldc" ] || ! "$ldc" -p >/dev/null 2>&1; then
         return # can't tell here; the program's own check below will
     fi

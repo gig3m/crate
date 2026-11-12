@@ -18,10 +18,60 @@ DESKTOP="$HOME/.local/share/applications/crate-player.desktop"
 is_ours() {
     grep -q 'Crate launcher' "$1" 2>/dev/null || grep -q '^StartupWMClass=crate$' "$1" 2>/dev/null
 }
-place() {
-    cp "$1" "$2.new.$$"
-    chmod "$3" "$2.new.$$"
-    mv -f "$2.new.$$" "$2"
+die() {
+    echo "crate install: $*" >&2
+    exit 1
+}
+# All-or-nothing update. `stage SRC DEST MODE` copies SRC into a new,
+# exclusively created file next to DEST (nothing is followed or
+# overwritten); `commit` renames every staged file into place, backing up
+# what was there first, and puts it all back if any step fails.
+check_dest() {
+    if [ -L "$1" ] || [ -d "$1" ]; then die "$1 is a directory or a link; not touching it."; fi
+}
+stage() {
+    check_dest "$2"
+    mkdir -p "$(dirname "$2")" || die "couldn't create $(dirname "$2")."
+    t=$(mktemp "$(dirname "$2")/.crate-player-new.XXXXXX") || die "couldn't write next to $2."
+    printf '%s\t%s\n' "$t" "$2" >> "$tmp/plan"
+    cp "$1" "$t" && chmod "$3" "$t" || die "couldn't write next to $2."
+}
+commit() {
+    : > "$tmp/done"
+    while IFS='	' read -r t d; do
+        b=""
+        if [ -e "$d" ]; then
+            if ! b=$(mktemp "$(dirname "$d")/.crate-player-old.XXXXXX") || ! cp -p "$d" "$b"; then
+                failed=$d
+                if [ -n "$b" ]; then rm -f "$b"; fi
+                rollback
+                die "couldn't back up $failed; the previous install is back in place."
+            fi
+        fi
+        if ! mv -f -T "$t" "$d"; then
+            # This one is untouched; undo the ones already swapped in.
+            failed=$d
+            if [ -n "$b" ]; then rm -f "$b"; fi
+            rollback
+            die "couldn't write $failed; the previous install is back in place."
+        fi
+        printf '%s\t%s\t%s\n' "$t" "$d" "$b" >> "$tmp/done"
+    done < "$tmp/plan"
+    while IFS='	' read -r t d b; do
+        if [ -n "$b" ]; then rm -f "$b"; fi
+    done < "$tmp/done"
+}
+rollback() {
+    while IFS='	' read -r t d b; do
+        if [ -n "$b" ]; then mv -f -T "$b" "$d" 2>/dev/null || true; else rm -f "$d"; fi
+    done < "$tmp/done"
+}
+# On any exit: staged files that weren't committed, and the work dir.
+cleanup() {
+    if [ -f "$tmp/plan" ]; then
+        while IFS='	' read -r t d; do rm -f "$t"; done < "$tmp/plan"
+    fi
+    rm -rf "$tmp"
 }
 desktop_quote() {
     printf '%s' "$1" | sed -e 's/[\\"`$]/\\&/g' -e 's/\\/\\\\/g' -e 's/%/%%/g'
@@ -45,25 +95,27 @@ if [ "${1:-}" = "--uninstall" ]; then
 fi
 
 [ -x target/release/crate-player ] || { echo "build first: cargo build --release" >&2; exit 1; }
-if [ -e "$WRAPPER" ] && ! is_ours "$WRAPPER"; then
-    echo "$WRAPPER exists and isn't Crate's launcher; not overwriting it" >&2
-    exit 1
-fi
+for f in "$WRAPPER" "$DESKTOP"; do
+    if [ -e "$f" ] && ! is_ours "$f"; then
+        echo "$f exists and isn't Crate's; not overwriting it" >&2
+        exit 1
+    fi
+done
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$LIBDIR" "$(dirname "$WRAPPER")" "$(dirname "$ICON")" "$(dirname "$DESKTOP")"
-place target/release/crate-player "$BIN" 755
-place assets/crate.svg "$ICON" 644
+trap cleanup EXIT
 cat > "$tmp/wrapper" <<'SH'
 #!/bin/sh
 # Crate launcher. Crate keeps its own Plex sign-in (~/.config/crate/account.toml).
 exec "$HOME/.local/lib/crate-player/crate-player" "$@"
 SH
-place "$tmp/wrapper" "$WRAPPER" 755
 grep -v '^Exec=' packaging/crate-player.desktop > "$tmp/desktop"
 printf 'Exec="%s"\n' "$(desktop_quote "$WRAPPER")" >> "$tmp/desktop"
-place "$tmp/desktop" "$DESKTOP" 644
+stage target/release/crate-player "$BIN" 755
+stage assets/crate.svg "$ICON" 644
+stage "$tmp/wrapper" "$WRAPPER" 755
+stage "$tmp/desktop" "$DESKTOP" 644
+commit
 
 # The install from before the rename (command `crate`), when it's Crate's.
 old="$HOME/.local/bin/crate"
