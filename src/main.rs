@@ -1728,6 +1728,7 @@ impl Crate {
         if let Some(n) = self.now.as_mut() {
             n.level.clear();
             n.transcoded.clear();
+            n.local_played.clear();
             n.formats.clear();
             n.skipped_to = 0;
         }

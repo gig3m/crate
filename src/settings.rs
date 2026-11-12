@@ -298,8 +298,19 @@ impl Crate {
     /// Settings, scrolled to the Audio section (output device first).
     pub(crate) fn open_output_settings(&mut self, cx: &mut Context<Self>) {
         self.open_audio_settings(cx);
-        // The Audio heading is the scroll area's third child.
+        // The Audio heading is the scroll area's third child. Scrolled a
+        // frame later: on the page's first paint the scroll area doesn't
+        // know its own position yet and would overshoot.
         self.settings_scroll.scroll_to_top_of_item(2);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+            this.update(cx, |this, cx| {
+                this.settings_scroll.scroll_to_top_of_item(2);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn open_audio_settings(&mut self, cx: &mut Context<Self>) {
