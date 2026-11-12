@@ -124,8 +124,9 @@ impl Crate {
                 .child(label)
         };
         let all: Vec<_> = info.map(|i| i.popular.iter().map(|p| p.0.clone()).collect()).unwrap_or_default();
-        let (all1, all2) = (all.clone(), all);
+        let all1 = all;
         let (n1, n2, n3, k3) = (name.clone(), name.clone(), name.clone(), key.to_string());
+        let k5 = key.to_string();
         let (n4, k4) = (name.clone(), key.to_string());
         let actions = div()
             .px(px(PAD_X))
@@ -153,16 +154,13 @@ impl Crate {
                     })),
             )
             .child(pill("artist-shuffle", "Shuffle all").on_click(cx.listener(move |this, _, _, cx| {
-                let mut v = all2.clone();
-                if !v.is_empty() {
-                    crate::shuffle(&mut v);
-                    this.start_queue(format!("{n2} (shuffled)"), None, v, 0, cx);
-                }
+                // Every track by the artist, not just the most played.
+                this.shuffle_artist(k5.clone(), n2.clone(), cx);
             })))
             .child(pill("artist-radio", "Artist radio").on_click(cx.listener(move |this, _, _, cx| {
                 this.play_radio(&k3, format!("{n3} radio"), cx);
             })))
-            .child(pill("artist-mix", "Mix builder").on_click(cx.listener(move |this, _, _, cx| this.build_artist_mix(k4.clone(), n4.clone(), cx))))
+            .child(pill("artist-mix", "Artist mix").on_click(cx.listener(move |this, _, _, cx| this.build_artist_mix(k4.clone(), n4.clone(), cx))))
             .child(self.pin_pill(
                 "artist-pin",
                 crate::pins::Pin { kind: crate::pins::PinKind::Artist, key: key.to_string(), title: name.clone(), thumb: info.map(|i| i.thumb.clone()).unwrap_or_default(), mix: None, desc: String::new() },
@@ -478,6 +476,35 @@ impl Crate {
         for th in thumbs {
             self.request_thumb(&th);
         }
+    }
+
+    /// Shuffle everything by the artist.
+    pub(crate) fn shuffle_artist(&mut self, key: String, name: String, cx: &mut Context<Self>) {
+        self.play_intent += 1;
+        let intent = self.play_intent;
+        self.say(format!("Shuffling {name}…"));
+        let section = crate::section();
+        let rx = crate::plex_call(move |c| async move { c.artist_tracks(&section, &key).await });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| {
+                if this.play_intent != intent {
+                    return;
+                }
+                match res {
+                    Ok(Ok(mut tracks)) if !tracks.is_empty() => {
+                        crate::shuffle(&mut tracks);
+                        this.start_queue(format!("{name} (shuffled)"), None, tracks, 0, cx);
+                    }
+                    Ok(Ok(_)) => this.say(format!("{name}: no tracks to shuffle")),
+                    Ok(Err(e)) => this.say(format!("Couldn't shuffle {name}: {e:#}")),
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Mix builder (canvas): a page of this artist's most-played tracks

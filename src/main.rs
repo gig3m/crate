@@ -965,8 +965,9 @@ impl Crate {
         }
         match h.kind.as_str() {
             "album" => {
-                if let Some(ix) = self.albums.iter().position(|a| a.rating_key == h.rating_key) {
-                    self.open_album(ix, cx);
+                match self.albums.iter().position(|a| a.rating_key == h.rating_key) {
+                    Some(ix) => self.open_album(ix, cx),
+                    None => self.say(format!("{} isn't in the loaded library yet", h.title)),
                 }
             }
             "artist" => {
@@ -2211,6 +2212,18 @@ impl Crate {
         cx.notify();
     }
 
+    /// Now Playing with lyrics showing (the lyrics commands turn them on if
+    /// they were switched off).
+    pub(crate) fn open_lyrics(&mut self, cx: &mut Context<Self>) {
+        if !self.np_lyrics {
+            self.np_lyrics = true;
+            if let Err(e) = theme::save_lyrics(true) {
+                eprintln!("[settings] couldn't save lyrics choice: {e}");
+            }
+        }
+        self.open_now_playing(None, cx);
+    }
+
     /// Full Now Playing (lyrics are its middle column), optionally on a panel tab.
     fn open_now_playing(&mut self, tab: Option<usize>, cx: &mut Context<Self>) {
         if self.now.is_none() {
@@ -2435,13 +2448,12 @@ impl Crate {
 
     fn open_hub_item(&mut self, kind: &str, key: &str, title: &str, cx: &mut Context<Self>) {
         match kind {
-            "album" => {
-                if let Some(ix) = self.albums.iter().position(|a| a.rating_key == key) {
-                    self.open_album(ix, cx);
-                }
-            }
+            "album" => match self.albums.iter().position(|a| a.rating_key == key) {
+                Some(ix) => self.open_album(ix, cx),
+                None => self.say(format!("{title} isn't in the loaded library yet")),
+            },
             "artist" => self.open_artist(key.to_string(), title.to_string(), cx),
-            _ => eprintln!("[crate] station {title:?} not implemented yet"),
+            _ => {}
         }
     }
 
@@ -2812,7 +2824,7 @@ impl Render for Crate {
                 this.now_playing = false;
                 this.nav_to("stations", window, cx)
             }))
-            .on_action(cx.listener(|this, _: &ShowLyrics, _, cx| this.open_now_playing(None, cx)))
+            .on_action(cx.listener(|this, _: &ShowLyrics, _, cx| this.open_lyrics(cx)))
             .on_action(cx.listener(|this, _: &VolumeUp, _, cx| this.set_volume(this.volume + 0.05, cx)))
             .on_action(cx.listener(|this, _: &VolumeDown, _, cx| this.set_volume(this.volume - 0.05, cx)))
             .on_action(cx.listener(|this, _: &ShowQueue, _, cx| this.open_queue(cx)))

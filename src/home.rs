@@ -17,6 +17,13 @@ pub(crate) fn ago(ts: i64) -> String {
 }
 
 /// One-line descriptions for Plex's built-in stations.
+impl Crate {
+    /// The server's Library Radio station, found by name.
+    pub(crate) fn library_radio(home: &crate::plex::Home) -> Option<crate::plex::HubItem> {
+        home.rows.iter().filter(|r| r.kind == "station").flat_map(|r| r.items.iter()).find(|i| i.title == "Library Radio").cloned()
+    }
+}
+
 pub(crate) fn station_blurb(title: &str) -> &'static str {
     match title {
         "Library Radio" => "Your whole library, mixed",
@@ -76,11 +83,6 @@ impl Crate {
         .detach();
     }
 
-    /// Show the album grid filtered by a Plex query such as `decade=1990`.
-    pub(crate) fn filter_library(&mut self, kind: &'static str, filter: String, label: String, cx: &mut Context<Self>) {
-        self.add_filter(crate::library::LibFilter { kind, label, query: filter }, cx);
-    }
-
     fn cover(&self, thumb: &str, size: f32, round: f32, _t: &Theme) -> gpui::AnyElement {
         self.cover_or_mark(thumb, thumb, size, round)
     }
@@ -106,7 +108,8 @@ impl Crate {
     fn hero(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let home = self.home.as_ref();
         let last: Option<(Album, i64)> = home.and_then(|h| h.last_played.clone());
-        let station = home.and_then(|h| h.rows.iter().find(|r| r.kind == "station")).and_then(|r| r.items.first()).cloned();
+        // Library Radio by name (Plex's station order isn't promised).
+        let station = home.and_then(Self::library_radio);
         let bg = linear_gradient(110.0, linear_color_stop(rgb(mix(t.surface, t.discovery, 0.14)), 0.0), linear_color_stop(rgb(t.surface), 0.6));
         let mut hero = div()
             .flex_1()
@@ -158,8 +161,9 @@ impl Crate {
                                         .text_color(rgb(t.base))
                                         .text_size(px(14.0))
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .cursor_pointer()
-                                        .hover(|d| d.opacity(0.9))
+                                        // Only playable once the album is in the loaded library.
+                                        .when(ix.is_some(), |d| d.cursor_pointer().hover(|d| d.opacity(0.9)))
+                                        .when(ix.is_none(), |d| d.opacity(0.5))
                                         .child(icons::icon("play", 16.0, t.base))
                                         .child("Play")
                                         .when_some(ix, |d, ix| d.on_click(cx.listener(move |this, _, _, cx| this.play_album(ix, cx)))),
@@ -214,8 +218,6 @@ impl Crate {
             .flex_col()
             .justify_between()
             .gap(px(12.0))
-            .cursor_pointer()
-            .hover(|d| d.border_color(rgb(t.line)))
             .child(
                 div()
                     .flex()
@@ -408,7 +410,7 @@ impl Crate {
         };
 
         // Hero + the two radio cards.
-        let library_radio = home.rows.iter().find(|r| r.kind == "station").and_then(|r| r.items.first()).cloned();
+        let library_radio = Self::library_radio(home);
         let right = div()
             .w(px(320.0))
             .flex_none()
@@ -419,14 +421,14 @@ impl Crate {
                 let c = Self::side_card(
                     "card-radio",
                     "Library Radio",
-                    "Your library, mixed by Plex: most-played next to what you haven't heard in a while".into(),
+                    if library_radio.is_some() { "Your whole library, mixed by Plex".into() } else { "Not offered by this server".into() },
                     "stations",
                     t.accent,
                     t,
                 );
                 match library_radio {
-                    Some(s) => c.on_click(cx.listener(move |this, _, _, cx| this.play_station(s.key.clone(), s.title.clone(), cx))),
-                    None => c,
+                    Some(s) => c.cursor_pointer().hover(|d| d.border_color(rgb(t.line))).on_click(cx.listener(move |this, _, _, cx| this.play_station(s.key.clone(), s.title.clone(), cx))),
+                    None => c.opacity(0.6),
                 }
             })
             .child(
@@ -438,6 +440,8 @@ impl Crate {
                     t.discovery,
                     t,
                 )
+.cursor_pointer()
+                .hover(|d| d.border_color(rgb(t.line)))
                 .on_click(cx.listener(|this, _, _, cx| this.open_sonic(cx))),
             );
         let top = div().flex().gap(px(16.0)).child(self.hero(t, cx)).child(right);
@@ -483,13 +487,14 @@ impl Crate {
         let label = |s: &'static str| {
             div().font_family(MONO).font_weight(FontWeight::MEDIUM).text_size(px(11.0)).text_color(rgb(t.muted)).mr(px(4.0)).child(s)
         };
+        // Under "Stations", the chips start radio, as on the Stations page.
         let moods: Vec<_> = home
-            .moods
+            .featured_moods
             .iter()
             .enumerate()
             .map(|(i, (f, l))| {
-                let (f, l) = (f.clone(), l.clone());
-                Self::chip(("mood", i), l.clone(), false, t).on_click(cx.listener(move |this, _, _, cx| this.filter_library("Mood", f.clone(), l.clone(), cx)))
+                let (q, title) = (format!("query:{f}"), format!("{l} radio"));
+                Self::chip(("mood", i), l.clone(), false, t).on_click(cx.listener(move |this, _, _, cx| this.play_station(q.clone(), title.clone(), cx)))
             })
             .collect();
         let decades: Vec<_> = home
@@ -497,11 +502,21 @@ impl Crate {
             .iter()
             .enumerate()
             .map(|(i, (f, l))| {
-                let (f, l) = (f.clone(), l.clone());
-                Self::chip(("decade", i), l.clone(), true, t)
-                    .on_click(cx.listener(move |this, _, _, cx| this.filter_library("Decade", f.clone(), l.clone(), cx)))
+                let (q, title) = (format!("query:{}", f.replace("decade=", "album.decade=")), format!("{l} radio"));
+                Self::chip(("decade", i), l.clone(), true, t).on_click(cx.listener(move |this, _, _, cx| this.play_station(q.clone(), title.clone(), cx)))
             })
             .collect();
+        let more_moods = div()
+            .id("more-moods")
+            .text_size(px(12.0))
+            .text_color(rgb(t.text2))
+            .cursor_pointer()
+            .hover(|d| d.text_color(rgb(t.text_strong)))
+            .child(format!("All {} moods", home.moods.len()))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.go(View::Soon("stations"));
+                cx.notify();
+            }));
         let all_stations = div()
             .id("all-stations")
             .text_size(px(13.0))
@@ -526,8 +541,8 @@ impl Crate {
                     .flex_wrap()
                     .items_center()
                     .gap(px(8.0))
-                    .when(!home.moods.is_empty(), |d| d.child(label("MOOD")).children(moods).child(div().w(px(16.0))))
-                    .when(!home.decades.is_empty(), |d| d.child(label("DECADE")).children(decades)),
+                    .when(!home.featured_moods.is_empty(), |d| d.child(label("MOOD RADIO")).children(moods).child(more_moods).child(div().w(px(16.0))))
+                    .when(!home.decades.is_empty(), |d| d.child(label("DECADE RADIO")).children(decades)),
             );
 
         // The server's album/artist hubs, one row each, as many cards as fit.

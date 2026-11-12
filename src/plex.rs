@@ -145,8 +145,12 @@ pub struct Home {
     pub server: String,
     /// Most recently played album and when (unix seconds).
     pub last_played: Option<(Album, i64)>,
-    /// (filter value, label) for the mood and decade chips.
+    /// (filter value, label): every mood in the library, and a random six
+    /// of them for Home and the Stations page (Plex gives no counts to rank by).
     pub moods: Vec<(String, String)>,
+    pub featured_moods: Vec<(String, String)>,
+    /// The library section's own name (e.g. "Music").
+    pub section_title: String,
     pub decades: Vec<(String, String)>,
     pub genres: Vec<(String, String)>,
     /// Mood mixes for "Mixes for you": (title, description, track filter,
@@ -1363,7 +1367,8 @@ impl Client {
             format!("/library/sections/{section}/decade"),
             format!("/library/sections/{section}/genre"),
         );
-        let (rows, playlists, server, last, moods, decades, genres) = tokio::join!(
+        let section_path = format!("/library/sections/{section}");
+        let (rows, playlists, server, last, moods, decades, genres, section_meta) = tokio::join!(
             self.home_hubs(section),
             self.playlists(),
             self.server_name(),
@@ -1371,34 +1376,43 @@ impl Client {
             self.directory(&mood_path),
             self.directory(&decade_path),
             self.directory(&genre_path),
+            self.get(&section_path),
         );
-        // The canvas's six moods, when the library has them.
-        const MOODS: &[&str] = &["Wistful", "Brooding", "Confident", "Playful", "Cathartic", "Swaggering"];
+        let section_title = match section_meta {
+            Ok(r) => r.json::<serde_json::Value>().await.ok().and_then(|v| v["MediaContainer"]["title1"].as_str().map(String::from)),
+            Err(_) => None,
+        }
+        .unwrap_or_else(|| "Library".into());
         let moods = moods.unwrap_or_default();
         // Mood mixes (canvas "Mixes for you"): each one any of a few library
         // moods, as random-track radio; only those the library has.
         const MIXES: &[(&str, &str, &[&str])] = &[
-            ("Late Night Mix", "Slow, warm, low-energy picks", &["Nocturnal", "Laid-Back/Mellow", "Soothing", "Calm/Peaceful"]),
-            ("Sunday Morning", "Hymns, gentle and reverent", &["Devotional", "Hymn-like", "Reverent", "Spiritual"]),
-            ("High Energy", "Fast, bright and driving", &["Energetic", "Kinetic", "Driving", "Rousing"]),
+            ("Late Night Mix", "", &["Nocturnal", "Laid-Back/Mellow", "Soothing", "Calm/Peaceful"]),
+            ("Sunday Morning", "", &["Devotional", "Hymn-like", "Reverent", "Spiritual"]),
+            ("High Energy", "", &["Energetic", "Kinetic", "Driving", "Rousing"]),
         ];
         let mixes: Vec<MoodMix> = MIXES
             .iter()
             .filter_map(|(title, desc, names)| {
-                let ids: Vec<&str> = names.iter().filter_map(|n| moods.iter().find(|(_, t)| t == n)).map(|(k, _)| k.as_str()).collect();
-                (!ids.is_empty()).then(|| (title.to_string(), desc.to_string(), format!("mood={}", ids.join(",")), Vec::new()))
+                let found: Vec<&(String, String)> = names.iter().filter_map(|n| moods.iter().find(|(_, t)| t == n)).collect();
+                let ids: Vec<&str> = found.iter().map(|(k, _)| k.as_str()).collect();
+                // Described by the moods it actually draws on, not a promise.
+                let _ = desc;
+                let desc = found.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(" · ");
+                (!ids.is_empty()).then(|| (title.to_string(), desc, format!("mood={}", ids.join(",")), Vec::new()))
             })
             .collect();
-        let moods = MOODS
-            .iter()
-            .filter_map(|w| moods.iter().find(|(_, t)| t == w))
-            .map(|(k, t)| (format!("mood={k}"), t.clone()))
-            .collect();
+        let moods: Vec<(String, String)> = moods.iter().map(|(k, t)| (format!("mood={k}"), t.clone())).collect();
+        let mut featured_moods = moods.clone();
+        crate::shuffle(&mut featured_moods);
+        featured_moods.truncate(6);
+        featured_moods.sort_by(|a, b| a.1.cmp(&b.1));
         let mut decades: Vec<(String, String)> = decades
             .unwrap_or_default()
             .into_iter()
-            .filter(|(k, _)| k.parse::<u32>().is_ok_and(|y| y >= 1960))
-            .map(|(k, t)| (format!("decade={k}"), t.get(2..).unwrap_or(&t).to_string()))
+            .filter(|(k, _)| k.parse::<u32>().is_ok())
+            // Full names ("1990s"): with every decade shown, "00s" could be either century.
+            .map(|(k, t)| (format!("decade={k}"), t))
             .collect();
         decades.sort();
         Ok(Home {
@@ -1407,10 +1421,23 @@ impl Client {
             server: server.unwrap_or_else(|_| "Plex".into()),
             last_played: last.ok().flatten(),
             moods,
+            featured_moods,
+            section_title,
             decades,
             genres: genres.unwrap_or_default().into_iter().map(|(k, t)| (format!("genre={k}"), t)).collect(),
             mixes,
         })
+    }
+
+    /// Every track by the artist (up to 3000), album by album.
+    pub async fn artist_tracks(&self, section: &str, key: &str) -> anyhow::Result<Vec<Track>> {
+        let env: Envelope = self
+            .get(&format!("/library/sections/{section}/all?type=10&artist.id={key}&sort=album.year,album.titleSort,index&X-Plex-Container-Start=0&X-Plex-Container-Size=3000"))
+            .await?
+            .json()
+            .await
+            .context("artist tracks")?;
+        Ok(env.mc.metadata.into_iter().filter_map(Meta::into_track).collect())
     }
 
     pub async fn artist(&self, key: &str, section: &str) -> anyhow::Result<ArtistInfo> {

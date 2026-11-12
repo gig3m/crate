@@ -196,7 +196,7 @@ impl Crate {
                 icon_btn("lyrics", "lyrics", 17.0, t.text2, None, cx)
                     .cursor_pointer()
                     .hover(|d| d.bg(rgb(t.raised)))
-                    .on_click(cx.listener(|this, _, _, cx| this.open_now_playing(None, cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.open_lyrics(cx))),
             )
             .child(
                 icon_btn("queue", "queue", 17.0, t.text2, None, cx)
@@ -208,7 +208,7 @@ impl Crate {
                 icon_btn("device", "device", 17.0, if self.target.is_some() { t.accent } else { t.text2 }, None, cx)
                     .cursor_pointer()
                     .hover(|d| d.bg(rgb(t.raised)))
-                    .on_click(cx.listener(|this, _, _, cx| this.open_audio_settings(cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.open_output_settings(cx))),
             )
             .child(
                 div()

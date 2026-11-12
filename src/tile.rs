@@ -199,7 +199,9 @@ impl Crate {
             .bg(rgb(t.base))
             .children(items.into_iter().enumerate().map(|(i, (label, ic))| {
                 let on = i == active;
-                let c = if on { t.accent } else { mix(t.text, t.base, 0.3) };
+                // "Playing" with nothing playing has nothing to show.
+                let idle = i == 0 && self.now.is_none();
+                let c = if on { t.accent } else if idle { t.line } else { mix(t.text, t.base, 0.3) };
                 div()
                     .id(("cnav", i))
                     .flex_1()
@@ -209,11 +211,12 @@ impl Crate {
                     .items_center()
                     .justify_center()
                     .gap(px(4.0))
-                    .cursor_pointer()
+                    .when(!idle, |d| d.cursor_pointer())
                     .child(gpui::svg().path(format!("icons/{ic}.svg")).size(px(20.0)).text_color(rgb(c)))
                     .child(div().text_size(px(11.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(c)).child(label))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         match i {
+                            0 if this.now.is_none() => {}
                             0 => this.compact_playing = true,
                             1 => {
                                 this.compact_playing = false;

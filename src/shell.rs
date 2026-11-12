@@ -8,11 +8,11 @@ pub const MONO: &str = "JetBrainsMono Nerd Font";
 
 /// Sidebar nav: (id, label, icon, key hint).
 const NAV_PRIMARY: &[(&str, &str, &str, &str)] =
-    &[("home", "Home", "home", "g h"), ("search", "Search", "search", "^K"), ("stations", "Stations", "stations", "g s")];
+    &[("home", "Home", "home", "g h"), ("search", "Search", "search", "Ctrl K"), ("stations", "Stations", "stations", "g s")];
 const NAV_LIBRARY: &[(&str, &str, &str, &str)] = &[
     ("artists", "Artists", "artists", ""),
     ("albums", "Albums", "albums", ""),
-    ("tracks", "Tracks", "tracks", ""),
+    ("tracks", "Most played", "tracks", ""),
     ("playlists", "Playlists", "playlists", ""),
     ("genres", "Genres & Moods", "genres", ""),
     ("history", "History", "history", ""),
@@ -183,10 +183,16 @@ impl Crate {
                                 .font_family(MONO)
                                 .text_size(px(11.0))
                                 .text_color(rgb(t.muted))
-                                .child(if online { format!("Music · {}", self.stream_mode()) } else { "connecting…".into() }),
+                                .child(if online {
+                                    let section = self.home.as_ref().map(|h| h.section_title.clone()).unwrap_or_default();
+                                    format!("{section} · {}", self.stream_mode())
+                                } else {
+                                    "connecting…".into()
+                                }),
                         ),
                 )
-                .child(icons::icon("updown", 14.0, t.muted)),
+                // It opens Settings (streaming quality lives there), not a switcher.
+                .child(icons::icon("settings", 14.0, t.muted)),
         )
         .into_any_element()
     }
@@ -307,7 +313,7 @@ impl Crate {
                 }))
                 .separator()
                 .item(PopupMenuItem::new("Output device…").on_click(move |_, _, cx| {
-                    audio.update(cx, |this, cx| this.open_audio_settings(cx)).ok();
+                    audio.update(cx, |this, cx| this.open_output_settings(cx)).ok();
                 }))
                 .separator()
                 .item(PopupMenuItem::new("Sign out of Plex").on_click(move |_, _, cx| {
@@ -336,7 +342,7 @@ impl Crate {
             .flex_col()
             .gap(px(8.0))
             .child(div().text_size(px(30.0)).font_weight(FontWeight::BOLD).text_color(rgb(t.text_strong)).child(label))
-            .child(div().text_size(px(14.0)).text_color(rgb(t.muted)).child("This page is on the design canvas and not built yet."))
+            .child(div().text_size(px(14.0)).text_color(rgb(t.muted)).child("There's no page by that name."))
             .into_any_element()
     }
 }

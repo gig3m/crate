@@ -157,7 +157,7 @@ impl Crate {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(title("Artists", format!("{n} artists"), t))
+            .child(title("Artists", format!("{n} album artists"), t))
             .child(list)
             .into_any_element()
     }
@@ -237,7 +237,7 @@ impl Crate {
 
     pub(crate) fn tracks_view(&self, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(top) = self.top_tracks.as_ref() else {
-            return self.page_waiting("Tracks", "tracks", t, cx);
+            return self.page_waiting("Most played", "tracks", t, cx);
         };
         let rows: Vec<_> = top
             .iter()
@@ -259,7 +259,7 @@ impl Crate {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .child(title("Tracks", format!("your {} most played", top.len()), t))
+            .child(title("Most played", format!("your top {} tracks", top.len()), t))
             .child(div().px(px(PAD_X)).pb(px(40.0)).flex().flex_col().children(rows))
             .into_any_element()
     }

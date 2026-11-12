@@ -38,7 +38,7 @@ impl PalCmd {
         PalCmd::Nav("home", "Go to Home"),
         PalCmd::Nav("albums", "Go to Albums"),
         PalCmd::Nav("artists", "Go to Artists"),
-        PalCmd::Nav("tracks", "Go to Tracks"),
+        PalCmd::Nav("tracks", "Go to Most played"),
         PalCmd::Nav("playlists", "Go to Playlists"),
         PalCmd::Nav("genres", "Go to Genres & Moods"),
         PalCmd::Nav("history", "Go to History"),
@@ -57,7 +57,7 @@ impl PalCmd {
     fn label(self) -> &'static str {
         match self {
             PalCmd::Nav(_, l) => l,
-            PalCmd::NowPlaying => "Open Now Playing (lyrics)",
+            PalCmd::NowPlaying => "Show lyrics (Now Playing)",
             PalCmd::Queue => "Show the queue",
             PalCmd::Shuffle => "Toggle shuffle",
             PalCmd::Repeat => "Cycle repeat",
@@ -160,8 +160,9 @@ impl Crate {
     fn activate_item(&mut self, item: Item, window: &mut Window, cx: &mut Context<Self>) {
         match item {
             Item::Hit(h) if h.kind == "album" => {
-                if let Some(ix) = self.albums.iter().position(|a| a.rating_key == h.rating_key) {
-                    self.play_album(ix, cx);
+                match self.albums.iter().position(|a| a.rating_key == h.rating_key) {
+                    Some(ix) => self.play_album(ix, cx),
+                    None => self.say(format!("{} isn't in the loaded library yet", h.title)),
                 }
                 self.close_palette(window, cx);
             }
@@ -197,8 +198,8 @@ impl Crate {
         }
         match c {
             PalCmd::Nav(id, _) => self.nav_to(id, window, cx),
-            PalCmd::NowPlaying => self.open_now_playing(None, cx),
-            PalCmd::Queue => self.open_now_playing(Some(0), cx),
+            PalCmd::NowPlaying => self.open_lyrics(cx),
+            PalCmd::Queue => self.open_queue(cx),
             PalCmd::Shuffle => {
                 self.toggle_shuffle(cx);
                 self.say(if self.shuffle { "Shuffle on" } else { "Shuffle off" });

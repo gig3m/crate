@@ -286,8 +286,9 @@ impl Crate {
                     .items_center()
                     .justify_center()
                     .shadow_lg()
-                    .cursor_pointer()
-                    .hover(|d| d.opacity(0.9))
+                    // Live once the track list has loaded.
+                    .when(tracks.is_some(), |d| d.cursor_pointer().hover(|d| d.opacity(0.9)))
+                    .when(tracks.is_none(), |d| d.opacity(0.5))
                     .child(icons::icon("play", 22.0, t.base))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(tr) = this.album_tracks() {
@@ -295,7 +296,7 @@ impl Crate {
                         }
                     })),
             )
-            .child(circle("album-shuffle", "shuffle", t.text).on_click(cx.listener(move |this, _, _, cx| {
+            .child(circle("album-shuffle", "shuffle", t.text).when(tracks.is_none(), |d| d.opacity(0.5)).on_click(cx.listener(move |this, _, _, cx| {
                 if let Some(mut tr) = this.album_tracks() {
                     crate::shuffle(&mut tr);
                     this.start_queue(format!("{} (shuffled)", a2.title), None, tr, 0, cx);

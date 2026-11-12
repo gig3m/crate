@@ -295,6 +295,13 @@ impl Crate {
         .detach();
     }
 
+    /// Settings, scrolled to the Audio section (output device first).
+    pub(crate) fn open_output_settings(&mut self, cx: &mut Context<Self>) {
+        self.open_audio_settings(cx);
+        // The Audio heading is the scroll area's third child.
+        self.settings_scroll.scroll_to_item(2);
+    }
+
     pub(crate) fn open_audio_settings(&mut self, cx: &mut Context<Self>) {
         self.go(crate::View::Soon("audio"));
         use crate::theme::{Mode, Theme as Th};

@@ -259,11 +259,9 @@ impl Crate {
                                     .id("np-artist")
                                     .text_size(px(16.0))
                                     .text_color(white(0.8))
-                                    .cursor_pointer()
-                                    .hover(|d| d.underline())
                                     .child(tr.artist.clone())
                                     .when_some(ak, |d, ak| {
-                                        d.on_click(cx.listener(move |this, _, _, cx| {
+                                        d.cursor_pointer().hover(|d| d.underline()).on_click(cx.listener(move |this, _, _, cx| {
                                             this.now_playing = false;
                                             this.open_artist(ak.clone(), an.clone(), cx);
                                         }))
@@ -551,6 +549,7 @@ impl Crate {
                 let steps: Vec<(&str, String, bool)> = vec![
                     ("Source", source, true),
                     match tx {
+                        _ if self.offline.local(&tr.part_key).is_some() => ("Offline copy", "Kept on this computer · original file · no stream".into(), true),
                         Some(k) => ("Plex stream", format!("Transcoded · Opus ~{k} kbps · remote connection"), false),
                         None => ("Plex stream", "Direct play · original file · no transcode".into(), true),
                     },

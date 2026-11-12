@@ -167,7 +167,9 @@ impl Crate {
         let this = cx.entity().downgrade();
         let add_btn = Button::new("lib-add-filter").ghost().label("+ Filter").dropdown_menu(move |menu, window, cx| {
             let pick = |kind: &'static str, items: Vec<(String, String)>, this: gpui::WeakEntity<Crate>| {
-                move |mut m: gpui_component::menu::PopupMenu, _: &mut Window, _: &mut Context<gpui_component::menu::PopupMenu>| {
+                move |m: gpui_component::menu::PopupMenu, _: &mut Window, _: &mut Context<gpui_component::menu::PopupMenu>| {
+                    // Long lists (every mood) scroll.
+                    let mut m = m.scrollable(true);
                     for (q, l) in &items {
                         let (q, l) = (q.clone(), l.clone());
                         let this = this.clone();
