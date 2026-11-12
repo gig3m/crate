@@ -14,6 +14,14 @@ pub(crate) struct QueueDrag {
     /// The dragged track, found again on drop (the queue may have shifted).
     key: String,
     queue_id: u64,
+    /// Where the pointer was when the drag began (GPUI starts it 2px from
+    /// the press), to tell a wobbled click from a drag that came back.
+    start: std::rc::Rc<std::cell::Cell<Option<gpui::Point<gpui::Pixels>>>>,
+}
+
+/// A drop this close to where the drag began was a click, not a drag.
+pub(crate) fn wobbled_click(start: &std::cell::Cell<Option<gpui::Point<gpui::Pixels>>>, window: &gpui::Window) -> bool {
+    start.get().is_some_and(|p| (window.mouse_position() - p).magnitude() < 6.0)
 }
 
 pub(crate) struct QueueGhost {
@@ -197,7 +205,8 @@ impl Crate {
                                 .when(editable, |d| {
                                     let accent = t.accent;
                                     // The whole row drags (a click without movement still plays).
-                                    d.on_drag(QueueDrag { from: i, key: dkey.clone(), queue_id }, move |_, at, _, cx| {
+                                    d.on_drag(QueueDrag { from: i, key: dkey.clone(), queue_id, start: Default::default() }, move |dr, at, window, cx| {
+                                        dr.start.set(Some(window.mouse_position()));
                                         let title = gtitle.clone();
                                         cx.new(|_| QueueGhost { title, bg, border, text, grab_x: at.x })
                                     })
@@ -210,11 +219,12 @@ impl Crate {
                                             st.border_t_2().border_color(rgb(accent))
                                         }
                                     })
-                                    .on_drop(cx.listener(move |this, dr: &QueueDrag, _, cx| {
-                                        // Dropped back on its own row: a click that wobbled past
-                                        // the 2px drag threshold. Play it, as a click would.
+                                    .on_drop(cx.listener(move |this, dr: &QueueDrag, window, cx| {
+                                        // Dropped on its own row. Barely moved: a click that wobbled
+                                        // past the 2px drag threshold, so play it; otherwise a
+                                        // drag brought back to cancel.
                                         if dr.queue_id == queue_id && dr.from == i {
-                                            if this.now.as_ref().is_some_and(|n| n.queue_id == queue_id && n.idx != i) {
+                                            if wobbled_click(&dr.start, window) && this.now.as_ref().is_some_and(|n| n.queue_id == queue_id && n.idx != i) {
                                                 this.play_from(i, 0, cx);
                                             }
                                             return;

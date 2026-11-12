@@ -36,6 +36,9 @@ struct RowDrag {
     item: u64,
     /// Row index when the drag started (for the drop line only).
     from: usize,
+    /// Where the pointer was when the drag began (GPUI starts it 2px from
+    /// the press), to tell a wobbled click from a drag that came back.
+    start: std::rc::Rc<std::cell::Cell<Option<gpui::Point<gpui::Pixels>>>>,
 }
 
 /// The card that follows the pointer while a row is dragged.
@@ -706,10 +709,11 @@ impl Crate {
                                 let (accent, kk) = (t.accent, key.clone());
                                 let (k2, target) = (key.clone(), item_id);
                                 // The whole row drags (a click without movement still plays).
-                                let drag = RowDrag { key: key.clone(), item: item_id, from: i };
+                                let drag = RowDrag { key: key.clone(), item: item_id, from: i, start: Default::default() };
                                 let (gt, ga) = (tr.title.clone(), tr.artist.clone());
                                 let (bg, border, text, muted) = (t.raised, t.line, t.text, t.muted);
-                                d.on_drag(drag, move |_, at, _, cx| {
+                                d.on_drag(drag, move |dr, at, window, cx| {
+                                    dr.start.set(Some(window.mouse_position()));
                                     let (title, artist) = (gt.clone(), ga.clone());
                                     cx.new(|_| DragGhost { title, artist, bg, border, text, muted, grab_x: at.x })
                                 })
@@ -724,14 +728,17 @@ impl Crate {
                                         st.border_t_2().border_color(rgb(accent))
                                     }
                                 })
-                                .on_drop(cx.listener(move |this, dr: &RowDrag, _, cx| {
+                                .on_drop(cx.listener(move |this, dr: &RowDrag, window, cx| {
                                     if dr.key != k2 {
                                         return;
                                     }
-                                    // Dropped back on its own row: a click that wobbled past
-                                    // the 2px drag threshold. Play it, as a click would.
+                                    // Dropped on its own row. Barely moved: a click that wobbled
+                                    // past the 2px drag threshold, so play it; otherwise a
+                                    // drag brought back to cancel.
                                     if dr.item == target {
-                                        this.play_playlist_from(i, false, cx);
+                                        if crate::queue_view::wobbled_click(&dr.start, window) {
+                                            this.play_playlist_from(i, false, cx);
+                                        }
                                         return;
                                     }
                                     let to = match &this.view {
