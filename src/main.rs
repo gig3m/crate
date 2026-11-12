@@ -3118,6 +3118,26 @@ fn fetch_more(key: String) -> tokio::sync::oneshot::Receiver<anyhow::Result<Vec<
 }
 
 fn main() {
+    // Answer these before anything starts (no window, no cache work).
+    let first = std::env::args().nth(1);
+    match first.as_deref() {
+        Some("--version" | "-V") => {
+            println!("crate-player {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Some("--help" | "-h") => {
+            println!(
+                "Crate {}: a Plex music player.\n\nUsage: crate-player [option]\n\n  (none)            open Crate\n  --sign-out        forget the saved Plex sign-in\n  --import-env      save PLEX_URL, PLEX_TOKEN and PLEX_SECTION from the environment as the sign-in\n  --check-servers   list the servers the plex.tv token in PLEX_TOKEN can reach\n  --version         print the version\n  --help            this help",
+                env!("CARGO_PKG_VERSION")
+            );
+            return;
+        }
+        Some(a) if a.starts_with('-') && !matches!(a, "--sign-out" | "--import-env" | "--check-servers" | "--refresh-server") => {
+            eprintln!("crate-player: unknown option {a} (see --help)");
+            std::process::exit(2);
+        }
+        _ => {}
+    }
     // The track cache: make sure it exists (a missing folder fails every
     // stream), and keep it under its cap, now and every half hour.
     {
