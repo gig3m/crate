@@ -189,6 +189,8 @@ struct Crate {
     np_lyrics: bool,
     /// Sidebar pins, in order (pins.json).
     pub(crate) pins: Vec<pins::Pin>,
+    /// pins.json entries this build can't read, saved back as they were.
+    pub(crate) pins_unknown: Vec<serde_json::Value>,
     /// "Stop after": the queue index playback stops after (the engine is
     /// handed nothing past it), and whether it was set for the album.
     pub(crate) stop_after: Option<usize>,
@@ -805,7 +807,8 @@ impl Crate {
             content_w: 1000.0,
             view_size: (1280.0, 800.0),
             np_lyrics: theme::saved_lyrics(),
-            pins: pins::load(),
+            pins: Vec::new(),
+            pins_unknown: Vec::new(),
             stop_after: None,
             queue_scroll: UniformListScrollHandle::new(),
             stop_after_album: false,
@@ -1082,6 +1085,7 @@ impl Crate {
             Ok(Ok(info)) => {
                 this.update(cx, |this, cx| {
                     this.request_artist_art(&info);
+                    this.backfill_pin_thumb(crate::pins::PinKind::Artist, &key, &info.thumb);
                     this.request_appears_on(key.clone(), info.title.clone(), cx);
                     if let View::Artist { key: k, info: slot, .. } = &mut this.view
                         && *k == key
@@ -3315,6 +3319,11 @@ fn main() {
                     c.check_saved_output(cx);
                     c.load_home(cx);
                     c.restore_resume(cx);
+                    let (pins, unknown, problem) = pins::load();
+                    (c.pins, c.pins_unknown) = (pins, unknown);
+                    if let Some(p) = problem {
+                        c.say(p);
+                    }
                     // Pinned items' art for the sidebar.
                     for th in c.pins.iter().map(|p| p.thumb.clone()).collect::<Vec<_>>() {
                         c.request_thumb(&th);

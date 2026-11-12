@@ -308,7 +308,7 @@ impl Crate {
             .child(div().flex_1())
             .child(self.pin_pill(
                 "mix-pin",
-                crate::pins::Pin { kind: crate::pins::PinKind::Mix, key: id.to_string(), title: p.title.clone(), thumb: covers.first().cloned().unwrap_or_default(), mix: Some(p.source.clone()), desc: p.desc.clone() },
+                crate::pins::Pin { kind: crate::pins::PinKind::Mix, key: id.to_string(), title: p.title.clone(), thumb: tracks.iter().map(|t| t.thumb.clone()).find(|t| !t.is_empty()).unwrap_or_default(), mix: Some(p.source.clone()), desc: p.desc.clone() },
                 t,
                 cx,
             ))

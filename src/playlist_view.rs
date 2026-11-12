@@ -405,6 +405,7 @@ impl Crate {
                             this.fwd.retain(|v| !gone(v));
                         }
                         this.reload_playlists(cx);
+                        this.unpin_quietly(crate::pins::PinKind::Playlist, &key);
                     }
                     Ok(Err(e)) => this.say(format!("Couldn't delete \u{201c}{title}\u{201d}: {e:#}")),
                     Err(_) => {}

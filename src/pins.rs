@@ -59,8 +59,30 @@ fn path() -> std::path::PathBuf {
     base.join("crate/pins.json")
 }
 
-pub(crate) fn load() -> Vec<Pin> {
-    std::fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+/// The saved pins, entries this build can't read (kept, so saving doesn't
+/// drop them), and a problem to report.
+pub(crate) fn load() -> (Vec<Pin>, Vec<serde_json::Value>, Option<String>) {
+    let p = path();
+    let Ok(bytes) = std::fs::read(&p) else { return (Vec::new(), Vec::new(), None) };
+    match serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) {
+        Ok(entries) => {
+            let (mut pins, mut unknown) = (Vec::new(), Vec::new());
+            for e in entries {
+                match serde_json::from_value::<Pin>(e.clone()) {
+                    Ok(pin) if !pins.iter().any(|q: &Pin| q.kind == pin.kind && q.key == pin.key) => pins.push(pin),
+                    Ok(_) => {}
+                    Err(_) => unknown.push(e),
+                }
+            }
+            (pins, unknown, None)
+        }
+        Err(e) => {
+            // Not JSON at all: keep the file aside rather than overwrite it.
+            let bad = p.with_extension("json.bad");
+            let _ = std::fs::rename(&p, &bad);
+            (Vec::new(), Vec::new(), Some(format!("pins.json couldn't be read ({e}); moved it to {}", bad.display())))
+        }
+    }
 }
 
 impl Crate {
@@ -69,7 +91,10 @@ impl Crate {
         let res = (|| -> std::io::Result<()> {
             std::fs::create_dir_all(p.parent().unwrap_or(std::path::Path::new(".")))?;
             let tmp = p.with_extension(format!("tmp{}", std::process::id()));
-            std::fs::write(&tmp, serde_json::to_vec_pretty(&self.pins)?)?;
+            // Entries this build couldn't read go back as they were.
+            let mut all: Vec<serde_json::Value> = self.pins.iter().filter_map(|p| serde_json::to_value(p).ok()).collect();
+            all.extend(self.pins_unknown.iter().cloned());
+            std::fs::write(&tmp, serde_json::to_vec_pretty(&all)?)?;
             std::fs::rename(tmp, &p)
         })();
         if let Err(e) = res {
@@ -95,6 +120,27 @@ impl Crate {
         cx.notify();
     }
 
+    /// Drop a pin without a message (its playlist was deleted).
+    pub(crate) fn unpin_quietly(&mut self, kind: PinKind, key: &str) {
+        let before = self.pins.len();
+        self.pins.retain(|p| !(p.kind == kind && p.key == key));
+        if self.pins.len() != before {
+            self.save_pins();
+        }
+    }
+
+    /// Give a pin saved without art the art that's known now.
+    pub(crate) fn backfill_pin_thumb(&mut self, kind: PinKind, key: &str, thumb: &str) {
+        if thumb.is_empty() {
+            return;
+        }
+        if let Some(p) = self.pins.iter_mut().find(|p| p.kind == kind && p.key == key && p.thumb.is_empty()) {
+            p.thumb = thumb.to_string();
+            self.request_thumb(thumb);
+            self.save_pins();
+        }
+    }
+
     fn move_pin(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         if from == to || from >= self.pins.len() || to >= self.pins.len() {
             return;
@@ -106,11 +152,15 @@ impl Crate {
     }
 
     fn open_pin(&mut self, pin: Pin, cx: &mut Context<Self>) {
-        self.now_playing = false;
+        // A station pin plays where you are; the others open their page.
+        if pin.kind != PinKind::Station {
+            self.now_playing = false;
+        }
         match pin.kind {
             PinKind::Playlist => self.open_playlist(pin.key, pin.title, cx),
             PinKind::Album => match self.albums.iter().position(|a| a.rating_key == pin.key) {
                 Some(ix) => self.open_album(ix, cx),
+                None if self.albums.is_empty() => self.say("The library is still loading; try again in a moment"),
                 None => self.say(format!("{} isn't in the library any more", pin.title)),
             },
             PinKind::Artist => self.open_artist(pin.key, pin.title, cx),
@@ -154,14 +204,29 @@ impl Crate {
                     .py(px(6.0))
                     .text_size(px(12.0))
                     .text_color(rgb(t.muted))
-                    .child("Pin playlists, albums, artists and mixes from their pages, or with +.")
+                    .child("Pin playlists, albums, artists and mixes from their pages or with +; right-click a station to pin it.")
                     .into_any_element(),
             ];
         }
         let swatch = [t.yellow, t.green, t.cyan, t.magenta, t.red, t.orange];
         let entity = cx.entity().downgrade();
+        // Playlists show their current name and cover from Plex (a rename or
+        // a new composite cover since pinning).
+        let live = |p: &Pin| -> Pin {
+            let mut p = p.clone();
+            if p.kind == PinKind::Playlist
+                && let Some(l) = self.home.as_ref().and_then(|h| h.playlists.iter().find(|l| l.rating_key == p.key))
+            {
+                p.title = l.title.clone();
+                if !l.thumb.is_empty() {
+                    p.thumb = l.thumb.clone();
+                }
+            }
+            p
+        };
         self.pins
             .iter()
+            .map(live)
             .enumerate()
             .map(|(i, p)| {
                 let icon = match p.kind {
@@ -233,7 +298,9 @@ impl Crate {
         use gpui_component::button::{Button, ButtonVariants as _};
         use gpui_component::menu::DropdownMenu as _;
         use gpui_component::Sizable as _;
-        let lists = self.home.as_ref().map(|h| h.playlists.clone()).unwrap_or_default();
+        let loaded = self.home.is_some();
+        let mut lists = self.home.as_ref().map(|h| h.playlists.clone()).unwrap_or_default();
+        lists.sort_by_key(|p| p.title.to_lowercase());
         let pinned: Vec<String> = self.pins.iter().filter(|p| p.kind == PinKind::Playlist).map(|p| p.key.clone()).collect();
         let entity = cx.entity().downgrade();
         let _ = t;
@@ -242,10 +309,13 @@ impl Crate {
             .xsmall()
             .label("+")
             .dropdown_menu(move |mut menu, _, _| {
+                if !loaded {
+                    return menu.item(PopupMenuItem::new("Playlists haven't loaded (is the server reachable?)").disabled(true));
+                }
                 if lists.is_empty() {
                     return menu.item(PopupMenuItem::new("No playlists yet").disabled(true));
                 }
-                for p in lists.iter().take(40) {
+                for p in lists.iter() {
                     let e = entity.clone();
                     let pin = Pin { kind: PinKind::Playlist, key: p.rating_key.clone(), title: p.title.clone(), thumb: p.thumb.clone(), mix: None, desc: String::new() };
                     let on = pinned.contains(&p.rating_key);
