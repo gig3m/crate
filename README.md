@@ -40,7 +40,8 @@ make a big library fun: radio, sonic similarity, mixes, lyrics and history.
 
 ## Install
 
-Requirements: a 64-bit Linux desktop (Wayland or X11) with **PipeWire**, the
+Requirements: a 64-bit Linux desktop (Wayland or X11) with glibc 2.39 or newer
+(Arch, Fedora 40+, Ubuntu 24.04+, Debian 13+) and **PipeWire**, the
 **Opus** and **xkbcommon** libraries (`pipewire opus libxkbcommon-x11` on Arch,
 `libpipewire-0.3-0 libopus0 libxkbcommon-x11-0` on Debian/Ubuntu), a GPU with
 Vulkan, and a Plex Media Server with a music library. Plex Pass unlocks sonic analysis, which the
@@ -59,8 +60,9 @@ app launcher, and installs the command `crate-player`. Run it again to update;
 ### From source
 
 You need a recent Rust toolchain and the development headers for PipeWire,
-Opus, xkbcommon, Wayland and X11 (`pipewire opus libxkbcommon wayland libx11
-clang` on Arch).
+Opus, xkbcommon, Wayland, X11 and libclang (`pipewire opus libxkbcommon-x11 libxcb
+wayland clang pkgconf` on Arch; on Ubuntu 24.04 see the package list in
+`.github/workflows/ci.yml`). PipeWire 0.3.49 or newer is required.
 
 ```sh
 git clone https://github.com/gig3m/crate && cd crate

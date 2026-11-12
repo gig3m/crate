@@ -3132,11 +3132,11 @@ fn main() {
             );
             return;
         }
-        Some(a) if a.starts_with('-') && !matches!(a, "--sign-out" | "--import-env" | "--check-servers" | "--refresh-server") => {
-            eprintln!("crate-player: unknown option {a} (see --help)");
-            std::process::exit(2);
-        }
         _ => {}
+    }
+    if let Some(a) = std::env::args().skip(1).find(|a| a.starts_with('-') && !matches!(a.as_str(), "--sign-out" | "--import-env" | "--check-servers" | "--refresh-server")) {
+        eprintln!("crate-player: unknown option {a} (see --help)");
+        std::process::exit(2);
     }
     // The track cache: make sure it exists (a missing folder fails every
     // stream), and keep it under its cap, now and every half hour.

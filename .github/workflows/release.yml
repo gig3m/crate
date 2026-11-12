@@ -27,6 +27,8 @@ jobs:
         run: |
           v=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $v"; exit 1; }
+      - name: Tests
+        run: cargo test --release
       - name: Build
         run: cargo build --release --bin crate-player
       - name: Package
