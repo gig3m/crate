@@ -46,22 +46,26 @@ struct DragGhost {
     border: u32,
     text: u32,
     muted: u32,
+    /// How far into the row it was grabbed, so the card stays under the pointer.
+    grab_x: gpui::Pixels,
 }
 
 impl gpui::Render for DragGhost {
     fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .w(px(280.0))
-            .px(px(12.0))
-            .py(px(8.0))
-            .rounded(px(8.0))
-            .bg(rgb(self.bg))
-            .border_1()
-            .border_color(rgb(self.border))
-            .shadow_lg()
-            .opacity(0.95)
-            .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(self.text)).truncate().child(self.title.clone()))
-            .child(div().text_size(px(12.0)).text_color(rgb(self.muted)).truncate().child(self.artist.clone()))
+        div().pl((self.grab_x - px(24.0)).max(px(0.0))).child(
+            div()
+                .w(px(280.0))
+                .px(px(12.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
+                .bg(rgb(self.bg))
+                .border_1()
+                .border_color(rgb(self.border))
+                .shadow_lg()
+                .opacity(0.95)
+                .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(self.text)).truncate().child(self.title.clone()))
+                .child(div().text_size(px(12.0)).text_color(rgb(self.muted)).truncate().child(self.artist.clone())),
+        )
     }
 }
 
@@ -705,9 +709,9 @@ impl Crate {
                                 let drag = RowDrag { key: key.clone(), item: item_id, from: i };
                                 let (gt, ga) = (tr.title.clone(), tr.artist.clone());
                                 let (bg, border, text, muted) = (t.raised, t.line, t.text, t.muted);
-                                d.on_drag(drag, move |_, _, _, cx| {
+                                d.on_drag(drag, move |_, at, _, cx| {
                                     let (title, artist) = (gt.clone(), ga.clone());
-                                    cx.new(|_| DragGhost { title, artist, bg, border, text, muted })
+                                    cx.new(|_| DragGhost { title, artist, bg, border, text, muted, grab_x: at.x })
                                 })
                                 .drag_over::<RowDrag>(move |st, dr, _, _| {
                                     // A line where the row will land: below
@@ -722,6 +726,12 @@ impl Crate {
                                 })
                                 .on_drop(cx.listener(move |this, dr: &RowDrag, _, cx| {
                                     if dr.key != k2 {
+                                        return;
+                                    }
+                                    // Dropped back on its own row: a click that wobbled past
+                                    // the 2px drag threshold. Play it, as a click would.
+                                    if dr.item == target {
+                                        this.play_playlist_from(i, false, cx);
                                         return;
                                     }
                                     let to = match &this.view {

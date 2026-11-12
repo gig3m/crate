@@ -21,20 +21,24 @@ pub(crate) struct QueueGhost {
     bg: u32,
     border: u32,
     text: u32,
+    /// How far into the row it was grabbed, so the card stays under the pointer.
+    grab_x: gpui::Pixels,
 }
 
 impl gpui::Render for QueueGhost {
     fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px(px(12.0))
-            .py(px(8.0))
-            .rounded(px(8.0))
-            .bg(rgb(self.bg))
-            .border_1()
-            .border_color(rgb(self.border))
-            .text_size(px(13.0))
-            .text_color(rgb(self.text))
-            .child(self.title.clone())
+        div().flex().pl((self.grab_x - px(24.0)).max(px(0.0))).child(
+            div()
+                .px(px(12.0))
+                .py(px(8.0))
+                .rounded(px(8.0))
+                .bg(rgb(self.bg))
+                .border_1()
+                .border_color(rgb(self.border))
+                .text_size(px(13.0))
+                .text_color(rgb(self.text))
+                .child(self.title.clone()),
+        )
     }
 }
 
@@ -193,9 +197,9 @@ impl Crate {
                                 .when(editable, |d| {
                                     let accent = t.accent;
                                     // The whole row drags (a click without movement still plays).
-                                    d.on_drag(QueueDrag { from: i, key: dkey.clone(), queue_id }, move |_, _, _, cx| {
+                                    d.on_drag(QueueDrag { from: i, key: dkey.clone(), queue_id }, move |_, at, _, cx| {
                                         let title = gtitle.clone();
-                                        cx.new(|_| QueueGhost { title, bg, border, text })
+                                        cx.new(|_| QueueGhost { title, bg, border, text, grab_x: at.x })
                                     })
                                     .drag_over::<QueueDrag>(move |st, dr, _, _| {
                                         if dr.queue_id != queue_id || dr.from == i {
@@ -207,6 +211,14 @@ impl Crate {
                                         }
                                     })
                                     .on_drop(cx.listener(move |this, dr: &QueueDrag, _, cx| {
+                                        // Dropped back on its own row: a click that wobbled past
+                                        // the 2px drag threshold. Play it, as a click would.
+                                        if dr.queue_id == queue_id && dr.from == i {
+                                            if this.now.as_ref().is_some_and(|n| n.queue_id == queue_id && n.idx != i) {
+                                                this.play_from(i, 0, cx);
+                                            }
+                                            return;
+                                        }
                                         let first = this.first_editable();
                                         // Where the dragged track is now, nearest its old place.
                                         let from = this.now.as_ref().filter(|n| n.queue_id == dr.queue_id).and_then(|n| {

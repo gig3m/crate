@@ -47,7 +47,6 @@ const ICONS: &[(&str, &str, bool, f32)] = &[
     ("grid", "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z", false, 2.0),
     ("list", "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01", false, 2.0),
     ("close", "M6 6l12 12M18 6 6 18", false, 2.5),
-    ("grip", "M9 6h.01M9 12h.01M9 18h.01M15 6h.01M15 12h.01M15 18h.01", false, 3.2),
     ("clock", "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2", false, 2.0),
 ];
 
