@@ -19,6 +19,7 @@ mod icons;
 mod instance;
 mod library;
 mod mix;
+mod pins;
 mod resume;
 mod pages;
 mod playlist_add;
@@ -186,6 +187,8 @@ struct Crate {
     view_size: (f32, f32),
     /// Now Playing shows lyrics when the track has them (saved).
     np_lyrics: bool,
+    /// Sidebar pins, in order (pins.json).
+    pub(crate) pins: Vec<pins::Pin>,
     /// "Stop after": the queue index playback stops after (the engine is
     /// handed nothing past it), and whether it was set for the album.
     pub(crate) stop_after: Option<usize>,
@@ -802,6 +805,7 @@ impl Crate {
             content_w: 1000.0,
             view_size: (1280.0, 800.0),
             np_lyrics: theme::saved_lyrics(),
+            pins: pins::load(),
             stop_after: None,
             queue_scroll: UniformListScrollHandle::new(),
             stop_after_album: false,
@@ -3311,6 +3315,10 @@ fn main() {
                     c.check_saved_output(cx);
                     c.load_home(cx);
                     c.restore_resume(cx);
+                    // Pinned items' art for the sidebar.
+                    for th in c.pins.iter().map(|p| p.thumb.clone()).collect::<Vec<_>>() {
+                        c.request_thumb(&th);
+                    }
                     // Home goes stale in a long session: refresh it when the
                     // window comes back after ten minutes or more.
                     cx.observe_window_activation(window, |this: &mut Crate, window, cx| {

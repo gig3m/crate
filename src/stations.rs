@@ -4,6 +4,8 @@
 
 use gpui::{Context, FontWeight, div, linear_color_stop, linear_gradient, prelude::*, px, rgb};
 
+use gpui_component::menu::ContextMenuExt as _;
+
 use crate::{Crate, PAD_X, icons, shell::MONO, theme::{Theme, mix}};
 
 impl Crate {
@@ -109,6 +111,16 @@ impl Crate {
                             .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(crate::home::station_blurb(&s.title))),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.play_station(key.clone(), title.clone(), cx)))
+                    .context_menu({
+                        let (e, pin) = (cx.entity().downgrade(), crate::pins::Pin { kind: crate::pins::PinKind::Station, key: s.key.clone(), title: s.title.clone(), thumb: String::new(), mix: None, desc: String::new() });
+                        let pinned = self.is_pinned(crate::pins::PinKind::Station, &s.key);
+                        move |menu, _, _| {
+                            let (e, pin) = (e.clone(), pin.clone());
+                            menu.item(gpui_component::menu::PopupMenuItem::new(if pinned { "Unpin from sidebar" } else { "Pin to sidebar" }).on_click(move |_, _, cx| {
+                                e.update(cx, |this, cx| this.toggle_pin(pin.clone(), cx)).ok();
+                            }))
+                        }
+                    })
             })
             .collect();
 

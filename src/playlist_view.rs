@@ -532,6 +532,12 @@ impl Crate {
                     }),
             );
 
+        let this_pin = self.pin_pill(
+            "pl-pin",
+            crate::pins::Pin { kind: crate::pins::PinKind::Playlist, key: key.to_string(), title: title.to_string(), thumb: thumb.clone(), mix: None, desc: String::new() },
+            t,
+            cx,
+        );
         let actions = div()
             .px(px(PAD_X))
             .pb(px(16.0))
@@ -588,7 +594,7 @@ impl Crate {
                         .hover(|d| d.bg(rgb(t.raised)))
                         .child(label)
                 };
-                d.child(pill("pl-rename", "Rename", t.text).on_click(cx.listener(move |this, _, window, cx| {
+                d.child(this_pin).child(pill("pl-rename", "Rename", t.text).on_click(cx.listener(move |this, _, window, cx| {
                     this.start_naming(crate::playlist_add::NameFor::Rename(k1.clone()), t1.clone(), window, cx);
                 })))
                 .child(pill("pl-delete", if armed { "Click again to delete" } else { "Delete" }, if armed { t.red } else { t.text2 }).on_click(cx.listener(

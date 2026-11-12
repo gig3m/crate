@@ -8,7 +8,7 @@ use gpui::{Context, FontWeight, ObjectFit, div, img, linear_color_stop, linear_g
 use crate::{Crate, PAD_X, View, fmt_ms, icons, plex::Track, shell::MONO, theme::{Theme, mix}};
 
 /// Where a mix's tracks come from.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum MixSource {
     /// Plex radio seeded from an artist (or track): refills as it plays.
     Radio(String),
@@ -306,6 +306,12 @@ impl Crate {
                 )
             })
             .child(div().flex_1())
+            .child(self.pin_pill(
+                "mix-pin",
+                crate::pins::Pin { kind: crate::pins::PinKind::Mix, key: id.to_string(), title: p.title.clone(), thumb: covers.first().cloned().unwrap_or_default(), mix: Some(p.source.clone()), desc: p.desc.clone() },
+                t,
+                cx,
+            ))
             .when(has, |d| {
                 d.child(pill("mix-save", "Save as playlist").on_click(cx.listener(move |this, _, window, cx| {
                     let tracks = this.mix_tracks(&id2);

@@ -1,6 +1,6 @@
 //! App shell from the design canvas: sidebar and top bar.
 
-use gpui::{Context, FontWeight, ObjectFit, Window, div, img, prelude::*, px, rgb};
+use gpui::{Context, FontWeight, Window, div, prelude::*, px, rgb};
 
 use crate::{Crate, PAD_X, SIDEBAR_W, View, icons, theme::Theme};
 
@@ -100,43 +100,7 @@ impl Crate {
                 .text_color(rgb(t.muted))
                 .child(label.to_uppercase())
         };
-        let swatch = [t.yellow, t.green, t.cyan, t.magenta, t.red, t.orange];
-        let playlists = self.home.as_ref().map(|h| h.playlists.iter().take(6).cloned().collect::<Vec<_>>()).unwrap_or_default();
-        let pinned: Vec<_> = playlists
-            .into_iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let tile = match self.art.get(&p.thumb).cloned() {
-                    Some(im) => img(im).size(px(28.0)).flex_none().rounded(px(5.0)).object_fit(ObjectFit::Cover).into_any_element(),
-                    None => div()
-                        .size(px(28.0))
-                        .flex_none()
-                        .rounded(px(5.0))
-                        .bg(rgb(swatch[i % swatch.len()]))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .when(p.smart, |d| d.child(icons::icon("bolt", 13.0, t.base)))
-                        .into_any_element(),
-                };
-                div()
-                    .id(("pin", i))
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .rounded(px(8.0))
-                    .text_size(px(13.0))
-                    .text_color(rgb(t.text2))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(rgb(t.raised)))
-                    .child(tile)
-                    .child(div().flex_1().min_w_0().truncate().child(p.title.clone()))
-                    .child(div().font_family(MONO).text_size(px(11.0)).text_color(rgb(t.muted)).child(p.count.to_string()))
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_playlist(p.rating_key.clone(), p.title.clone(), cx)))
-            })
-            .collect();
+        let pinned = self.sidebar_pins(t, cx);
         let server = self.home.as_ref().map(|h| h.server.clone()).unwrap_or_else(|| "Plex".into());
         let online = self.home.is_some();
 
@@ -177,7 +141,7 @@ impl Crate {
                 .items_end()
                 .justify_between()
                 .child(section("Pinned"))
-                .child(div().size(px(24.0)).mr(px(6.0)).mb(px(4.0)).flex().items_center().justify_center().child(icons::icon("plus", 14.0, t.text2))),
+                .child(div().mr(px(2.0)).mb(px(2.0)).child(self.pin_add_button(t, cx))),
         )
         .children(pinned)
         .child(div().flex_1())

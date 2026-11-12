@@ -162,7 +162,13 @@ impl Crate {
             .child(pill("artist-radio", "Artist radio").on_click(cx.listener(move |this, _, _, cx| {
                 this.play_radio(&k3, format!("{n3} radio"), cx);
             })))
-            .child(pill("artist-mix", "Mix builder").on_click(cx.listener(move |this, _, _, cx| this.build_artist_mix(k4.clone(), n4.clone(), cx))));
+            .child(pill("artist-mix", "Mix builder").on_click(cx.listener(move |this, _, _, cx| this.build_artist_mix(k4.clone(), n4.clone(), cx))))
+            .child(self.pin_pill(
+                "artist-pin",
+                crate::pins::Pin { kind: crate::pins::PinKind::Artist, key: key.to_string(), title: name.clone(), thumb: info.map(|i| i.thumb.clone()).unwrap_or_default(), mix: None, desc: String::new() },
+                t,
+                cx,
+            ));
 
         // Popular in your library: top five with a play-count bar.
         let top = info.map(|i| i.popular.iter().take(5).cloned().collect::<Vec<_>>()).unwrap_or_default();
