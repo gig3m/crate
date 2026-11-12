@@ -54,9 +54,10 @@ impl Account {
 }
 
 /// At launch: make sure the saved address is still this server, and move
-/// to a better one when it isn't, or isn't the best (a remote or relay
-/// address saved while away, now that the local one may answer). Bounded to
-/// ~5 s; a relay address is used for the session but never saved.
+/// to a better one when it isn't (bounded to ~5 s; a relay address is used
+/// for the session but never saved), or when it isn't the best (a remote or
+/// relay address saved while away): a local one that answers within 300 ms
+/// is used now, else the search goes on in the background for next launch.
 pub async fn ensure_reachable(mut a: Account) -> Account {
     let http = reqwest::Client::new();
     // The saved address must still be this server (not some other host that
@@ -80,6 +81,39 @@ pub async fn ensure_reachable(mut a: Account) -> Account {
     .unwrap_or(false);
     let saved_rank = a.connections.iter().find(|c| c.uri == a.url).map(|c| rank(c.local, c.uri.starts_with("https://"), c.relay));
     if a.connections.is_empty() || (ok && saved_rank.is_none_or(|r| r == 0)) {
+        return a;
+    }
+    if ok {
+        // The saved address works, but a better (local) one may answer. At
+        // home one does within a LAN round trip, and this session uses it.
+        // Away, none does and the search waits out every local address
+        // (seconds), so it finishes in the background and only the next
+        // launch gets what it finds.
+        let old = a.clone();
+        let mut search = tokio::spawn(async move {
+            let found = tokio::time::timeout(std::time::Duration::from_secs(10), pick_connection_with(&http, &old.as_server(), true)).await;
+            let Ok(Ok((url, _))) = found else { return None };
+            let new_rank = old.connections.iter().find(|c| c.uri == url).map(|c| rank(c.local, true, c.relay)).unwrap_or(3);
+            (url != old.url && saved_rank.is_some_and(|r| new_rank < r)).then_some(url)
+        });
+        match tokio::time::timeout(std::time::Duration::from_millis(300), &mut search).await {
+            Ok(Ok(Some(url))) => {
+                eprintln!("[crate] using {url} instead of {}", a.url);
+                keep_url(&a, &url);
+                a.url = url;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                let old = a.clone();
+                tokio::spawn(async move {
+                    if let Ok(Some(url)) = search.await
+                        && keep_url(&old, &url)
+                    {
+                        eprintln!("[crate] next launch uses {url} instead of {}", old.url);
+                    }
+                });
+            }
+        }
         return a;
     }
     let found = tokio::time::timeout(std::time::Duration::from_secs(5), pick_connection_with(&http, &a.as_server(), true)).await;
@@ -134,11 +168,42 @@ pub fn stored() -> Option<Account> {
 /// 0600 before any bytes are written (no window where the token is
 /// readable), under a unique name, then renamed over the old file.
 pub fn save(a: &Account) -> anyhow::Result<()> {
+    let _lock = lock()?;
+    write(a)
+}
+
+/// Save `url` as the address of the sign-in `old` was read from, only if
+/// that sign-in is still the stored one (not replaced or signed out since).
+fn keep_url(old: &Account, url: &str) -> bool {
+    let Ok(_lock) = lock() else { return false };
+    match stored().filter(|s| s.url == old.url && s.token == old.token && s.server_id == old.server_id) {
+        Some(mut now) => {
+            now.url = url.to_string();
+            write(&now).is_ok()
+        }
+        None => false,
+    }
+}
+
+/// Held (an advisory lock on account.lock) while the sign-in is written or
+/// removed, and across the background address upgrade's check and write,
+/// so the upgrade can't resurrect a sign-out or clobber a new sign-in from
+/// another process. (--refresh-server's read, plex.tv lookup and save is
+/// not covered as a whole; it's run by hand.)
+fn lock() -> anyhow::Result<std::fs::File> {
     let p = path();
     {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(p.parent().context("config dir")?)?;
     }
+    let f = std::fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(p.with_extension("lock"))?;
+    f.lock()?;
+    Ok(f)
+}
+
+/// Write the sign-in; the caller holds lock().
+fn write(a: &Account) -> anyhow::Result<()> {
+    let p = path();
     let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let tmp = p.with_extension(format!("toml.{}.{nonce}.tmp", std::process::id()));
     let res = (|| -> anyhow::Result<()> {
@@ -181,6 +246,7 @@ pub fn relaunch() -> anyhow::Result<()> {
 
 /// Forget the sign-in.
 pub fn remove() -> std::io::Result<()> {
+    let _lock = lock().map_err(std::io::Error::other)?;
     match std::fs::remove_file(path()) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
