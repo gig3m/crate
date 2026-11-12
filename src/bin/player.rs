@@ -3,7 +3,7 @@
 //! usage: player [--target NODE] ITEM...
 //!   ITEM = a local file, or plex:/library/parts/<id>/<ts>/file.<ext>
 //!   (plex items stream progressively into $CRATE_AUDIO_CACHE, else
-//!   /scratch/crate-cache if present, else ~/.cache/crate/audio; needs PLEX_TOKEN)
+//!   else ~/.cache/crate/audio; needs PLEX_URL and PLEX_TOKEN)
 
 use std::{path::PathBuf, sync::atomic::Ordering, time::Duration};
 
@@ -12,11 +12,10 @@ use crate_audio::audio::{Engine, Event, Source};
 fn main() -> anyhow::Result<()> {
     let mut target = None;
     let mut queue = Vec::new();
-    let base = std::env::var("PLEX_URL").unwrap_or_else(|_| "http://plex-server:32400".into());
-    // Same choice as the app (plex::audio_cache_dir).
+    let base = std::env::var("PLEX_URL").unwrap_or_default();
+    // The app's default (plex::audio_cache_dir, minus its config.toml option).
     let cache_dir = match std::env::var_os("CRATE_AUDIO_CACHE").filter(|v| !v.is_empty()) {
         Some(d) => PathBuf::from(d),
-        None if std::path::Path::new("/scratch/crate-cache").is_dir() => PathBuf::from("/scratch/crate-cache"),
         None => std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache"))
@@ -28,6 +27,7 @@ fn main() -> anyhow::Result<()> {
             target = it.next();
         } else if let Some(path) = a.strip_prefix("plex:") {
             let token = std::env::var("PLEX_TOKEN").expect("PLEX_TOKEN for plex: items");
+            anyhow::ensure!(!base.is_empty(), "PLEX_URL for plex: items (e.g. http://192.168.1.10:32400)");
             let parts: Vec<&str> = path.split('/').collect();
             let name = format!("part-{}.{}", parts.get(3).unwrap_or(&"x"), path.rsplit('.').next().unwrap());
             queue.push(Source::Http { url: format!("{base}{path}"), token, cache: cache_dir.join(name), prepare: None, len_ms: None, start_ms: 0 });

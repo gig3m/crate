@@ -1,5 +1,5 @@
 //! Offline albums: "Keep offline" downloads an album's original files to
-//! ~/.local/share/crate/offline (not the disposable /scratch cache); playback
+//! ~/.local/share/crate/offline (not the disposable track cache); playback
 //! uses them when present. index.json lists what's kept.
 
 use std::{

@@ -165,6 +165,14 @@ pub fn save_output(name: Option<&str>) -> std::io::Result<()> {
     save_key("output", toml::Value::String(name.unwrap_or_default().into()))
 }
 
+/// A different folder for the streamed-track cache (`audio_cache` in
+/// config.toml), e.g. a fast scratch drive.
+pub fn saved_audio_cache() -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(config_path()).unwrap_or_default();
+    let map: HashMap<String, toml::Value> = toml::from_str(&raw).unwrap_or_default();
+    map.get("audio_cache").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(PathBuf::from)
+}
+
 /// Now Playing shows synced lyrics when a track has them (default on).
 pub fn saved_lyrics() -> bool {
     let raw = std::fs::read_to_string(config_path()).unwrap_or_default();

@@ -1685,17 +1685,19 @@ pub fn cache_dir() -> std::path::PathBuf {
     base.join("crate")
 }
 
-/// Where streamed tracks are cached: $CRATE_AUDIO_CACHE, else
-/// /scratch/crate-cache when it exists (desktop's disposable build drive,
-/// where the cache has always lived), else ~/.cache/crate/audio.
+/// Where streamed tracks are cached: $CRATE_AUDIO_CACHE, else `audio_cache`
+/// in config.toml, else ~/.cache/crate/audio.
 pub fn audio_cache_dir() -> std::path::PathBuf {
     static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         if let Some(d) = std::env::var_os("CRATE_AUDIO_CACHE").filter(|v| !v.is_empty()) {
             return d.into();
         }
-        let legacy = std::path::Path::new("/scratch/crate-cache");
-        if legacy.is_dir() { legacy.to_path_buf() } else { cache_dir().join("audio") }
+        // `audio_cache = "/path"` in config.toml (e.g. a separate scratch drive).
+        if let Some(d) = crate::theme::saved_audio_cache() {
+            return d;
+        }
+        cache_dir().join("audio")
     })
     .clone()
 }

@@ -1,7 +1,14 @@
 [package]
-name = "crate"
+name = "crate-player"
 version = "0.1.0"
 edition = "2024"
+description = "Crate: a Plex music player for Linux desktops (Omarchy/Hyprland), with gapless, bit-perfect PipeWire playback"
+license = "Apache-2.0"
+repository = "https://github.com/gig3m/crate"
+readme = "README.md"
+keywords = ["plex", "music", "player", "pipewire", "gpui"]
+categories = ["multimedia::audio"]
+publish = false
 
 [lib]
 # `crate` is a Rust keyword, so the library (audio engine) needs its own name.

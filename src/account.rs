@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Account {
-    /// Server base URL, e.g. http://plex-server:32400.
+    /// Server base URL, e.g. http://192.168.1.10:32400.
     pub url: String,
     pub token: String,
     /// Music library section key.

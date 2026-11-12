@@ -46,7 +46,7 @@ pub fn start(cmds: mpsc::UnboundedSender<Transport>) -> mpsc::UnboundedSender<Up
             local.block_on(&rt, async move {
                 let player = match Player::builder("crate")
                     .identity("Crate")
-                    .desktop_entry("crate")
+                    .desktop_entry("crate-player")
                     .can_play(true)
                     .can_pause(true)
                     .can_go_next(true)

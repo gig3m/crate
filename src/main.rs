@@ -3117,23 +3117,7 @@ fn fetch_more(key: String) -> tokio::sync::oneshot::Receiver<anyhow::Result<Vec<
     })
 }
 
-/// The app was called Aulos; move its caches once so nothing re-downloads.
-fn migrate_old_caches() {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let xdg = std::env::var("XDG_CACHE_HOME").unwrap_or_else(|_| format!("{home}/.cache"));
-    for (old, new) in [(format!("{xdg}/aulos"), format!("{xdg}/crate")), ("/scratch/aulos-cache".into(), "/scratch/crate-cache".into())] {
-        let (old, new) = (std::path::Path::new(&old), std::path::Path::new(&new));
-        if old.is_dir() && !new.exists() {
-            match std::fs::rename(old, new) {
-                Ok(()) => eprintln!("[crate] moved {} -> {}", old.display(), new.display()),
-                Err(e) => eprintln!("[crate] couldn't move {}: {e}", old.display()),
-            }
-        }
-    }
-}
-
 fn main() {
-    migrate_old_caches();
     // The track cache: make sure it exists (a missing folder fails every
     // stream), and keep it under its cap, now and every half hour.
     {
@@ -3261,7 +3245,7 @@ fn main() {
     offline::set_scope(&acct.server_id, &saved_url);
     // Remote when the address in use is one Plex lists as not local (or a
     // relay), unless its host resolves to a private or Tailscale IP (e.g.
-    // plex.example.com over the tailnet): LAN and tailnet links are treated as
+    // a name like plex.example.com on a tailnet): LAN and tailnet links are treated as
     // fast enough for direct play, even though a tailnet path may cross the
     // internet. Relays always stay remote.
     // An address Plex doesn't list (PLEX_URL) counts as local.
