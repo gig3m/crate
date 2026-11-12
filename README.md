@@ -40,8 +40,8 @@ make a big library fun: radio, sonic similarity, mixes, lyrics and history.
 
 ## Install
 
-Requirements: a 64-bit Linux desktop (Wayland or X11) with glibc 2.39 or newer
-(Arch, Fedora 40+, Ubuntu 24.04+, Debian 13+) and **PipeWire**, the
+Requirements: a 64-bit Linux desktop (x86_64 or aarch64; Wayland or X11)
+with glibc 2.39 or newer (Arch, Fedora 40+, Ubuntu 24.04+, Debian 13+) and **PipeWire**, the
 **Opus** and **xkbcommon** libraries (`pipewire opus libxkbcommon-x11` on Arch,
 `libpipewire-0.3-0 libopus0 libxkbcommon-x11-0` on Debian/Ubuntu), a GPU with
 Vulkan, and a Plex Media Server with a music library. Plex Pass unlocks sonic analysis, which the
@@ -53,8 +53,8 @@ Vulkan, and a Plex Media Server with a music library. Plex Pass unlocks sonic an
 curl -fsSL https://raw.githubusercontent.com/gig3m/crate/main/install.sh | sh
 ```
 
-This downloads the latest release into `~/.local` (no root), adds Crate to your
-app launcher, and installs the command `crate-player`. Run it again to update;
+This downloads the latest release for your machine (x86_64 or aarch64) into
+`~/.local` (no root), adds Crate to your app launcher, and installs the command `crate-player`. Run it again to update;
 `… | sh -s -- --uninstall` removes it (your settings stay in `~/.config/crate`).
 
 ### From source

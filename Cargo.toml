@@ -1,6 +1,6 @@
 [package]
 name = "crate-player"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Crate: a Plex music player for Linux desktops (Omarchy/Hyprland), with gapless, bit-perfect PipeWire playback"
 license = "Apache-2.0"

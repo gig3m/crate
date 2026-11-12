@@ -16,7 +16,6 @@ set -eu
 
 main() {
     REPO="gig3m/crate"
-    ASSET="crate-player-x86_64-linux.tar.gz"
 
     LIBDIR="$HOME/.local/lib/crate-player"
     BIN="$LIBDIR/crate-player"
@@ -30,7 +29,12 @@ main() {
     fi
 
     [ "$(uname -s)" = Linux ] || die "Crate runs on Linux."
-    [ "$(uname -m)" = x86_64 ] || die "the prebuilt release is for x86_64; on $(uname -m), build from source (see the README)."
+    case "$(uname -m)" in
+        x86_64 | amd64) arch=x86_64 ;;
+        aarch64 | arm64) arch=aarch64 ;;
+        *) die "there's no prebuilt release for $(uname -m); build from source (see the README)." ;;
+    esac
+    ASSET="crate-player-$arch-linux.tar.gz"
     command -v curl >/dev/null || die "curl is needed."
     command -v tar >/dev/null || die "tar is needed."
     for f in "$WRAPPER" "$DESKTOP"; do
@@ -55,7 +59,10 @@ main() {
     tmp=$(mktemp -d)
     trap cleanup EXIT
     say "Downloading Crate…"
-    curl -fsSL "$URL" -o "$tmp/crate.tar.gz" || die "couldn't download $URL"
+    if ! curl -fsSL "$URL" -o "$tmp/crate.tar.gz"; then
+        [ -n "$need_sum" ] && die "couldn't download $URL (if $tag has no $arch build, build from source; see the README)."
+        die "couldn't download $URL"
+    fi
     # Every release publishes a checksum next to the archive: it must match
     # (only a CRATE_RELEASE_URL test download may come without one).
     if curl -fsSL "$URL.sha256" -o "$tmp/crate.sha256" 2>/dev/null; then

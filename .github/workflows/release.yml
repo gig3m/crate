@@ -1,17 +1,24 @@
 name: Release
 
-# Push a tag like v0.1.0 to build the x86_64 Linux binary and publish a
-# release; install.sh downloads the latest one.
+# Push a tag like v0.1.0 to build the Linux binaries (x86_64 and aarch64) and
+# publish a release; install.sh downloads the latest one for its machine.
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
       - name: System libraries
@@ -33,18 +40,42 @@ jobs:
         run: cargo build --release --bin crate-player
       - name: Package
         run: |
+          [ "$(uname -m)" = "${{ matrix.arch }}" ] || { echo "built on $(uname -m), not ${{ matrix.arch }}"; exit 1; }
+          # aarch64: 64K-aligned segments (.cargo/config.toml), so 16K-page kernels can load it.
+          if [ "${{ matrix.arch }}" = aarch64 ]; then
+            readelf -lW target/release/crate-player | awk '$1=="LOAD" {print; if ($NF!="0x10000") bad=1} END {exit bad}'
+          fi
+          name=crate-player-${{ matrix.arch }}-linux.tar.gz
           mkdir dist
           cp target/release/crate-player dist/
           strip dist/crate-player
           cp assets/crate.svg dist/crate-player.svg
           cp packaging/crate-player.desktop dist/
           cp LICENSE README.md dist/
-          tar -C dist -czf crate-player-x86_64-linux.tar.gz .
-          sha256sum crate-player-x86_64-linux.tar.gz > crate-player-x86_64-linux.tar.gz.sha256
+          tar -C dist -czf "$name" .
+          sha256sum "$name" > "$name.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crate-player-${{ matrix.arch }}
+          path: crate-player-${{ matrix.arch }}-linux.tar.gz*
+          if-no-files-found: error
+
+  # Only once every architecture built, so a release never ships half its files.
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            crate-player-x86_64-linux.tar.gz crate-player-x86_64-linux.tar.gz.sha256 \
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
             --title "Crate $GITHUB_REF_NAME" --generate-notes
