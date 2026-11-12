@@ -174,7 +174,7 @@ impl Crate {
                                 .child({
                                     let al = album.clone();
                                     Self::pill("hero-sonic", "Sonically similar", t)
-                                        .on_click(cx.listener(move |this, _, _, cx| this.play_album_sonic_radio(al.clone(), cx)))
+                                        .on_click(cx.listener(move |this, _, _, cx| this.open_album_sonic_mix(al.clone(), cx)))
                                 })
                                 .when_some(station.clone(), |d, s| {
                                     d.child(Self::pill("hero-radio", "Library radio", t).on_click(cx.listener(move |this, _, _, cx| {

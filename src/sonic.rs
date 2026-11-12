@@ -1,5 +1,5 @@
 //! Sonic features from the server's sonic analysis: similar albums and
-//! artists, sonic radio (nearest tracks), and Sonic Adventure (a path of
+//! artists, sonic mixes (nearest tracks), and Sonic Adventure (a path of
 //! tracks between two, via /library/sections/N/computePath).
 
 use gpui::{Context, FontWeight, div, linear_color_stop, linear_gradient, prelude::*, px, rgb};
@@ -95,59 +95,12 @@ impl Crate {
         .detach();
     }
 
-    /// Sonic radio: the tracks that sound most like `seed`, starting with it.
-    pub(crate) fn play_sonic_radio(&mut self, seed: Track, cx: &mut Context<Self>) {
-        self.play_intent += 1;
-        let intent = self.play_intent;
-        let title = format!("Sounds like {}", seed.title);
-        let key = seed.rating_key.clone();
-        self.status = format!("Starting {title}…").into();
-        let rx = crate::plex_call(move |c| async move { c.nearest_tracks(&key, 50).await });
-        cx.spawn(async move |this, cx| {
-            let res = rx.await;
-            this.update(cx, |this, cx| match res {
-                _ if this.play_intent != intent => {}
-                Ok(Ok(near)) => {
-                    let seed_key = seed.rating_key.clone();
-                    let near: Vec<Track> = near.into_iter().filter(|t| t.rating_key != seed_key).collect();
-                    if near.is_empty() {
-                        this.status = format!("{} hasn't been sonically analyzed yet", seed.title).into();
-                        cx.notify();
-                        return;
-                    }
-                    let mut q = vec![seed];
-                    q.extend(near);
-                    this.start_queue(title, None, q, 0, cx);
-                }
-                Ok(Err(e)) => {
-                    this.status = format!("Sonic radio: {e:#}").into();
-                    cx.notify();
-                }
-                Err(_) => {}
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Sonic radio seeded from an album's first track.
-    pub(crate) fn play_album_sonic_radio(&mut self, album: Album, cx: &mut Context<Self>) {
-        self.play_intent += 1;
-        let intent = self.play_intent;
-        self.status = format!("Finding music that sounds like {}…", album.title).into();
-        cx.notify();
-        self.with_tracks(album, cx, move |this, _album, tracks, cx| {
-            if this.play_intent != intent {
-                return;
-            }
-            match tracks.into_iter().next() {
-                Some(first) => this.play_sonic_radio(first, cx),
-                None => {
-                    this.status = "That album has no tracks to start from".into();
-                    cx.notify();
-                }
-            }
-        });
+    /// "Sonically similar": a mix page of the tracks that sound most like
+    /// the album's opening track.
+    pub(crate) fn open_album_sonic_mix(&mut self, album: Album, cx: &mut Context<Self>) {
+        let title = format!("Sounds like {}", album.title);
+        let desc = format!("Tracks from your library that sound like the opening track of {}", album.title);
+        self.open_mix(format!("sonic:{}", album.rating_key), title, desc, crate::mix::MixSource::Sonic(album.rating_key), cx);
     }
 
     pub(crate) fn open_sonic(&mut self, cx: &mut Context<Self>) {

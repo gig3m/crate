@@ -224,7 +224,7 @@ struct Crate {
     np_had_lyrics: std::cell::Cell<bool>,
     /// Tracks whose detail fetch failed (until they're fetched again).
     detail_failed: std::collections::HashSet<String>,
-    /// Mix pages by id ("artist:<key>", "mood:<query>", "builder:<key>").
+    /// Mix pages by id ("artist:<key>", "mood:<query>", "builder:<key>", "sonic:<album key>").
     mixes: HashMap<String, mix::MixPage>,
     /// Bumped per queue started (Now::queue_id) and per play request, so late
     /// async replies can tell they've been superseded.
@@ -614,7 +614,7 @@ impl Crate {
                             this.load_page(page, cx);
                         }
                         // Test hooks: CRATE_SONIC_FROM / CRATE_SONIC_TO (track keys) open
-                        // Sonic Adventure with that path; CRATE_SONIC_RADIO plays sonic radio.
+                        // Sonic Adventure with that path; CRATE_SONIC_ALBUM opens an album's sonic mix.
                         if let (Ok(f), Ok(t)) = (std::env::var("CRATE_SONIC_FROM"), std::env::var("CRATE_SONIC_TO")) {
                             let mk = |k: String| plex::Track { rating_key: k, ..Default::default() };
                             this.sonic.from = Some(mk(f));
@@ -625,7 +625,7 @@ impl Crate {
                         if let Ok(k) = std::env::var("CRATE_SONIC_ALBUM")
                             && let Some(a) = this.albums.iter().find(|a| a.rating_key == k).cloned()
                         {
-                            this.play_album_sonic_radio(a, cx);
+                            this.open_album_sonic_mix(a, cx);
                         }
                         // Test hooks: CRATE_LIST=1 list view; CRATE_SELECT=key,key preselects.
                         if std::env::var_os("CRATE_LIST").is_some() {

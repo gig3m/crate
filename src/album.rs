@@ -321,7 +321,7 @@ impl Crate {
                     .hover(|d| d.bg(rgb(t.raised)))
                     .child(icons::icon("sonic", 16.0, t.discovery))
                     .child("Sonically similar")
-                    .on_click(cx.listener(move |this, _, _, cx| this.play_album_sonic_radio(a4.clone(), cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_album_sonic_mix(a4.clone(), cx)))
             })
             .child(self.playlist_menu("album-add-playlist", vec![album.rating_key.clone()], album.title.clone(), cx))
             .child(self.pin_pill(

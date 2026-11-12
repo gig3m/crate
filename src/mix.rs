@@ -17,6 +17,9 @@ pub(crate) enum MixSource {
     /// Mix builder: an artist's most-played tracks interleaved with the
     /// similar artists' (a fixed batch).
     Builder { key: String, similar: bool },
+    /// The tracks that sound most like an album's opening track, that
+    /// track first (a fixed batch; needs the server's sonic analysis).
+    Sonic(String),
 }
 
 /// Tracks a radio mix page gathers before showing (Plex hands out artist
@@ -90,6 +93,24 @@ impl Crate {
                 self.fetch_mix_batch(id, load_gen, station, cx);
             }
             MixSource::Station(station) => self.fetch_mix_batch(id, load_gen, station, cx),
+            MixSource::Sonic(album) => {
+                let rx = crate::plex_call(move |c| async move {
+                    let seed = c.tracks(&album).await?.into_iter().next().ok_or_else(|| anyhow::anyhow!("that album has no tracks"))?;
+                    let near: Vec<Track> = c.nearest_tracks(&seed.rating_key, 50).await?.into_iter().filter(|t| t.rating_key != seed.rating_key).collect();
+                    anyhow::ensure!(!near.is_empty(), "{} hasn't been sonically analyzed yet", seed.title);
+                    let mut tracks = vec![seed];
+                    tracks.extend(near);
+                    anyhow::Ok(tracks)
+                });
+                cx.spawn(async move |this, cx| {
+                    let res = rx.await;
+                    this.update(cx, |this, cx| {
+                        this.mix_loaded(&id, load_gen, None, res.map_err(|_| anyhow::anyhow!("cancelled")).and_then(|r| r), cx)
+                    })
+                    .ok();
+                })
+                .detach();
+            }
         }
         cx.notify();
     }
@@ -192,7 +213,7 @@ impl Crate {
         let Some(p) = self.mixes.get(id) else { return div().into_any_element() };
         let tracks = self.mix_tracks(id);
         let playing_here = (self.playing_mix() == Some(id)).then(|| self.now.as_ref().map(|n| n.idx)).flatten();
-        let radio = !matches!(p.source, MixSource::Builder { .. });
+        let radio = matches!(p.source, MixSource::Radio(_) | MixSource::Station(_));
 
         // A 2x2 collage of the batch's covers (distinct albums first).
         let mut covers: Vec<String> = Vec::new();
