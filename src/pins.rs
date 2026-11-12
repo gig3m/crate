@@ -63,7 +63,12 @@ fn path() -> std::path::PathBuf {
 /// drop them), and a problem to report.
 pub(crate) fn load() -> (Vec<Pin>, Vec<serde_json::Value>, Option<String>) {
     let p = path();
-    let Ok(bytes) = std::fs::read(&p) else { return (Vec::new(), Vec::new(), None) };
+    let bytes = match std::fs::read(&p) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), Vec::new(), None),
+        // There but unreadable: don't let a save replace it.
+        Err(e) => return (Vec::new(), Vec::new(), Some(format!("pins.json couldn't be read ({e}); pins won't be saved this session"))),
+    };
     match serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) {
         Ok(entries) => {
             let (mut pins, mut unknown) = (Vec::new(), Vec::new());
@@ -78,15 +83,21 @@ pub(crate) fn load() -> (Vec<Pin>, Vec<serde_json::Value>, Option<String>) {
         }
         Err(e) => {
             // Not JSON at all: keep the file aside rather than overwrite it.
-            let bad = p.with_extension("json.bad");
-            let _ = std::fs::rename(&p, &bad);
-            (Vec::new(), Vec::new(), Some(format!("pins.json couldn't be read ({e}); moved it to {}", bad.display())))
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let bad = p.with_extension(format!("json.bad-{stamp}"));
+            match std::fs::rename(&p, &bad) {
+                Ok(()) => (Vec::new(), Vec::new(), Some(format!("pins.json couldn't be read ({e}); moved it to {}", bad.display()))),
+                Err(re) => (Vec::new(), Vec::new(), Some(format!("pins.json couldn't be read ({e}) or moved aside ({re}); pins won't be saved this session"))),
+            }
         }
     }
 }
 
 impl Crate {
     fn save_pins(&mut self) {
+        if self.pins_locked {
+            return;
+        }
         let p = path();
         let res = (|| -> std::io::Result<()> {
             std::fs::create_dir_all(p.parent().unwrap_or(std::path::Path::new(".")))?;
@@ -308,7 +319,9 @@ impl Crate {
             .ghost()
             .xsmall()
             .label("+")
-            .dropdown_menu(move |mut menu, _, _| {
+            .dropdown_menu(move |menu, _, _| {
+                // Every playlist is listed: let it scroll.
+                let mut menu = menu.scrollable(true);
                 if !loaded {
                     return menu.item(PopupMenuItem::new("Playlists haven't loaded (is the server reachable?)").disabled(true));
                 }

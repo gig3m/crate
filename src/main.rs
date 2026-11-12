@@ -191,6 +191,8 @@ struct Crate {
     pub(crate) pins: Vec<pins::Pin>,
     /// pins.json entries this build can't read, saved back as they were.
     pub(crate) pins_unknown: Vec<serde_json::Value>,
+    /// pins.json exists but couldn't be read or moved aside: never overwrite it.
+    pub(crate) pins_locked: bool,
     /// "Stop after": the queue index playback stops after (the engine is
     /// handed nothing past it), and whether it was set for the album.
     pub(crate) stop_after: Option<usize>,
@@ -809,6 +811,7 @@ impl Crate {
             np_lyrics: theme::saved_lyrics(),
             pins: Vec::new(),
             pins_unknown: Vec::new(),
+            pins_locked: false,
             stop_after: None,
             queue_scroll: UniformListScrollHandle::new(),
             stop_after_album: false,
@@ -1240,6 +1243,16 @@ impl Crate {
 
     fn home_loaded(&mut self, home: plex::Home, cx: &mut Context<Self>) {
         let first = self.home.is_none();
+        // Pinned playlists' current covers (any playlist, not just recent ones).
+        let pinned_covers: Vec<String> = self
+            .pins
+            .iter()
+            .filter(|p| p.kind == pins::PinKind::Playlist)
+            .filter_map(|p| home.playlists.iter().find(|l| l.rating_key == p.key).map(|l| l.thumb.clone()))
+            .collect();
+        for th in pinned_covers {
+            self.request_thumb(&th);
+        }
         let thumbs = home.rows.iter().flat_map(|r| r.items.iter().map(|i| i.thumb.clone()));
         let thumbs: Vec<String> = thumbs
             .chain(home.playlists.iter().take(8).map(|p| p.thumb.clone()))
@@ -3322,6 +3335,7 @@ fn main() {
                     let (pins, unknown, problem) = pins::load();
                     (c.pins, c.pins_unknown) = (pins, unknown);
                     if let Some(p) = problem {
+                        c.pins_locked = p.contains("won't be saved");
                         c.say(p);
                     }
                     // Pinned items' art for the sidebar.
