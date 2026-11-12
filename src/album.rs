@@ -296,7 +296,7 @@ impl Crate {
                         }
                     })),
             )
-            .child(circle("album-shuffle", "shuffle", t.text).when(tracks.is_none(), |d| d.opacity(0.5)).on_click(cx.listener(move |this, _, _, cx| {
+            .child(circle("album-shuffle", "shuffle", t.text).when(tracks.is_none(), |d| d.opacity(0.5).cursor_default()).on_click(cx.listener(move |this, _, _, cx| {
                 if let Some(mut tr) = this.album_tracks() {
                     crate::shuffle(&mut tr);
                     this.start_queue(format!("{} (shuffled)", a2.title), None, tr, 0, cx);

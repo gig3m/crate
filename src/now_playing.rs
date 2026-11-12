@@ -549,7 +549,8 @@ impl Crate {
                 let steps: Vec<(&str, String, bool)> = vec![
                     ("Source", source, true),
                     match tx {
-                        _ if self.offline.local(&tr.part_key).is_some() => ("Offline copy", "Kept on this computer · original file · no stream".into(), true),
+                        // What the engine actually opened for this track.
+                        None if n.local_played.contains(&n.idx) => ("Offline copy", "Kept on this computer · original file · no stream".into(), true),
                         Some(k) => ("Plex stream", format!("Transcoded · Opus ~{k} kbps · remote connection"), false),
                         None => ("Plex stream", "Direct play · original file · no transcode".into(), true),
                     },

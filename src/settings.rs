@@ -299,7 +299,7 @@ impl Crate {
     pub(crate) fn open_output_settings(&mut self, cx: &mut Context<Self>) {
         self.open_audio_settings(cx);
         // The Audio heading is the scroll area's third child.
-        self.settings_scroll.scroll_to_item(2);
+        self.settings_scroll.scroll_to_top_of_item(2);
     }
 
     pub(crate) fn open_audio_settings(&mut self, cx: &mut Context<Self>) {

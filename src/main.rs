@@ -330,6 +330,8 @@ pub(crate) struct Now {
     formats: HashMap<usize, (u32, u32)>,
     /// index -> transcode bitrate (kbps) of what the engine opened; absent = original file.
     transcoded: HashMap<usize, u32>,
+    /// Indices the engine played from a local (offline) file.
+    local_played: std::collections::HashSet<usize>,
     /// Furthest queue index the engine skipped (couldn't open): counts as
     /// reached for the radio refill, though it was never heard.
     skipped_to: usize,
@@ -376,6 +378,7 @@ impl Now {
             tracks,
             formats: HashMap::new(),
             transcoded: HashMap::new(),
+            local_played: Default::default(),
             skipped_to: 0,
             level: HashMap::new(),
             start_idx: idx,
@@ -1479,6 +1482,7 @@ impl Crate {
             tracks,
             formats: HashMap::new(),
             transcoded: HashMap::new(),
+            local_played: Default::default(),
             skipped_to: 0,
             level: HashMap::new(),
             start_idx: 0,
@@ -1935,6 +1939,12 @@ impl Crate {
                         eprintln!("[crate] engine opened {label} for #{}", now.start_idx + index);
                     }
                     now.formats.insert(now.start_idx + index, (source_rate, bits));
+                    // Local files are labelled by file name, streams "plex:...".
+                    if label.starts_with("plex:") {
+                        now.local_played.remove(&(now.start_idx + index));
+                    } else {
+                        now.local_played.insert(now.start_idx + index);
+                    }
                     match transcoded_kbps(&label) {
                         Some(k) => now.transcoded.insert(now.start_idx + index, k),
                         None => now.transcoded.remove(&(now.start_idx + index)),

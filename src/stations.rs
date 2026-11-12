@@ -154,7 +154,7 @@ impl Crate {
         };
         let decades: Vec<(String, String)> =
             home.map(|h| h.decades.iter().map(|(q, l)| (q.replace("decade=", "album.decade="), l.clone())).collect()).unwrap_or_default();
-        let moods = home.map(|h| h.moods.clone()).unwrap_or_default();
+        let moods = home.map(|h| h.radio_moods.clone()).unwrap_or_default();
         let genres = home.map(|h| h.genres.clone()).unwrap_or_default();
 
         div()

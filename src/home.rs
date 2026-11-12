@@ -16,7 +16,6 @@ pub(crate) fn ago(ts: i64) -> String {
     }
 }
 
-/// One-line descriptions for Plex's built-in stations.
 impl Crate {
     /// The server's Library Radio station, found by name.
     pub(crate) fn library_radio(home: &crate::plex::Home) -> Option<crate::plex::HubItem> {
@@ -24,6 +23,7 @@ impl Crate {
     }
 }
 
+/// One-line descriptions for Plex's built-in stations.
 pub(crate) fn station_blurb(title: &str) -> &'static str {
     match title {
         "Library Radio" => "Your whole library, mixed",
@@ -440,7 +440,7 @@ impl Crate {
                     t.discovery,
                     t,
                 )
-.cursor_pointer()
+                .cursor_pointer()
                 .hover(|d| d.border_color(rgb(t.line)))
                 .on_click(cx.listener(|this, _, _, cx| this.open_sonic(cx))),
             );
@@ -512,7 +512,7 @@ impl Crate {
             .text_color(rgb(t.text2))
             .cursor_pointer()
             .hover(|d| d.text_color(rgb(t.text_strong)))
-            .child(format!("All {} moods", home.moods.len()))
+            .child(format!("All {} moods", home.radio_moods.len()))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.go(View::Soon("stations"));
                 cx.notify();

@@ -145,9 +145,11 @@ pub struct Home {
     pub server: String,
     /// Most recently played album and when (unix seconds).
     pub last_played: Option<(Album, i64)>,
-    /// (filter value, label): every mood in the library, and a random six
-    /// of them for Home and the Stations page (Plex gives no counts to rank by).
+    /// (filter value, label): moods albums carry (the album filters), moods
+    /// tracks carry (radio), and a random six of the latter for Home (Plex
+    /// gives no counts to rank by).
     pub moods: Vec<(String, String)>,
+    pub radio_moods: Vec<(String, String)>,
     pub featured_moods: Vec<(String, String)>,
     /// The library section's own name (e.g. "Music").
     pub section_title: String,
@@ -1363,12 +1365,15 @@ impl Client {
 
     pub async fn home(&self, section: &str) -> anyhow::Result<Home> {
         let (mood_path, decade_path, genre_path) = (
-            format!("/library/sections/{section}/mood"),
+            format!("/library/sections/{section}/mood?type=9"),
             format!("/library/sections/{section}/decade"),
             format!("/library/sections/{section}/genre"),
         );
         let section_path = format!("/library/sections/{section}");
-        let (rows, playlists, server, last, moods, decades, genres, section_meta) = tokio::join!(
+        // Moods on tracks (radio, mixes) differ from moods on albums (the
+        // album filters): each list holds only moods something carries.
+        let track_mood_path = format!("/library/sections/{section}/mood?type=10");
+        let (rows, playlists, server, last, moods, decades, genres, section_meta, track_moods) = tokio::join!(
             self.home_hubs(section),
             self.playlists(),
             self.server_name(),
@@ -1377,7 +1382,9 @@ impl Client {
             self.directory(&decade_path),
             self.directory(&genre_path),
             self.get(&section_path),
+            self.directory(&track_mood_path),
         );
+        let track_moods = track_moods.unwrap_or_default();
         let section_title = match section_meta {
             Ok(r) => r.json::<serde_json::Value>().await.ok().and_then(|v| v["MediaContainer"]["title1"].as_str().map(String::from)),
             Err(_) => None,
@@ -1394,7 +1401,7 @@ impl Client {
         let mixes: Vec<MoodMix> = MIXES
             .iter()
             .filter_map(|(title, desc, names)| {
-                let found: Vec<&(String, String)> = names.iter().filter_map(|n| moods.iter().find(|(_, t)| t == n)).collect();
+                let found: Vec<&(String, String)> = names.iter().filter_map(|n| track_moods.iter().find(|(_, t)| t == n)).collect();
                 let ids: Vec<&str> = found.iter().map(|(k, _)| k.as_str()).collect();
                 // Described by the moods it actually draws on, not a promise.
                 let _ = desc;
@@ -1403,7 +1410,8 @@ impl Client {
             })
             .collect();
         let moods: Vec<(String, String)> = moods.iter().map(|(k, t)| (format!("mood={k}"), t.clone())).collect();
-        let mut featured_moods = moods.clone();
+        let radio_moods: Vec<(String, String)> = track_moods.iter().map(|(k, t)| (format!("mood={k}"), t.clone())).collect();
+        let mut featured_moods = radio_moods.clone();
         crate::shuffle(&mut featured_moods);
         featured_moods.truncate(6);
         featured_moods.sort_by(|a, b| a.1.cmp(&b.1));
@@ -1422,6 +1430,7 @@ impl Client {
             last_played: last.ok().flatten(),
             moods,
             featured_moods,
+            radio_moods,
             section_title,
             decades,
             genres: genres.unwrap_or_default().into_iter().map(|(k, t)| (format!("genre={k}"), t)).collect(),
