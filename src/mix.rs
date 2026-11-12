@@ -475,6 +475,7 @@ impl Crate {
                         ),
                 )
                 .child(div().w(px(220.0)).text_size(px(13.0)).text_color(rgb(t.text2)).truncate().child(tr.album_title.clone()))
+                .child(self.track_stars(format!("mix-r-{i}"), tr, t, cx))
                 .child(div().w(px(64.0)).flex().justify_end().font_family(MONO).text_size(px(13.0)).text_color(rgb(t.muted)).child(fmt_ms(tr.duration_ms)))
                 .child(div().w(px(28.0)).flex().justify_center().child(self.playlist_menu_icon(("mix-add", i), vec![tr.rating_key.clone()], tr.title.clone(), t.muted, cx)))
                 .on_click(cx.listener(move |this, _, _, cx| this.play_mix_from(&id, i, cx)))
@@ -495,6 +496,7 @@ impl Crate {
             .child(div().w(px(40.0)).child("#"))
             .child(div().flex_1().child("TITLE"))
             .child(div().w(px(220.0)).child("ALBUM"))
+            .child(div().w(px(110.0)).child("RATING"))
             .child(div().w(px(64.0)).flex().justify_end().child("TIME"))
             .child(div().w(px(28.0)));
 

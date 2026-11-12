@@ -92,6 +92,7 @@ impl KeptAlbum {
                 track_no: k.track_no,
                 disc: k.disc,
                 playlist_item: 0,
+                rating: None,
             })
             .collect()
     }

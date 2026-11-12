@@ -350,6 +350,9 @@ pub struct Track {
     /// Track number on its disc, and the disc (0 when Plex has none).
     pub track_no: u32,
     pub disc: u32,
+    /// The rating (0–10) Plex sent with the track, when it came from a
+    /// listing that carries one (Crate::rating_of has the live value).
+    pub rating: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -384,6 +387,19 @@ struct Meta {
     index: Option<u32>,
     #[serde(rename = "parentIndex", default)]
     parent_index: Option<u32>,
+    /// 0–10 (stars × 2); absent when unrated.
+    #[serde(rename = "userRating", default, deserialize_with = "lenient_rating")]
+    user_rating: Option<f32>,
+}
+
+/// userRating as a number, or a number in a string; anything else is no
+/// rating rather than a failed response.
+fn lenient_rating<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f32>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Number(n) => n.as_f64().map(|r| r as f32),
+        serde_json::Value::String(s) => s.parse().ok(),
+        _ => None,
+    })
 }
 
 impl Meta {
@@ -413,6 +429,7 @@ impl Meta {
             playlist_item: 0,
             track_no: self.index.unwrap_or(0),
             disc: self.parent_index.unwrap_or(0),
+            rating: self.user_rating,
         })
     }
 }
@@ -883,6 +900,33 @@ impl Client {
 
     /// Recent plays from every client: (title, artist, album title, album key,
     /// track key, viewed at, album cover).
+    /// Ratings (0–10, None unrated) of these tracks, for lists whose
+    /// listing doesn't carry them (history), 50 keys per request. A chunk
+    /// that fails is skipped (and logged); keys a reply leaves out (gone
+    /// from the library) count as unrated.
+    pub async fn ratings(&self, keys: Vec<String>) -> anyhow::Result<Vec<(String, Option<f32>)>> {
+        let mut out = Vec::new();
+        let mut last_err = None;
+        for chunk in keys.chunks(50) {
+            let env: anyhow::Result<Envelope> = async { Ok(self.get(&format!("/library/metadata/{}", chunk.join(","))).await?.json().await?) }.await;
+            match env {
+                Ok(env) => {
+                    let got: Vec<(String, Option<f32>)> = env.mc.metadata.into_iter().map(|m| (m.rating_key, m.user_rating)).collect();
+                    out.extend(chunk.iter().filter(|k| !got.iter().any(|(g, _)| g == *k)).map(|k| (k.clone(), None)));
+                    out.extend(got);
+                }
+                Err(e) => {
+                    eprintln!("[crate] ratings for {} tracks: {e:#}", chunk.len());
+                    last_err = Some(e);
+                }
+            }
+        }
+        match last_err {
+            Some(e) if out.is_empty() => Err(e.context("ratings")),
+            _ => Ok(out),
+        }
+    }
+
     pub async fn history(&self, section: &str, n: usize) -> anyhow::Result<Vec<HistoryItem>> {
         let res = self
             .http
@@ -1966,5 +2010,14 @@ mod playlist_tests {
         assert_eq!(super::track_query("decade=1990&userRating>>=8"), "album.decade=1990&album.userRating>>=8");
         assert_eq!(super::track_query("mood=1,2"), "album.mood=1,2");
         assert_eq!(super::track_query(""), "");
+    }
+
+    #[test]
+    fn user_rating_number_string_or_junk() {
+        let m = |j: &str| serde_json::from_str::<super::Meta>(j).unwrap().user_rating;
+        assert_eq!(m(r#"{"title":"a","userRating":8.0}"#), Some(8.0));
+        assert_eq!(m(r#"{"title":"a","userRating":"6"}"#), Some(6.0));
+        assert_eq!(m(r#"{"title":"a","userRating":true}"#), None);
+        assert_eq!(m(r#"{"title":"a"}"#), None);
     }
 }

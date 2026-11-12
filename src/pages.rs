@@ -46,7 +46,15 @@ impl Crate {
                             for th in thumbs {
                                 this.request_thumb(&th);
                             }
+                            // History doesn't carry ratings: fetch the ones not known yet.
+                            let mut keys: Vec<String> = Vec::new();
+                            for it in &h {
+                                if !it.rating_key.is_empty() && !this.ratings.contains_key(&it.rating_key) && !keys.contains(&it.rating_key) {
+                                    keys.push(it.rating_key.clone());
+                                }
+                            }
                             this.history = Some(h);
+                            this.fetch_ratings(keys, cx);
                             cx.notify();
                         })
                         .ok();
@@ -162,7 +170,7 @@ impl Crate {
             .into_any_element()
     }
 
-    fn track_row(&self, i: usize, tr: &Track, right: String, t: &Theme) -> gpui::Stateful<gpui::Div> {
+    fn track_row(&self, i: usize, tr: &Track, right: String, t: &Theme, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let art = match self.art.get(&tr.thumb).cloned() {
             Some(im) => img(im).size(px(40.0)).flex_none().rounded(px(4.0)).object_fit(ObjectFit::Cover).into_any_element(),
             None => gpui::img(self.mark(crate::art::placeholder_for(&tr.thumb))).size(px(40.0)).flex_none().rounded(px(4.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
@@ -191,7 +199,8 @@ impl Crate {
                     .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(if playing { t.accent } else { t.text })).truncate().child(tr.title.clone()))
                     .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(format!("{} · {}", tr.artist, tr.album_title))),
             )
-            .child(div().font_family(MONO).text_size(px(12.0)).text_color(rgb(t.text2)).child(right))
+            .child(self.track_stars(format!("trow-r-{i}"), tr, t, cx))
+            .child(div().w(px(140.0)).flex_none().flex().justify_end().whitespace_nowrap().font_family(MONO).text_size(px(12.0)).text_color(rgb(t.text2)).child(right))
     }
 
     /// A page still loading, or (with Retry) one whose load failed.
@@ -244,7 +253,7 @@ impl Crate {
             .enumerate()
             .map(|(i, (tr, plays))| {
                 // The list is read at click time, not copied into every row.
-                self.track_row(i, tr, format!("{plays} plays · {}", fmt_ms(tr.duration_ms)), t).on_click(cx.listener(move |this, _, _, cx| {
+                self.track_row(i, tr, format!("{plays} plays · {}", fmt_ms(tr.duration_ms)), t, cx).on_click(cx.listener(move |this, _, _, cx| {
                     let all: Vec<Track> = this.top_tracks.as_ref().map(|v| v.iter().map(|x| x.0.clone()).collect()).unwrap_or_default();
                     if i < all.len() {
                         this.start_queue("Most played".into(), None, all, i, cx);
@@ -284,7 +293,7 @@ impl Crate {
                     ..Default::default()
                 };
                 let (ak, tk) = (it.album_key.clone(), it.rating_key.clone());
-                self.track_row(i, &tr, crate::home::ago(it.viewed_at), t)
+                self.track_row(i, &tr, crate::home::ago(it.viewed_at), t, cx)
                     .on_click(cx.listener(move |this, _, _, cx| this.play_track_in_album(&ak, tk.clone(), cx)))
             })
             .collect();

@@ -200,6 +200,7 @@ impl Crate {
                             .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.text_strong)).truncate().child(tr.title.clone()))
                             .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(album_title.clone())),
                     )
+                    .child(self.track_stars(format!("pop-r-{n}"), &tr, t, cx))
                     .child(
                         div()
                             .w(px(90.0))

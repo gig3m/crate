@@ -23,6 +23,9 @@ pub(crate) fn rate_stars(
         .flex()
         .gap(px(2.0))
         .on_click(|_, _, cx| cx.stop_propagation())
+        // A press here mustn't arm a draggable row's drag: a wobble over 2 px
+        // would start it and the click would rate nothing.
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .children((0..5u8).map(|i| {
             let f = on_rate.clone();
             div()
@@ -423,7 +426,8 @@ impl Crate {
                         let own_artist = (!tr.artist.is_empty() && tr.artist != album.artist).then(|| tr.artist.clone());
                         let playing = playing_here == Some(i);
                         let at_cursor = self.cursor == Some(i);
-                        let (plays, rating) = detail.as_ref().and_then(|d| d.stats.get(&tr.rating_key).copied()).unwrap_or((0, None));
+                        let plays = detail.as_ref().and_then(|d| d.stats.get(&tr.rating_key)).map(|s| s.0).unwrap_or(0);
+                        let rating = self.rating_of(tr);
                         let album = album.clone();
                         let row = div()
                             .id(("track", i))
@@ -466,7 +470,7 @@ impl Crate {
                             )
                             .child(div().w(px(110.0)).child({
                                 let k = tr.rating_key.clone();
-                                rate_stars(format!("tr-{k}"), rating, 13.0, t.accent, t.line, cx, move |this, n, cx| this.rate_track(k.clone(), n, cx))
+                                rate_stars(format!("tr-{k}"), rating, 13.0, t.accent, t.line, cx, move |this, n, cx| this.rate_track(k.clone(), rating, n, cx))
                             }))
                             .child(self.playlist_menu_icon(("tr-pl", i), vec![tr.rating_key.clone()], tr.title.clone(), t.muted, cx))
                             .child(

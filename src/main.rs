@@ -230,6 +230,12 @@ struct Crate {
     /// A mix page to play from the top once its batch is in, with the
     /// play_intent it was asked for under (radio and station buttons).
     mix_autoplay: Option<(String, u64)>,
+    /// Track ratings (0–10, None unrated) set in Crate this session: they
+    /// win over everything else.
+    ratings: HashMap<String, Option<f32>>,
+    /// Ratings fetched for lists that don't carry them (History): below
+    /// track and album details, which may be fresher.
+    fetched_ratings: HashMap<String, Option<f32>>,
     /// Bumped per queue started (Now::queue_id) and per play request, so late
     /// async replies can tell they've been superseded.
     queue_seq: u64,
@@ -841,6 +847,8 @@ impl Crate {
             detail_failed: Default::default(),
             mixes: HashMap::new(),
             mix_autoplay: None,
+            ratings: HashMap::new(),
+            fetched_ratings: HashMap::new(),
             queue_seq: 0,
             play_intent: 0,
             shuffle: false,
@@ -2300,22 +2308,81 @@ impl Crate {
 
     /// 1–5 keys: rate the playing track.
     fn rate_playing(&mut self, stars: u8, cx: &mut Context<Self>) {
-        if let Some(rk) = self.now.as_ref().and_then(|n| n.tracks.get(n.idx)).map(|t| t.rating_key.clone()) {
-            self.rate_track(rk, stars, cx);
+        if let Some(tr) = self.now.as_ref().and_then(|n| n.tracks.get(n.idx)).cloned() {
+            let shown = self.rating_of(&tr);
+            self.rate_track(tr.rating_key, shown, stars, cx);
         }
     }
 
+    /// A track's rating (0–10): set in Crate this session, else from its
+    /// details, its album's stats, a fetch, or what the track came with.
+    pub(crate) fn rating_of(&self, tr: &Track) -> Option<f32> {
+        if let Some(r) = self.ratings.get(&tr.rating_key) {
+            return *r;
+        }
+        if let Some(Some(d)) = self.track_detail.get(&tr.rating_key) {
+            return d.rating;
+        }
+        if let Some(s) = self.album_detail.get(&tr.album_key).and_then(|a| a.as_ref()).and_then(|a| a.stats.get(&tr.rating_key)) {
+            return s.1;
+        }
+        if let Some(r) = self.fetched_ratings.get(&tr.rating_key) {
+            return *r;
+        }
+        tr.rating
+    }
+
+    /// Stars for a track row (the album page's rating column); a row with
+    /// no track key gets the space only.
+    pub(crate) fn track_stars(&self, id: String, tr: &Track, t: &crate::theme::Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let cell = div().w(px(110.0)).flex_none();
+        if tr.rating_key.is_empty() {
+            return cell;
+        }
+        let shown = self.rating_of(tr);
+        let k = tr.rating_key.clone();
+        cell.child(album::rate_stars(id, shown, 13.0, t.accent, t.line, cx, move |this, n, cx| this.rate_track(k.clone(), shown, n, cx)))
+    }
+
+    /// Fetch ratings for tracks whose listing didn't carry them.
+    pub(crate) fn fetch_ratings(&mut self, keys: Vec<String>, cx: &mut Context<Self>) {
+        if keys.is_empty() {
+            return;
+        }
+        let rx = plex_call(move |c| async move { c.ratings(keys).await });
+        cx.spawn(async move |this, cx| {
+            match rx.await {
+                Ok(Ok(found)) => {
+                    this.update(cx, |this, cx| {
+                        this.fetched_ratings.extend(found);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Ok(Err(e)) => eprintln!("[crate] ratings: {e:#}"),
+                Err(_) => {}
+            }
+        })
+        .detach();
+    }
+
     /// Rate a track 1–5 stars; choosing the current rating clears it.
-    pub(crate) fn rate_track(&mut self, rk: String, stars: u8, cx: &mut Context<Self>) {
-        let current = self
-            .track_detail
-            .get(&rk)
-            .and_then(|d| d.as_ref())
-            .and_then(|d| d.rating)
-            .or_else(|| self.album_detail.values().flatten().find_map(|a| a.stats.get(&rk).and_then(|s| s.1)));
+    /// `shown` is the rating the clicked stars showed.
+    pub(crate) fn rate_track(&mut self, rk: String, shown: Option<f32>, stars: u8, cx: &mut Context<Self>) {
+        if rk.is_empty() {
+            return;
+        }
+        let current = shown;
         // Clear only when the click matches the stored value exactly; a half-star
         // rating from another client (shown rounded down) gets set, not cleared.
         let new = if current == Some(f32::from(stars * 2)) { None } else { Some(stars * 2) };
+        self.ratings.insert(rk.clone(), new.map(f32::from));
+        // The queue is saved for resume with its tracks: keep theirs current.
+        if let Some(n) = self.now.as_mut() {
+            for t in n.tracks.iter_mut().filter(|t| t.rating_key == rk) {
+                t.rating = new.map(f32::from);
+            }
+        }
         if let Some(Some(d)) = self.track_detail.get_mut(&rk) {
             d.rating = new.map(f32::from);
         }

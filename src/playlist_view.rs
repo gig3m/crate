@@ -625,6 +625,7 @@ impl Crate {
             .child(div().w(px(40.0)).child("#"))
             .child(div().flex_1().child("TITLE"))
             .child(div().w(px(220.0)).child("ALBUM"))
+            .child(div().w(px(110.0)).child("RATING"))
             .child(div().w(px(64.0)).flex().justify_end().child("TIME"))
             .child(div().w(px(24.0)))
             .child(div().w(px(28.0)));
@@ -777,6 +778,7 @@ impl Crate {
                                     ),
                             )
                             .child(div().w(px(220.0)).text_size(px(13.0)).text_color(rgb(t.text2)).truncate().child(tr.album_title.clone()))
+                            .child(this.track_stars(format!("pl-r-{i}"), &tr, &t, cx))
                             .child(
                                 div()
                                     .w(px(64.0))

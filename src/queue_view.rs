@@ -285,6 +285,7 @@ impl Crate {
                                         .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(format!("{} · {}", tr.artist, tr.album_title))),
                                 )
                                 .when(stop_line, |d| d.child(div().font_family(MONO).text_size(px(10.0)).text_color(rgb(t.red)).child("STOPS HERE")))
+                                .child(this.track_stars(format!("q-r-{i}"), &tr, &t, cx))
                                 .child(div().w(px(56.0)).flex().justify_end().font_family(MONO).text_size(px(12.0)).text_color(rgb(t.muted)).child(fmt_ms(tr.duration_ms)))
                                 .child(
                                     div().w(px(28.0)).flex().justify_center().when(editable, |d| {

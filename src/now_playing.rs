@@ -207,9 +207,8 @@ impl Crate {
         let shown_ms = self.viz.borrow().drag.map(|f| (f as f64 * len as f64) as u64).unwrap_or(n.elapsed_ms);
         let np_stars = {
             let k = tr.rating_key.clone();
-            crate::album::rate_stars(format!("np-{k}"), detail.as_ref().and_then(|d| d.rating), 18.0, t.accent, 0x8a8a8a, cx, move |this, n, cx| {
-                this.rate_track(k.clone(), n, cx)
-            })
+            let shown = self.rating_of(tr);
+            crate::album::rate_stars(format!("np-{k}"), shown, 18.0, t.accent, 0x8a8a8a, cx, move |this, n, cx| this.rate_track(k.clone(), shown, n, cx))
         };
         let np_add = self.playlist_menu_icon("np-add", vec![tr.rating_key.clone()], tr.title.clone(), 0xb0b0b0, cx);
         let btn = |id: &'static str, ic: &'static str, size: f32, color: Hsla, tr: Option<Transport>| {
@@ -425,8 +424,16 @@ impl Crate {
                             Some(im) => img(im).size(px(40.0)).flex_none().rounded(px(4.0)).object_fit(ObjectFit::Cover).into_any_element(),
                             None => gpui::img(self.mark(crate::art::placeholder_for(&q.thumb))).size(px(40.0)).flex_none().rounded(px(4.0)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
                         };
+                        // Stars show when rated, else on hover (the panel is narrow).
+                        let shown = self.rating_of(q);
+                        let k = q.rating_key.clone();
+                        let stars = div()
+                            .flex_none()
+                            .when(shown.is_none_or(|r| r < 2.0), |d| d.opacity(0.0).group_hover("np-q", |s| s.opacity(1.0)))
+                            .child(crate::album::rate_stars(format!("npq-r-{i}"), shown, 11.0, t.accent, 0x8a8a8a, cx, move |this, s, cx| this.rate_track(k.clone(), shown, s, cx)));
                         div()
                             .id(("q", i))
+                            .group("np-q")
                             .px(px(6.0))
                             .py(px(7.0))
                             .flex()
@@ -448,6 +455,7 @@ impl Crate {
                             )
                             .when(radio, |d| d.child(div().font_family(MONO).text_size(px(10.0)).text_color(rgb(t.healthy)).child("RADIO")))
                             .when(!radio && self.dj_keys.contains(&(n.queue_id, q.rating_key.clone())), |d| d.child(div().font_family(MONO).text_size(px(10.0)).text_color(rgb(t.discovery)).child("DJ")))
+                            .child(stars)
                             .child(div().font_family(MONO).text_size(px(11.0)).text_color(white(0.66)).child(fmt_ms(q.duration_ms)))
                             .on_click(cx.listener(move |this, _, _, cx| this.play_from(i, 0, cx)))
                     })
