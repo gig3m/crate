@@ -163,10 +163,7 @@ impl Crate {
     }
 
     fn open_pin(&mut self, pin: Pin, cx: &mut Context<Self>) {
-        // A station pin plays where you are; the others open their page.
-        if pin.kind != PinKind::Station {
-            self.now_playing = false;
-        }
+        self.now_playing = false;
         match pin.kind {
             PinKind::Playlist => self.open_playlist(pin.key, pin.title, cx),
             PinKind::Album => match self.albums.iter().position(|a| a.rating_key == pin.key) {
@@ -179,7 +176,7 @@ impl Crate {
                 Some(source) => self.open_mix(pin.key, pin.title, pin.desc, source, cx),
                 None => self.say("That pin is missing its mix details; pin it again"),
             },
-            // Stations have no page: a pin starts it.
+            // A station pin starts it, on its mix page.
             PinKind::Station => self.play_station(pin.key, pin.title, cx),
         }
         cx.notify();

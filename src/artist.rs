@@ -10,9 +10,10 @@ fn rgba(c: u32, a: f32) -> gpui::Hsla {
 }
 
 impl Crate {
-    /// Start Plex radio seeded from an artist, track or album. Plex has
-    /// stations for artists and tracks (`/library/metadata/{key}/station/...`)
-    /// but none for albums (an empty queue), so an album seeds from its first track.
+    /// Start Plex radio seeded from an artist, track or album, on its mix
+    /// page (so what plays is listed there). Plex has stations for artists
+    /// and tracks but none for albums (an empty queue), so an album seeds
+    /// from its first track.
     pub(crate) fn play_radio(&mut self, key: &str, title: String, cx: &mut Context<Self>) {
         if let Some(album) = self.albums.iter().find(|a| a.rating_key == key).cloned() {
             self.play_intent += 1;
@@ -25,8 +26,8 @@ impl Crate {
                 }
                 match tracks.first() {
                     Some(first) => {
-                        let k = first.rating_key.clone();
-                        this.play_station_key(&k, title, cx);
+                        let seed = first.rating_key.clone();
+                        this.play_mix(format!("radio:{seed}"), title, String::new(), crate::mix::MixSource::Radio(seed), cx);
                     }
                     None => {
                         this.status = "That album has no tracks to start radio from".into();
@@ -36,12 +37,9 @@ impl Crate {
             });
             return;
         }
-        self.play_station_key(key, title, cx);
-    }
-
-    fn play_station_key(&mut self, key: &str, title: String, cx: &mut Context<Self>) {
-        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_micros()).unwrap_or(0);
-        self.play_station(format!("/library/metadata/{key}/station/crate-{nonce:x}?type=10"), title, cx);
+        // An artist's radio shares its page with Home's mix for that artist.
+        let id = if self.albums.iter().any(|a| a.artist_key == key) { format!("artist:{key}") } else { format!("radio:{key}") };
+        self.play_mix(id, title, String::new(), crate::mix::MixSource::Radio(key.to_string()), cx);
     }
 
     pub(crate) fn artist_view(&self, key: &str, name: &str, info: Option<&ArtistInfo>, t: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {

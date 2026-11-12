@@ -22,6 +22,25 @@ pub(crate) enum MixSource {
     Sonic(String),
 }
 
+impl MixSource {
+    /// The source a mix page id stands for (the ids open_mix's callers
+    /// use), for a page rebuilt from a resumed queue.
+    pub(crate) fn from_id(id: &str) -> Option<Self> {
+        let (kind, key) = id.split_once(':')?;
+        Some(match kind {
+            "artist" | "radio" => Self::Radio(key.to_string()),
+            "station" => Self::Station(key.to_string()),
+            "mood" => Self::Station(format!("query:{key}")),
+            "sonic" => Self::Sonic(key.to_string()),
+            "builder" => match key.strip_suffix("+similar") {
+                Some(k) => Self::Builder { key: k.to_string(), similar: true },
+                None => Self::Builder { key: key.to_string(), similar: false },
+            },
+            _ => return None,
+        })
+    }
+}
+
 /// Tracks a radio mix page gathers before showing (Plex hands out artist
 /// radio five at a time).
 const RADIO_BATCH: usize = 25;
@@ -54,11 +73,45 @@ impl Crate {
             self.load_mix(id.clone(), cx);
         } else if let Some(p) = self.mixes.get_mut(&id) {
             p.title = title;
-            p.desc = desc;
+            if !desc.is_empty() {
+                p.desc = desc;
+            }
         }
         self.now_playing = false;
-        self.go(View::Mix { id });
+        if !matches!(&self.view, View::Mix { id: cur } if *cur == id) {
+            self.go(View::Mix { id });
+        }
         cx.notify();
+    }
+
+    /// Open a mix's page and play it from the top once its batch is in
+    /// (radio and station buttons). Radio and stations get a fresh batch
+    /// each time, as before they had pages; a mix already playing (not
+    /// paused or finished) just shows.
+    pub(crate) fn play_mix(&mut self, id: String, title: String, desc: String, source: MixSource, cx: &mut Context<Self>) {
+        let live = self.playing_mix() == Some(id.as_str())
+            && self.mixes.get(&id).is_some_and(|p| p.source == source)
+            && self.now.as_ref().is_some_and(|n| !n.paused && !n.finished && !n.stopped);
+        let radio = matches!(source, MixSource::Radio(_) | MixSource::Station(_));
+        self.open_mix(id.clone(), title.clone(), desc, source, cx);
+        if live {
+            self.play_note = None;
+            return;
+        }
+        self.play_intent += 1;
+        let Some(p) = self.mixes.get(&id) else { return };
+        let loading = p.tracks.is_none() && p.error.is_none();
+        let ready = p.tracks.as_ref().is_some_and(|t| !t.is_empty());
+        if ready && !radio {
+            self.mix_autoplay = None;
+            self.start_mix(&id, 0, cx);
+            return;
+        }
+        if !loading {
+            self.load_mix(id.clone(), cx);
+        }
+        self.status = format!("Starting {title}…").into();
+        self.mix_autoplay = Some((id, self.play_intent));
     }
 
     /// Fetch a new batch for the mix.
@@ -164,6 +217,19 @@ impl Crate {
             Ok(_) => p.error = Some("Plex returned no tracks for this mix".into()),
             Err(e) => p.error = Some(format!("{e:#}")),
         }
+        // A radio or station button asked for this mix: play it, unless
+        // something else was played since.
+        if self.mix_autoplay.as_ref().is_some_and(|(m, _)| m == id) {
+            let (_, intent) = self.mix_autoplay.take().expect("checked");
+            let loaded = self.mixes.get(id).is_some_and(|p| p.tracks.is_some());
+            if self.play_intent == intent {
+                if loaded {
+                    self.start_mix(id, 0, cx);
+                } else {
+                    self.status = "".into();
+                }
+            }
+        }
         cx.notify();
     }
 
@@ -186,9 +252,17 @@ impl Crate {
     /// Play the mix from track `i`; radio mixes keep going from their station.
     pub(crate) fn play_mix_from(&mut self, id: &str, i: usize, cx: &mut Context<Self>) {
         if self.playing_mix() == Some(id) {
+            // A play of its own: a fresh batch still loading won't replace it.
+            self.play_intent += 1;
             self.play_from(i, 0, cx);
             return;
         }
+        self.start_mix(id, i, cx);
+    }
+
+    /// Start a new queue from the page's batch at track `i` (even when this
+    /// mix's previous queue is the current one).
+    fn start_mix(&mut self, id: &str, i: usize, cx: &mut Context<Self>) {
         let Some(p) = self.mixes.get(id) else { return };
         let Some(tracks) = p.tracks.clone().filter(|t| !t.is_empty()) else { return };
         let (title, station) = (p.title.clone(), p.station.clone());
@@ -319,6 +393,7 @@ impl Crate {
                         .child(icons::icon(if playing_here.is_some() && self.now.as_ref().is_some_and(|n| !n.paused && !n.finished) { "pause" } else { "play" }, 22.0, t.base))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if this.playing_mix() == Some(id1.as_str()) {
+                                this.play_intent += 1;
                                 this.transport(crate::mpris::Transport::PlayPause, cx);
                             } else {
                                 this.play_mix_from(&id1, 0, cx);
@@ -432,5 +507,26 @@ impl Crate {
             .child(actions)
             .when(has, |d| d.child(head).child(div().px(px(PAD_X)).pt(px(6.0)).pb(px(40.0)).flex().flex_col().children(rows)))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MixSource;
+
+    #[test]
+    fn ids_map_back_to_their_source() {
+        assert_eq!(MixSource::from_id("artist:12"), Some(MixSource::Radio("12".into())));
+        assert_eq!(MixSource::from_id("radio:34"), Some(MixSource::Radio("34".into())));
+        assert_eq!(
+            MixSource::from_id("station:/library/metadata/5/station/crate-a?type=10"),
+            Some(MixSource::Station("/library/metadata/5/station/crate-a?type=10".into()))
+        );
+        assert_eq!(MixSource::from_id("mood:mood=99"), Some(MixSource::Station("query:mood=99".into())));
+        assert_eq!(MixSource::from_id("sonic:7"), Some(MixSource::Sonic("7".into())));
+        assert_eq!(MixSource::from_id("builder:8+similar"), Some(MixSource::Builder { key: "8".into(), similar: true }));
+        assert_eq!(MixSource::from_id("builder:8"), Some(MixSource::Builder { key: "8".into(), similar: false }));
+        assert_eq!(MixSource::from_id("nope"), None);
+        assert_eq!(MixSource::from_id("other:1"), None);
     }
 }

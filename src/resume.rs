@@ -87,6 +87,21 @@ impl Crate {
         }
         self.queue_seq += 1;
         let tracks = s.tracks.clone();
+        // A mix's queue: give back its page (the queue as its batch), so
+        // "Playing from" still opens it.
+        if let Some(id) = s.context_key.as_deref().and_then(|k| k.strip_prefix("mix:"))
+            && let Some(source) = crate::mix::MixSource::from_id(id)
+        {
+            self.mixes.entry(id.to_string()).or_insert_with(|| crate::mix::MixPage {
+                title: s.context.clone(),
+                desc: String::new(),
+                source,
+                station: s.refill.clone(),
+                tracks: Some(tracks.clone()),
+                error: None,
+                load_gen: 0,
+            });
+        }
         self.now = Some(crate::Now::restored(s.context, s.context_key, s.tracks, idx, elapsed, s.refill, s.orig_order, self.queue_seq));
         // Loudness for leveling, fetched in the background like any queue's.
         if self.leveling != crate::theme::Leveling::Off {

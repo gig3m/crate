@@ -224,8 +224,12 @@ struct Crate {
     np_had_lyrics: std::cell::Cell<bool>,
     /// Tracks whose detail fetch failed (until they're fetched again).
     detail_failed: std::collections::HashSet<String>,
-    /// Mix pages by id ("artist:<key>", "mood:<query>", "builder:<key>", "sonic:<album key>").
+    /// Mix pages by id ("artist:<key>", "mood:<query>", "builder:<key>", "sonic:<album key>",
+    /// "radio:<seed key>", "station:<station key>"; see MixSource::from_id).
     mixes: HashMap<String, mix::MixPage>,
+    /// A mix page to play from the top once its batch is in, with the
+    /// play_intent it was asked for under (radio and station buttons).
+    mix_autoplay: Option<(String, u64)>,
     /// Bumped per queue started (Now::queue_id) and per play request, so late
     /// async replies can tell they've been superseded.
     queue_seq: u64,
@@ -836,6 +840,7 @@ impl Crate {
             np_had_lyrics: std::cell::Cell::new(false),
             detail_failed: Default::default(),
             mixes: HashMap::new(),
+            mix_autoplay: None,
             queue_seq: 0,
             play_intent: 0,
             shuffle: false,
