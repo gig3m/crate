@@ -1,6 +1,6 @@
 //! A playlist's page: header, Play / Shuffle, and its tracks (virtualized:
 //! smart playlists run to a thousand tracks). Regular playlists can drop and
-//! reorder tracks (drag the grip, or the row's right-click menu); smart ones
+//! reorder tracks (drag a row, or the row's right-click menu); smart ones
 //! are what their rules say.
 
 use std::sync::Arc;
@@ -664,37 +664,27 @@ impl Crate {
                             .font_weight(FontWeight::MEDIUM)
                             .text_size(px(13.0))
                             .text_color(rgb(if playing { t.accent } else { t.muted }))
+                            .child(div().group_hover("pl-row", |s| s.opacity(0.0)).child(if playing { "▶".to_string() } else { (i + 1).to_string() }))
+                            // On hover the number gives way to a play button.
                             .child(
                                 div()
-                                    .when(reorder && item_id > 0, |d| d.group_hover("pl-row", |s| s.opacity(0.0)))
-                                    .child(if playing { "▶".to_string() } else { (i + 1).to_string() }),
-                            )
-                            .when(reorder && item_id > 0, |d| {
-                                let drag = RowDrag { key: key.clone(), item: item_id, from: i };
-                                let (gt, ga) = (tr.title.clone(), tr.artist.clone());
-                                let (bg, border, text, muted) = (t.raised, t.line, t.text, t.muted);
-                                d.child(
-                                    div()
-                                        .id(("pl-grip", i))
-                                        .absolute()
-                                        .left(px(-6.0))
-                                        .top_0()
-                                        .bottom_0()
-                                        .w(px(30.0))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .opacity(0.0)
-                                        .group_hover("pl-row", |s| s.opacity(1.0))
-                                        .cursor_grab()
-                                        .child(icons::icon("grip", 16.0, t.text2))
-                                        .on_click(|_, _, cx| cx.stop_propagation())
-                                        .on_drag(drag, move |_, _, _, cx| {
-                                            let (title, artist) = (gt.clone(), ga.clone());
-                                            cx.new(|_| DragGhost { title, artist, bg, border, text, muted })
-                                        }),
-                                )
-                            });
+                                    .id(("pl-play", i))
+                                    .absolute()
+                                    .left(px(-6.0))
+                                    .top_0()
+                                    .bottom_0()
+                                    .w(px(30.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .opacity(0.0)
+                                    .group_hover("pl-row", |s| s.opacity(1.0))
+                                    .child(icons::icon("play", 14.0, t.text))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.play_playlist_from(i, false, cx);
+                                    })),
+                            );
                         let row = div()
                             .id(("pl-track", i))
                             .group("pl-row")
@@ -711,7 +701,15 @@ impl Crate {
                             .when(reorder && item_id > 0, |d| {
                                 let (accent, kk) = (t.accent, key.clone());
                                 let (k2, target) = (key.clone(), item_id);
-                                d.drag_over::<RowDrag>(move |st, dr, _, _| {
+                                // The whole row drags (a click without movement still plays).
+                                let drag = RowDrag { key: key.clone(), item: item_id, from: i };
+                                let (gt, ga) = (tr.title.clone(), tr.artist.clone());
+                                let (bg, border, text, muted) = (t.raised, t.line, t.text, t.muted);
+                                d.on_drag(drag, move |_, _, _, cx| {
+                                    let (title, artist) = (gt.clone(), ga.clone());
+                                    cx.new(|_| DragGhost { title, artist, bg, border, text, muted })
+                                })
+                                .drag_over::<RowDrag>(move |st, dr, _, _| {
                                     // A line where the row will land: below
                                     // this one moving down, above moving up.
                                     if dr.key != kk || dr.item == target {

@@ -1,5 +1,5 @@
 //! The full queue: what's played (click to play again), what's playing, and
-//! what's next, which can be reordered (drag the grip), removed or cleared,
+//! what's next, which can be reordered (drag a row), removed or cleared,
 //! plus "stop after this track / album" and Save as playlist. Tracks the
 //! engine has already started loading can't be moved or removed.
 
@@ -192,7 +192,12 @@ impl Crate {
                                 .hover(|d| d.bg(rgb(t.raised)))
                                 .when(editable, |d| {
                                     let accent = t.accent;
-                                    d.drag_over::<QueueDrag>(move |st, dr, _, _| {
+                                    // The whole row drags (a click without movement still plays).
+                                    d.on_drag(QueueDrag { from: i, key: dkey.clone(), queue_id }, move |_, _, _, cx| {
+                                        let title = gtitle.clone();
+                                        cx.new(|_| QueueGhost { title, bg, border, text })
+                                    })
+                                    .drag_over::<QueueDrag>(move |st, dr, _, _| {
                                         if dr.queue_id != queue_id || dr.from == i {
                                             st
                                         } else if dr.from < i {
@@ -223,30 +228,28 @@ impl Crate {
                                         .font_family(MONO)
                                         .text_size(px(12.0))
                                         .text_color(rgb(if playing { t.accent } else { t.muted }))
-                                        .child(div().when(editable, |d| d.group_hover("q-row", |s| s.opacity(0.0))).child(if playing { "▶".to_string() } else { (i + 1).to_string() }))
-                                        .when(editable, |d| {
-                                            d.child(
-                                                div()
-                                                    .id(("q-grip", i))
-                                                    .absolute()
-                                                    .left(px(-6.0))
-                                                    .top_0()
-                                                    .bottom_0()
-                                                    .w(px(30.0))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .opacity(0.0)
-                                                    .group_hover("q-row", |s| s.opacity(1.0))
-                                                    .cursor_grab()
-                                                    .child(icons::icon("grip", 16.0, t.text2))
-                                                    .on_click(|_, _, cx| cx.stop_propagation())
-                                                    .on_drag(QueueDrag { from: i, key: dkey.clone(), queue_id }, move |_, _, _, cx| {
-                                                        let title = gtitle.clone();
-                                                        cx.new(|_| QueueGhost { title, bg, border, text })
-                                                    }),
-                                            )
-                                        }),
+                                        .child(div().when(!playing, |d| d.group_hover("q-row", |s| s.opacity(0.0))).child(if playing { "▶".to_string() } else { (i + 1).to_string() }))
+                                        // On hover the number gives way to a play button
+                                        // (the playing row keeps its marker).
+                                        .when(!playing, |d| d.child(
+                                            div()
+                                                .id(("q-play", i))
+                                                .absolute()
+                                                .left(px(-6.0))
+                                                .top_0()
+                                                .bottom_0()
+                                                .w(px(30.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .opacity(0.0)
+                                                .group_hover("q-row", |s| s.opacity(1.0))
+                                                .child(icons::icon("play", 14.0, t.text))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.play_from(i, 0, cx);
+                                                })),
+                                        )),
                                 )
                                 .child(div().flex_none().child(art))
                                 .child(
