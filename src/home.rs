@@ -101,7 +101,9 @@ impl Crate {
             .p(px(24.0))
             .flex()
             .gap(px(24.0))
-            .items_end()
+            // Very narrow: the cover above the text.
+            .when(self.content_w < 440.0, |d| d.flex_col().items_start())
+            .when(self.content_w >= 440.0, |d| d.items_end())
             .bg(bg)
             .border_1()
             .border_color(rgb(t.border));
@@ -109,8 +111,10 @@ impl Crate {
             Some((album, at)) => {
                 let ix = self.albums.iter().position(|a| a.rating_key == album.rating_key);
                 let sub = [album.artist.clone(), album.year.clone()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
-                hero = hero.child(div().shadow_lg().child(self.cover(&album.thumb, 168.0, 6.0, t))).child(
+                let art = if self.content_w < 560.0 { 112.0 } else { 168.0 };
+                hero = hero.child(div().flex_none().shadow_lg().child(self.cover(&album.thumb, art, 6.0, t))).child(
                     div()
+                        .flex_1()
                         .min_w_0()
                         .flex()
                         .flex_col()
@@ -121,10 +125,11 @@ impl Crate {
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_size(px(11.0))
                                 .text_color(rgb(t.text2))
+                                .truncate()
                                 .child(format!("JUMP BACK IN · PLAYED {}", ago(at).to_uppercase())),
                         )
                         .child(div().text_size(px(34.0)).font_weight(FontWeight::BOLD).text_color(rgb(t.text_strong)).truncate().child(album.title.clone()))
-                        .child(div().text_size(px(15.0)).text_color(rgb(t.text2)).child(sub))
+                        .child(div().text_size(px(15.0)).text_color(rgb(t.text2)).truncate().child(sub))
                         .child(
                             div()
                                 .mt(px(8.0))
@@ -192,6 +197,7 @@ impl Crate {
         div()
             .id(id)
             .flex_1()
+            .min_w_0()
             .rounded(px(14.0))
             .p(px(18.0))
             .bg(rgb(t.raised))
@@ -206,8 +212,9 @@ impl Crate {
                     .flex()
                     .justify_between()
                     .items_center()
-                    .child(div().text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).child(title))
-                    .child(icons::icon(ic, 20.0, color)),
+                    .gap(px(8.0))
+                    .child(div().min_w_0().text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).truncate().child(title))
+                    .child(div().flex_none().child(icons::icon(ic, 20.0, color))),
             )
             .child(div().text_size(px(13.0)).text_color(rgb(t.muted)).child(blurb))
     }
@@ -394,12 +401,11 @@ impl Crate {
 
         // Hero + the two radio cards.
         let library_radio = Self::library_radio(home);
+        let wide = self.content_w >= 900.0;
         let right = div()
-            .w(px(320.0))
-            .flex_none()
             .flex()
-            .flex_col()
             .gap(px(16.0))
+            .when(wide, |d| d.w(px(320.0)).flex_none().flex_col())
             .child({
                 let c = Self::side_card(
                     "card-radio",
@@ -427,7 +433,7 @@ impl Crate {
                 .hover(|d| d.border_color(rgb(t.line)))
                 .on_click(cx.listener(|this, _, _, cx| this.open_sonic(cx))),
             );
-        let top = div().flex().gap(px(16.0)).child(self.hero(t, cx)).child(right);
+        let top = div().flex().when(!wide, |d| d.flex_col()).gap(px(16.0)).child(self.hero(t, cx)).child(right);
 
         // Stations.
         let stations: Vec<_> = home
@@ -517,7 +523,25 @@ impl Crate {
             .flex_col()
             .gap(px(14.0))
             .child(Self::section_head("Stations", Some(all_stations), t))
-            .child(div().flex().gap(px(12.0)).children(stations))
+            .child({
+                let per_row = match self.content_w {
+                    w if w < 440.0 => 1,
+                    w if w < 760.0 => 2,
+                    _ => 4,
+                };
+                let mut rows = div().flex().flex_col().gap(px(12.0));
+                // A short last row keeps the columns of the rows above it; a single row fills.
+                let wraps = stations.len() > per_row;
+                let mut it = stations.into_iter().peekable();
+                while it.peek().is_some() {
+                    let row: Vec<_> = it.by_ref().take(per_row).collect();
+                    let pad = if wraps { per_row - row.len() } else { 0 };
+                    rows = rows.child(
+                        div().flex().gap(px(12.0)).children(row).children((0..pad).map(|_| div().flex_1().min_w_0())),
+                    );
+                }
+                rows
+            })
             .child(
                 div()
                     .flex()

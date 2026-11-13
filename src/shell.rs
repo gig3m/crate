@@ -222,6 +222,8 @@ impl Crate {
                 }))
         };
         let server = self.home.as_ref().map(|h| h.server.to_lowercase()).unwrap_or_else(|| "plex".into());
+        // Narrow: the pill keeps the server name, the search box drops its key hint.
+        let narrow = self.content_w < 760.0;
         div()
             .px(px(PAD_X))
             .pt(px(20.0))
@@ -235,6 +237,7 @@ impl Crate {
                 div()
                     .id("search-trigger")
                     .flex_1()
+                    .min_w_0()
                     .max_w(px(520.0))
                     .h(px(36.0))
                     .px(px(12.0))
@@ -248,8 +251,8 @@ impl Crate {
                     .cursor_pointer()
                     .hover(|d| d.border_color(rgb(t.line)))
                     .child(icons::icon("search", 16.0, t.muted))
-                    .child(div().flex_1().text_size(px(14.0)).text_color(rgb(t.muted)).child("Search, play, or run a command"))
-                    .child(
+                    .child(div().flex_1().min_w_0().text_size(px(14.0)).text_color(rgb(t.muted)).truncate().child("Search, play, or run a command"))
+                    .when(!narrow, |d| d.child(
                         div()
                             .px(px(6.0))
                             .py(px(1.0))
@@ -260,12 +263,13 @@ impl Crate {
                             .text_size(px(11.0))
                             .text_color(rgb(t.text2))
                             .child("Ctrl K"),
-                    )
+                    ))
                     .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx))),
             )
-            .child(div().flex_1())
             .child(
                 div()
+                    .flex_none()
+                    .ml_auto()
                     .h(px(36.0))
                     .px(px(12.0))
                     .flex()
@@ -280,7 +284,7 @@ impl Crate {
                     .text_size(px(12.0))
                     .text_color(rgb(t.text2))
                     .child(div().size(px(8.0)).rounded(px(4.0)).bg(rgb(if self.home.is_some() { t.healthy } else { t.muted })))
-                    .child(format!("{server} · {}", self.stream_mode())),
+                    .child(if narrow { server } else { format!("{server} · {}", self.stream_mode()) }),
             )
             .child(self.settings_menu(t, cx))
             .into_any_element()
