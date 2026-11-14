@@ -1222,6 +1222,7 @@ dependencies = [
  "symphonia-core",
  "tokio",
  "toml 0.8.23",
+ "zbus 5.19.0",
 ]
 
 [[package]]

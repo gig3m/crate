@@ -1024,6 +1024,60 @@ struct Rt {
 
 type Live = (pw::stream::StreamBox<'static>, pw::stream::StreamListener<Rt>);
 
+/// PipeWire's realtime module (loaded into every client) copies the
+/// realtime portal's (or rtkit's) CPU cap into this process as
+/// RLIMIT_RTTIME. Without rtkit the portal answers 0 µs, and with a hard
+/// limit of 0 the kernel SIGKILLs any thread, realtime or not, the moment one
+/// of its CPU timers fires: Crate was killed that way mid-song
+/// (posix_cpu_timers_work). So the module loads only when the portal or
+/// rtkit says realtime is on offer (a cap above 0); any other answer, or none
+/// within a few seconds, leaves it off. Losing realtime is mild; the kill
+/// isn't. Asked once per run.
+fn realtime_unavailable() -> bool {
+    static ANSWER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ANSWER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("rt-probe".into())
+            .spawn(move || {
+                let cap = |conn: zbus::Result<zbus::blocking::Connection>, dest: &str, path: &str, iface: &str| -> zbus::Result<i64> {
+                    let conn = conn?;
+                    zbus::blocking::Proxy::new(&conn, dest, path, iface)?.get_property::<i64>("RTTimeUSecMax")
+                };
+                let portal = cap(
+                    zbus::blocking::Connection::session(),
+                    "org.freedesktop.portal.Desktop",
+                    "/org/freedesktop/portal/desktop",
+                    "org.freedesktop.portal.Realtime",
+                );
+                // No portal answer: PipeWire would ask rtkit directly.
+                let max = match portal {
+                    Ok(n) => Ok(n),
+                    Err(_) => cap(
+                        zbus::blocking::Connection::system(),
+                        "org.freedesktop.RealtimeKit1",
+                        "/org/freedesktop/RealtimeKit1",
+                        "org.freedesktop.RealtimeKit1",
+                    ),
+                };
+                tx.send(max).ok();
+            })
+            .ok();
+        match rx.recv_timeout(std::time::Duration::from_secs(4)) {
+            Ok(Ok(n)) if n > 0 => false,
+            answer => {
+                let why = match answer {
+                    Ok(Ok(n)) => format!("realtime CPU cap {n} µs"),
+                    Ok(Err(e)) => format!("no portal or rtkit answer: {e}"),
+                    Err(_) => "no answer in 4 s".into(),
+                };
+                eprintln!("[crate] PipeWire realtime module off ({why})");
+                true
+            }
+        }
+    })
+}
+
 fn pw_thread(
     cmd_rx: pw::channel::Receiver<Cmd>,
     cons: Arc<Mutex<rtrb::Consumer<f32>>>,
@@ -1033,8 +1087,19 @@ fn pw_thread(
 ) -> anyhow::Result<()> {
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
-    let context = pw::context::ContextRc::new(&mainloop, None)?;
+    // Without realtime on offer, keep PipeWire's realtime module out: see
+    // realtime_unavailable().
+    let ctx_props = realtime_unavailable().then(|| properties! { "module.rt" => "false" });
+    let context = pw::context::ContextRc::new(&mainloop, ctx_props)?;
     let core = context.connect_rc(None)?;
+    if let Ok(l) = std::fs::read_to_string("/proc/self/limits")
+        && let Some(line) = l.lines().find(|l| l.starts_with("Max realtime timeout"))
+        && line.split_whitespace().skip(3).take(2).any(|v| v == "0")
+    {
+        // Inherited from whatever launched Crate, or set by PipeWire anyway:
+        // a hard limit can't be raised again from here.
+        eprintln!("[crate] warning: realtime CPU limit is 0 µs, so a CPU timer could get Crate killed ({line})");
+    }
 
     let live: std::rc::Rc<std::cell::RefCell<Option<Live>>> = Default::default();
     // True between flush(drain) and the drained callback. PipeWire's

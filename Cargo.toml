@@ -34,3 +34,5 @@ symphonia = { version = "0.6.1", features = ["flac", "alac", "isomp4", "mp3", "a
 symphonia-core = "0.6.1"
 rtrb = "0.4.1"
 mpris-server = { version = "0.11.0", features = ["tokio"] }
+# Asks the desktop portal whether realtime scheduling is available (audio).
+zbus = "5.19"
