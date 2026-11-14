@@ -271,6 +271,7 @@ impl Crate {
         };
         let a1 = album.clone();
         let a2 = album.clone();
+        let album_live = self.context_play(&album.rating_key).0;
         let actions = div()
             .px(px(PAD_X))
             .pt(px(8.0))
@@ -292,9 +293,13 @@ impl Crate {
                     // Live once the track list has loaded.
                     .when(tracks.is_some(), |d| d.cursor_pointer().hover(|d| d.opacity(0.9)))
                     .when(tracks.is_none(), |d| d.opacity(0.5))
-                    .child(icons::icon("play", 22.0, t.base))
+                    .child(icons::icon(if album_live { "pause" } else { "play" }, 22.0, t.base))
+                    // Playing (or paused) from this album: play/pause; else start it.
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(tr) = this.album_tracks() {
+                        if this.context_play(&a1.rating_key).1 {
+                            this.play_intent += 1;
+                            this.transport(crate::mpris::Transport::PlayPause, cx);
+                        } else if let Some(tr) = this.album_tracks() {
                             this.play_tracks(a1.clone(), tr, 0, cx);
                         }
                     })),
@@ -449,7 +454,7 @@ impl Crate {
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_size(px(13.0))
                                     .text_color(rgb(if playing { t.accent } else { t.muted }))
-                                    .child(if playing { "▶".to_string() } else { num.to_string() }),
+                                    .child(if playing { Self::now_marker(t.accent).into_any_element() } else { div().child(num.to_string()).into_any_element() }),
                             )
                             .child(
                                 div()

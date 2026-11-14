@@ -80,6 +80,8 @@ enum View {
 use theme::Theme;
 
 pub(crate) const SIDEBAR_W: f32 = 240.0;
+/// The play icon in a track row (the playing marker and the hover button).
+pub(crate) const ROW_PLAY_ICON: f32 = 15.4;
 pub(crate) const PAD_X: f32 = 36.0;
 
 struct Crate {
@@ -1466,6 +1468,24 @@ impl Crate {
                 this.play_tracks(album, tracks, 0, cx);
             }
         });
+    }
+
+    /// For a page's play button: `(sounding, here)`. `here` means the queue
+    /// was started from `context_key`, so the button is play/pause (which
+    /// also carries on after a stop or "stop after this track", as the
+    /// player bar does); sounding means it's playing now, so it shows pause.
+    pub(crate) fn context_play(&self, context_key: &str) -> (bool, bool) {
+        match self.now.as_ref().filter(|n| n.context_key.as_deref() == Some(context_key)) {
+            Some(n) => (!n.paused && !n.finished && !n.stopped, true),
+            None => (false, false),
+        }
+    }
+
+    /// The playing row's marker in a track list's number column: the play
+    /// icon, centred where the row's hover play button sits (that button is
+    /// 30 px wide starting 6 px left of the column), so the two line up.
+    pub(crate) fn now_marker(color: u32) -> gpui::Div {
+        div().w(px(18.0)).flex().justify_center().child(crate::icons::icon("play", ROW_PLAY_ICON, color))
     }
 
     fn play_tracks(&mut self, album: Album, tracks: Vec<Track>, start: usize, cx: &mut Context<Self>) {

@@ -447,7 +447,7 @@ impl Crate {
                         .font_weight(FontWeight::MEDIUM)
                         .text_size(px(13.0))
                         .text_color(rgb(if playing { t.accent } else { t.muted }))
-                        .child(if playing { "▶".to_string() } else { (i + 1).to_string() }),
+                        .child(if playing { Self::now_marker(t.accent).into_any_element() } else { div().child((i + 1).to_string()).into_any_element() }),
                 )
                 .child(
                     div()

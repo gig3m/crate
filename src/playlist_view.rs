@@ -546,6 +546,8 @@ impl Crate {
             t,
             cx,
         );
+        let here_ck = format!("playlist:{key}");
+        let here_live = self.context_play(&here_ck).0;
         let actions = div()
             .px(px(PAD_X))
             .pb(px(16.0))
@@ -564,8 +566,16 @@ impl Crate {
                     .shadow_lg()
                     .cursor_pointer()
                     .hover(|d| d.opacity(0.9))
-                    .child(icons::icon("play", 22.0, t.base))
-                    .on_click(cx.listener(|this, _, _, cx| this.play_playlist_from(0, false, cx))),
+                    .child(icons::icon(if here_live { "pause" } else { "play" }, 22.0, t.base))
+                    // Playing (or paused) from here: play/pause; else start it.
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.context_play(&here_ck).1 {
+                            this.play_intent += 1;
+                            this.transport(crate::mpris::Transport::PlayPause, cx);
+                        } else {
+                            this.play_playlist_from(0, false, cx);
+                        }
+                    })),
             )
             .child(
                 div()
@@ -672,7 +682,11 @@ impl Crate {
                             .font_weight(FontWeight::MEDIUM)
                             .text_size(px(13.0))
                             .text_color(rgb(if playing { t.accent } else { t.muted }))
-                            .child(div().group_hover("pl-row", |s| s.opacity(0.0)).child(if playing { "▶".to_string() } else { (i + 1).to_string() }))
+                            .child(div().group_hover("pl-row", |s| s.opacity(0.0)).child(if playing {
+                                Self::now_marker(t.accent).into_any_element()
+                            } else {
+                                div().child((i + 1).to_string()).into_any_element()
+                            }))
                             // On hover the number gives way to a play button.
                             .child(
                                 div()
@@ -687,7 +701,7 @@ impl Crate {
                                     .justify_center()
                                     .opacity(0.0)
                                     .group_hover("pl-row", |s| s.opacity(1.0))
-                                    .child(icons::icon("play", 14.0, t.text))
+                                    .child(icons::icon("play", crate::ROW_PLAY_ICON, t.text))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.stop_propagation();
                                         this.play_playlist_from(i, false, cx);

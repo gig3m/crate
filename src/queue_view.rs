@@ -250,7 +250,11 @@ impl Crate {
                                         .font_family(MONO)
                                         .text_size(px(12.0))
                                         .text_color(rgb(if playing { t.accent } else { t.muted }))
-                                        .child(div().when(!playing, |d| d.group_hover("q-row", |s| s.opacity(0.0))).child(if playing { "▶".to_string() } else { (i + 1).to_string() }))
+                                        .child(div().when(!playing, |d| d.group_hover("q-row", |s| s.opacity(0.0))).child(if playing {
+                                            Self::now_marker(t.accent).into_any_element()
+                                        } else {
+                                            div().child((i + 1).to_string()).into_any_element()
+                                        }))
                                         // On hover the number gives way to a play button
                                         // (the playing row keeps its marker).
                                         .when(!playing, |d| d.child(
@@ -266,7 +270,7 @@ impl Crate {
                                                 .justify_center()
                                                 .opacity(0.0)
                                                 .group_hover("q-row", |s| s.opacity(1.0))
-                                                .child(icons::icon("play", 14.0, t.text))
+                                                .child(icons::icon("play", crate::ROW_PLAY_ICON, t.text))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     cx.stop_propagation();
                                                     this.play_from(i, 0, cx);
