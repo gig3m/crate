@@ -451,7 +451,7 @@ impl Crate {
                                     .flex_col()
                                     .gap(px(2.0))
                                     .child(div().text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(white(1.0)).truncate().child(q.title.clone()))
-                                    .child(div().text_size(px(12.0)).text_color(white(0.66)).truncate().child(q.artist.clone())),
+                                    .child(div().text_size(px(12.0)).text_color(white(0.66)).flex().child(self.artist_link("ar", q, cx))),
                             )
                             .when(radio, |d| d.child(div().font_family(MONO).text_size(px(10.0)).text_color(rgb(t.healthy)).child("RADIO")))
                             .when(!radio && self.dj_keys.contains(&(n.queue_id, q.rating_key.clone())), |d| d.child(div().font_family(MONO).text_size(px(10.0)).text_color(rgb(t.discovery)).child("DJ")))

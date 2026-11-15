@@ -471,10 +471,10 @@ impl Crate {
                                         .truncate()
                                         .child(tr.title.clone()),
                                 )
-                                .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(tr.artist.clone())),
+                                .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).flex().child(self.artist_link("ar", tr, cx))),
                         ),
                 )
-                .child(div().w(px(220.0)).text_size(px(13.0)).text_color(rgb(t.text2)).truncate().child(tr.album_title.clone()))
+                .child(div().w(px(220.0)).text_size(px(13.0)).text_color(rgb(t.text2)).flex().child(self.album_link("al", tr, cx)))
                 .child(self.track_stars(format!("mix-r-{i}"), tr, t, cx))
                 .child(div().w(px(64.0)).flex().justify_end().font_family(MONO).text_size(px(13.0)).text_color(rgb(t.muted)).child(fmt_ms(tr.duration_ms)))
                 .child(div().w(px(28.0)).flex().justify_center().child(self.playlist_menu_icon(("mix-add", i), vec![tr.rating_key.clone()], tr.title.clone(), t.muted, cx)))

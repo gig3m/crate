@@ -197,7 +197,7 @@ impl Crate {
                     .flex_col()
                     .gap(px(2.0))
                     .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(if playing { t.accent } else { t.text })).truncate().child(tr.title.clone()))
-                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(format!("{} · {}", tr.artist, tr.album_title))),
+                    .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).child(self.track_byline("by", tr, cx))),
             )
             .child(self.track_stars(format!("trow-r-{i}"), tr, t, cx))
             .child(div().w(px(140.0)).flex_none().flex().justify_end().whitespace_nowrap().font_family(MONO).text_size(px(12.0)).text_color(rgb(t.text2)).child(right))

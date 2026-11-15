@@ -53,7 +53,10 @@ impl Crate {
                     .flex_col()
                     .gap(px(4.0))
                     .child(div().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).truncate().child(title))
-                    .child(div().text_size(px(12.0)).text_color(rgb(t.text2)).truncate().child(sub)),
+                    .child(match (now, track) {
+                        (Some(_), Some(tr)) => div().text_size(px(12.0)).text_color(rgb(t.text2)).child(self.track_byline("bar-by", tr, cx)),
+                        _ => div().text_size(px(12.0)).text_color(rgb(t.text2)).truncate().child(sub),
+                    }),
             );
 
         // Center: transport and seek bar.

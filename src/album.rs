@@ -428,7 +428,7 @@ impl Crate {
                         });
                         let num = if tr.track_no > 0 { tr.track_no as usize } else { i + 1 };
                         // The track's own artist, only where it isn't the album's.
-                        let own_artist = (!tr.artist.is_empty() && tr.artist != album.artist).then(|| tr.artist.clone());
+                        let own_artist = (!tr.artist.is_empty() && tr.artist != album.artist).then(|| self.artist_link("ar", tr, cx));
                         let playing = playing_here == Some(i);
                         let at_cursor = self.cursor == Some(i);
                         let plays = detail.as_ref().and_then(|d| d.stats.get(&tr.rating_key)).map(|s| s.0).unwrap_or(0);
@@ -471,7 +471,7 @@ impl Crate {
                                             .truncate()
                                             .child(tr.title.clone()),
                                     )
-                                    .children(own_artist.map(|a| div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(a))),
+                                    .children(own_artist.map(|a| div().text_size(px(12.0)).text_color(rgb(t.muted)).flex().child(a))),
                             )
                             .child(div().w(px(110.0)).child({
                                 let k = tr.rating_key.clone();
@@ -571,7 +571,7 @@ impl Crate {
                         .when(ix.is_some(), |d| d.cursor_pointer())
                         .child(self.cover_or_mark(&a.thumb, &a.rating_key, 104.0, 6.0))
                         .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).truncate().child(a.title.clone()))
-                        .child(div().text_size(px(11.0)).text_color(rgb(t.muted)).truncate().child(a.artist.clone()))
+                        .child(div().text_size(px(11.0)).text_color(rgb(t.muted)).flex().child(Self::album_artist_link("ar", &a, cx)))
                         .when_some(ix, |d, ix| d.on_click(cx.listener(move |this, _, _, cx| this.open_album(ix, cx))))
                 })))
         });

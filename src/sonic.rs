@@ -288,7 +288,7 @@ impl Crate {
                     .gap(px(5.0))
                     .child(self.cover_or_mark(&tr.thumb, &tr.rating_key, 96.0, 6.0))
                     .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(t.text_strong)).truncate().child(tr.title.clone()))
-                    .child(div().text_size(px(11.0)).text_color(rgb(t.muted)).truncate().child(tr.artist.clone()))
+                    .child(div().text_size(px(11.0)).text_color(rgb(t.muted)).flex().child(self.artist_link("ar", &tr, cx)))
                     .id(("step", i))
             })
             .collect();

@@ -110,7 +110,6 @@ impl Crate {
         match last {
             Some((album, at)) => {
                 let ix = self.albums.iter().position(|a| a.rating_key == album.rating_key);
-                let sub = [album.artist.clone(), album.year.clone()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
                 let art = if self.content_w < 560.0 { 112.0 } else { 168.0 };
                 hero = hero.child(div().flex_none().shadow_lg().child(self.cover(&album.thumb, art, 6.0, t))).child(
                     div()
@@ -129,7 +128,15 @@ impl Crate {
                                 .child(format!("JUMP BACK IN · PLAYED {}", ago(at).to_uppercase())),
                         )
                         .child(div().text_size(px(34.0)).font_weight(FontWeight::BOLD).text_color(rgb(t.text_strong)).truncate().child(album.title.clone()))
-                        .child(div().text_size(px(15.0)).text_color(rgb(t.text2)).truncate().child(sub))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .text_size(px(15.0))
+                                .text_color(rgb(t.text2))
+                                .when(!album.artist.is_empty(), |d| d.child(Self::album_artist_link("hero-ar", &album, cx)))
+                                .when(!album.year.is_empty(), |d| d.child(div().flex_none().whitespace_nowrap().child(if album.artist.is_empty() { album.year.clone() } else { format!("\u{a0}·\u{a0}{}", album.year) }))),
+                        )
                         .child(
                             div()
                                 .mt(px(8.0))

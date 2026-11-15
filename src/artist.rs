@@ -198,7 +198,11 @@ impl Crate {
                             .flex_col()
                             .gap(px(2.0))
                             .child(div().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.text_strong)).truncate().child(tr.title.clone()))
-                            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(album_title.clone())),
+                            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).flex().child({
+                                let k = album_key.clone();
+                                let known = self.albums.iter().any(|a| a.rating_key == k);
+                                Self::link_text("al", album_title.clone(), cx, known.then_some(move |this: &mut Self, _: &gpui::ClickEvent, cx: &mut Context<Self>| this.open_album_key(&k, cx)))
+                            })),
                     )
                     .child(self.track_stars(format!("pop-r-{n}"), &tr, t, cx))
                     .child(
@@ -399,7 +403,15 @@ impl Crate {
                                         .flex_col()
                                         .gap(px(2.0))
                                         .child(div().text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.text_strong)).truncate().child(a.title.clone()))
-                                        .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(if a.year.is_empty() { a.artist.clone() } else { format!("{} · {}", a.artist, a.year) })),
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex()
+                                                .text_size(px(12.0))
+                                                .text_color(rgb(t.muted))
+                                                .child(Self::album_artist_link("ar", &a, cx))
+                                                .when(!a.year.is_empty(), |d| d.child(div().flex_none().whitespace_nowrap().child(format!("\u{a0}·\u{a0}{}", a.year)))),
+                                        ),
                                 )
                                 .on_click(cx.listener(move |this, _, _, cx| this.open_album(i, cx)))
                         })),

@@ -7,7 +7,7 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
 };
 
-use crate::{Crate, PAD_X, icons, plex::ArtRequest, shell::MONO, theme::Theme};
+use crate::{Crate, PAD_X, icons, plex::{Album, ArtRequest}, shell::MONO, theme::Theme};
 
 pub(crate) const GRID_GAP_X: f32 = 18.0;
 pub(crate) const GRID_GAP_Y: f32 = 22.0;
@@ -433,7 +433,7 @@ impl Crate {
                             .gap(px(6.0))
                             .text_size(px(12.0))
                             .text_color(rgb(t.muted))
-                            .child(div().min_w_0().truncate().child(a.artist.clone()))
+                            .child(div().min_w_0().flex().child(self.lib_artist_link(ix, &a, cx)))
                             .child(div().flex_none().font_family(MONO).text_size(px(11.0)).child(a.year.clone())),
                     )
                     .on_click({
@@ -443,6 +443,26 @@ impl Crate {
             );
         }
         div().h(px(self.row_h())).pl(px(PAD_X)).flex().gap(px(GRID_GAP_X)).children(cards)
+    }
+
+    /// A card's or row's artist link. While selecting (Ctrl+click, or once
+    /// anything is selected) a click on it selects the album like the rest
+    /// of the card instead of leaving the page.
+    fn lib_artist_link(&self, ix: usize, a: &Album, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let (k, n, album) = (a.artist_key.clone(), a.artist.clone(), a.rating_key.clone());
+        Self::link_text(
+            "ar",
+            a.artist.clone(),
+            cx,
+            (!k.is_empty()).then_some(move |this: &mut Self, ev: &gpui::ClickEvent, cx: &mut Context<Self>| {
+                let m = ev.modifiers();
+                if m.control || m.platform || !this.selection.is_empty() {
+                    this.album_click(ix, &album, ev, cx);
+                } else {
+                    this.open_artist_link(k.clone(), n.clone(), cx);
+                }
+            }),
+        )
     }
 
     /// Ctrl+click selects; once something is selected, a plain click does too.
@@ -487,7 +507,7 @@ impl Crate {
             .child(div().w(px(18.0)).flex().justify_center().when(selected, |d| d.child(crate::icons::icon("check", 14.0, t.accent))))
             .child(self.cover_or_mark(&a.thumb, &a.rating_key, 44.0, 4.0))
             .child(div().flex_1().min_w_0().text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(rgb(t.text_strong)).truncate().child(a.title.clone()))
-            .child(div().w(px(260.0)).min_w_0().text_size(px(13.0)).text_color(rgb(t.text2)).truncate().child(a.artist.clone()))
+            .child(div().w(px(260.0)).min_w_0().text_size(px(13.0)).text_color(rgb(t.text2)).flex().child(self.lib_artist_link(ix, &a, cx)))
             .child(div().w(px(56.0)).font_family(MONO).text_size(px(12.0)).text_color(rgb(t.muted)).child(a.year.clone()))
             .child(div().w(px(20.0)).when(kept, |d| d.child(crate::icons::icon("offline", 13.0, t.healthy))))
             .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| this.album_click(ix, &key, ev, cx)));

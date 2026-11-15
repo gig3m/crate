@@ -788,10 +788,10 @@ impl Crate {
                                                     .truncate()
                                                     .child(tr.title.clone()),
                                             )
-                                            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).truncate().child(tr.artist.clone())),
+                                            .child(div().text_size(px(12.0)).text_color(rgb(t.muted)).flex().child(this.artist_link("ar", &tr, cx))),
                                     ),
                             )
-                            .child(div().w(px(220.0)).text_size(px(13.0)).text_color(rgb(t.text2)).truncate().child(tr.album_title.clone()))
+                            .child(div().w(px(220.0)).text_size(px(13.0)).text_color(rgb(t.text2)).flex().child(this.album_link("al", &tr, cx)))
                             .child(this.track_stars(format!("pl-r-{i}"), &tr, &t, cx))
                             .child(
                                 div()

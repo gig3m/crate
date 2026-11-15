@@ -1488,6 +1488,105 @@ impl Crate {
         div().w(px(18.0)).flex().justify_center().child(crate::icons::icon("play", ROW_PLAY_ICON, color))
     }
 
+    /// The artist page a track's artist name opens: the track's own artist
+    /// when the library has them (compilations, soundtracks), else the
+    /// album's. `(key, name)`; None when that artist isn't in the library.
+    pub(crate) fn track_artist(&self, tr: &Track) -> Option<(String, String)> {
+        let album_artist = || {
+            self.albums
+                .iter()
+                .find(|a| a.rating_key == tr.album_key && !a.artist_key.is_empty())
+                .map(|a| (a.artist_key.clone(), a.artist.clone()))
+        };
+        if tr.artist.is_empty() || tr.artist == tr.album_artist || tr.album_artist.is_empty() {
+            return album_artist();
+        }
+        // Not the album's artist and not in the library: no page to open
+        // (falling back to the album's would link "Foo" to Various Artists).
+        self.albums
+            .iter()
+            .find(|a| a.artist == tr.artist && !a.artist_key.is_empty())
+            .map(|a| (a.artist_key.clone(), tr.artist.clone()))
+    }
+
+    /// Open an artist from a name in a list; leaves Now Playing, as search does.
+    pub(crate) fn open_artist_link(&mut self, key: String, name: String, cx: &mut Context<Self>) {
+        self.now_playing = false;
+        // The link keeps its press from the root, which would otherwise
+        // take focus back from a text box the new page no longer shows.
+        self.refocus = true;
+        if matches!(&self.view, View::Artist { key: k, .. } if *k == key) {
+            cx.notify();
+            return;
+        }
+        self.open_artist(key, name, cx);
+    }
+
+    /// Open an album by key from a name in a list.
+    pub(crate) fn open_album_key(&mut self, album_key: &str, cx: &mut Context<Self>) {
+        let Some(ix) = self.albums.iter().position(|a| a.rating_key == album_key) else { return };
+        self.now_playing = false;
+        self.refocus = true;
+        if matches!(&self.view, View::Album { ix: cur, .. } if *cur == ix) {
+            cx.notify();
+            return;
+        }
+        self.open_album(ix, cx);
+    }
+
+    /// A name inside a clickable row that opens a page: underlined on hover,
+    /// and its clicks and presses stay here, so the row neither plays nor
+    /// arms a drag. Plain text when `on` is None. Takes the parent's text
+    /// size and colour.
+    pub(crate) fn link_text(
+        id: impl Into<gpui::SharedString>,
+        text: impl Into<gpui::SharedString>,
+        cx: &mut Context<Self>,
+        on: Option<impl Fn(&mut Self, &gpui::ClickEvent, &mut Context<Self>) + 'static>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let d = div().id(id.into()).min_w_0().truncate().child(text.into());
+        match on {
+            None => d,
+            Some(f) => d
+                .cursor_pointer()
+                .hover(|d| d.underline())
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, ev, _, cx| {
+                    cx.stop_propagation();
+                    f(this, ev, cx);
+                })),
+        }
+    }
+
+    /// A track's artist name, linked to the artist's page.
+    pub(crate) fn artist_link(&self, id: impl Into<gpui::SharedString>, tr: &Track, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let to = self.track_artist(tr);
+        Self::link_text(id, tr.artist.clone(), cx, to.map(|(k, n)| move |this: &mut Self, _: &gpui::ClickEvent, cx: &mut Context<Self>| this.open_artist_link(k.clone(), n.clone(), cx)))
+    }
+
+    /// A track's album title, linked to the album's page.
+    pub(crate) fn album_link(&self, id: impl Into<gpui::SharedString>, tr: &Track, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let key = tr.album_key.clone();
+        let known = !key.is_empty() && self.albums.iter().any(|a| a.rating_key == key);
+        Self::link_text(id, tr.album_title.clone(), cx, known.then_some(move |this: &mut Self, _: &gpui::ClickEvent, cx: &mut Context<Self>| this.open_album_key(&key, cx)))
+    }
+
+    /// An album's artist name, linked to the artist's page.
+    pub(crate) fn album_artist_link(id: impl Into<gpui::SharedString>, a: &Album, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let (k, n) = (a.artist_key.clone(), a.artist.clone());
+        Self::link_text(id, a.artist.clone(), cx, (!k.is_empty()).then_some(move |this: &mut Self, _: &gpui::ClickEvent, cx: &mut Context<Self>| this.open_artist_link(k.clone(), n.clone(), cx)))
+    }
+
+    /// "Artist · Album" with each part linked. Set text size and colour on
+    /// the parent; this row truncates each part to fit.
+    pub(crate) fn track_byline(&self, id: &str, tr: &Track, cx: &mut Context<Self>) -> gpui::Div {
+        let mut d = div().min_w_0().flex().overflow_hidden().child(self.artist_link(format!("{id}-ar"), tr, cx));
+        if !tr.album_title.is_empty() {
+            d = d.child(div().flex_none().whitespace_nowrap().child("\u{a0}·\u{a0}")).child(self.album_link(format!("{id}-al"), tr, cx));
+        }
+        d
+    }
+
     fn play_tracks(&mut self, album: Album, tracks: Vec<Track>, start: usize, cx: &mut Context<Self>) {
         self.start_queue(album.title, Some(album.rating_key), tracks, start, cx);
     }
